@@ -1,0 +1,30 @@
+/* Tailwind(CDN)で表現しきれない部分のみ最小限に定義する。
+   本体の配色・余白・角丸などは index.html 側のユーティリティクラスで完結させる。 */
+
+.delay-highlight {
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.8; }
+}
+
+.accordion-content {
+  transition: all 0.4s ease-in-out;
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+}
+.accordion-content.open {
+  max-height: 8000px;
+  opacity: 1;
+}
+
+.line-through-double {
+  text-decoration: line-through double;
+  text-decoration-color: #94a3b8;
+}
+
+html {
+  scroll-behavior: smooth;
+}

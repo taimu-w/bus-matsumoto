@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>横田信大循環線 | リアルタイム運行状況</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="bg-[#f0f4f8] text-gray-900" style="font-family:'Noto Sans JP',sans-serif;">
+
+<!-- ヘッダー -->
+<header class="bg-blue-800 text-white shadow-xl sticky top-0 z-40">
+  <div class="max-w-3xl mx-auto px-4 py-3 flex justify-between items-center">
+    <div>
+      <h1 class="text-xl font-bold tracking-tight">横田信大循環線</h1>
+      <p class="text-[10px] opacity-90 font-bold uppercase tracking-widest">Realtime Timetable</p>
+    </div>
+    <button id="refresh-btn" class="bg-white text-blue-800 p-2 rounded-lg hover:bg-blue-50 transition shadow-md flex items-center gap-1">
+      <svg id="refresh-icon" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+      </svg>
+      <span class="text-xs font-bold">更新</span>
+    </button>
+  </div>
+</header>
+
+<!-- ローディング -->
+<div id="loading" class="fixed inset-0 bg-white/95 z-50 flex flex-col justify-center items-center">
+  <div class="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+  <p id="loading-text" class="mt-4 text-lg font-bold text-blue-900">情報を読み込み中...</p>
+</div>
+
+<main class="max-w-3xl mx-auto px-4 py-6" id="app-content" style="display:none;">
+
+  <!-- お知らせ -->
+  <section id="notices" class="mb-6 space-y-2"></section>
+
+  <!-- リアルタイム対応セクション -->
+  <div class="mb-8">
+    <h2 class="text-xl font-bold text-blue-900 flex items-center mb-4">
+      <span class="w-2 h-6 bg-green-500 rounded-full mr-2 shadow-sm"></span>
+      リアルタイム運行中
+    </h2>
+    <div id="realtime-buses" class="space-y-4"></div>
+    <p id="realtime-empty" class="text-sm text-gray-500 px-1" style="display:none;">現在リアルタイムで検知しているバスはありません。</p>
+  </div>
+
+  <!-- 時刻表（参考）セクション -->
+  <div class="mb-8">
+    <h2 class="text-xl font-bold text-gray-500 flex items-center mb-4">
+      <span class="w-2 h-6 bg-gray-400 rounded-full mr-2 shadow-sm"></span>
+      時刻表（参考）
+    </h2>
+    <div id="schedule-list" class="space-y-2"></div>
+  </div>
+
+  <!-- 補足情報エリア -->
+  <section class="bg-gray-200 p-5 rounded-2xl border border-gray-300 mt-8 mb-6">
+    <h2 class="text-md font-bold text-gray-700 mb-2 underline decoration-blue-500 decoration-2">ご利用にあたって</h2>
+    <p class="text-sm text-gray-700 leading-relaxed font-bold">このサイトの情報は目安です。時刻表は必ず公式サイトなどで確認してください。</p>
+    <a href="https://dashboard.wakoticket.net/information/alpicokotsu/bus_location.html" target="_blank" class="mt-3 bg-white border border-blue-600 text-blue-700 p-3 rounded-lg font-bold flex justify-center items-center text-sm shadow-sm">
+      公式サイトで詳しく見る
+    </a>
+  </section>
+
+</main>
+
+<!-- 重要モーダル -->
+<div id="important-modal" class="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center px-4" style="display:none;">
+  <div class="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
+    <div class="bg-red-600 p-4 text-white font-bold text-lg flex items-center">
+      重要なお知らせ
+    </div>
+    <div id="important-body" class="p-6 text-lg text-gray-900 whitespace-pre-wrap leading-relaxed font-bold"></div>
+    <div class="p-4 border-t bg-gray-50">
+      <button data-close="important-modal" class="w-full bg-gray-900 text-white py-4 rounded-xl text-lg font-bold">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- バス停詳細モーダル -->
+<div id="stop-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4" style="display:none;">
+  <div class="bg-white rounded-t-3xl sm:rounded-2xl w-full max-w-md shadow-2xl p-6">
+    <div class="flex justify-between items-start mb-4">
+      <div>
+        <p class="text-xs text-blue-600 font-bold">バス停</p>
+        <h3 id="stop-name" class="text-2xl font-bold text-blue-900"></h3>
+      </div>
+      <button data-close="stop-modal" class="text-gray-400">
+        <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+      </button>
+    </div>
+    <div id="stop-notice" class="mb-6 p-4 bg-blue-50 rounded-xl text-md font-bold text-blue-900" style="display:none;"></div>
+    <div class="flex flex-col gap-3">
+      <a id="stop-map-btn" href="#" target="_blank" class="bg-green-700 text-white p-4 rounded-xl font-bold text-lg text-center shadow-lg">場所を確認</a>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
