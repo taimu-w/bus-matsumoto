@@ -1,6 +1,5 @@
 const API_BASE = '/api';
 const POLL_MS = 20000;
-
 // 自動更新をまたいで保持する状態（開いているアコーディオン・スクロール位置）
 const openBusIds = new Set();
 const openTripKeys = new Set();
@@ -35,9 +34,11 @@ function formatDelayLabel(minutes) {
 function openModal(id) {
   $(id).style.display = 'flex';
 }
+
 function closeModal(id) {
   $(id).style.display = 'none';
 }
+
 document.addEventListener('click', (e) => {
   const closeTarget = e.target.closest('[data-close]');
   if (closeTarget) closeModal(closeTarget.dataset.close);
@@ -57,7 +58,7 @@ function openStopModal(stop) {
 }
 
 /* ---------- 汎用アコーディオン開閉ヘルパー ---------- */
-/**
+/*
  * @param card       カードのルート要素
  * @param openSet    開閉状態を記憶しておくSet（自動更新後の復元に使用）
  * @param key        Set内でこのカードを識別するキー
@@ -111,7 +112,6 @@ async function loadAll() {
     ]);
 
     const isFirstLoad = $('loading').style.display !== 'none';
-
     $('loading').style.display = 'none';
     $('app-content').style.display = 'block';
 
@@ -142,12 +142,14 @@ function renderNotices(settings) {
     el.textContent = settings.notice1;
     container.appendChild(el);
   }
+
   if (settings.notice2) {
     const el = document.createElement('div');
     el.className = 'bg-white p-4 rounded-xl border border-gray-300 text-md font-medium';
     el.textContent = settings.notice2;
     container.appendChild(el);
   }
+
   if (settings.importantNotice) {
     $('important-body').textContent = settings.importantNotice;
     openModal('important-modal');
@@ -170,19 +172,45 @@ function renderBuses(buses) {
     emptyNote.style.display = 'block';
     return;
   }
-  emptyNote.style.display = 'none';
 
+  emptyNote.style.display = 'none';
   buses.forEach((bus) => container.appendChild(createBusCard(bus)));
 }
 
 function createBusCard(bus) {
   const stops = bus.stops || [];
+
+  // --- 判定ロジック：1つだけ孤立して空（または--）になっているバス停を「通過バス停」と判定する ---
+  stops.forEach((stop, i) => {
+    // 自身の時刻が空かどうか
+    const isSelfEmpty = !stop.scheduledTime || stop.scheduledTime === '--' || stop.scheduledTime === '↓';
+
+    if (isSelfEmpty) {
+      const prevStop = stops[i - 1];
+      const nextStop = stops[i + 1];
+
+      // 前後のバス停の時刻が空かどうか
+      const isPrevEmpty = prevStop && (!prevStop.scheduledTime || prevStop.scheduledTime === '--' || prevStop.scheduledTime === '↓');
+      const isNextEmpty = nextStop && (!nextStop.scheduledTime || nextStop.scheduledTime === '--' || nextStop.scheduledTime === '↓');
+
+      // 前後が空ではなく「自分だけが空」の場合、または元のステータスが「通過」の場合は通過停留所フラグを真にする
+      if ((!isPrevEmpty && !isNextEmpty) || stop.status === '通過') {
+        stop.isPassStop = true;
+      } else {
+        stop.isPassStop = false;
+      }
+    } else {
+      stop.isPassStop = false;
+    }
+  });
+  // ----------------------------------------------------------------------------------
+
   const lastIdx = findLastArrivedIndex(stops);
   const currentStop = lastIdx >= 0 ? stops[lastIdx] : null;
   const hasDeparted = currentStop !== null; // 始発前（まだどのバス停にも到着していない）かどうか
   const currentPos = currentStop ? `${currentStop.name}に到着済` : '始発前';
-  const delay = bus.delayMinutes || 0;
 
+  const delay = bus.delayMinutes || 0;
   const delayStyle = delay >= 5
     ? 'bg-red-600 text-white delay-highlight'
     : 'bg-blue-100 text-blue-800';
@@ -198,7 +226,7 @@ function createBusCard(bus) {
   const card = document.createElement('div');
   card.className = 'bg-white rounded-2xl shadow-sm border-2 border-blue-200 overflow-hidden mb-4 transition-all';
 
-  const toggleCursorClass = hasDeparted ? 'cursor-pointer active:bg-blue-50/50' : 'cursor-default';
+  const toggleCursorClass = hasDeparted ? 'cursor-pointer active:opacity-50' : 'cursor-default';
   const arrowHtml = hasDeparted
     ? `<svg data-role="arrow" class="w-6 h-6 text-gray-300 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"></path></svg>`
     : '';
@@ -249,14 +277,15 @@ function createBusCard(bus) {
 
   let nextRowEl = null;
   const rowsContainer = card.querySelector('[data-role="stop-rows"]');
+
   stops.forEach((stop, i) => {
     const row = renderStopRow(bus, stop, i, lastIdx);
     if (i === lastIdx + 1) nextRowEl = row; // 「現在のバス停」＝次に到着予定のバス停の行
     rowsContainer.appendChild(row);
   });
+
   // 次のバス停行がない（終点到着済など）場合は、直近の到着済行までスクロールする
   const scrollTargetEl = nextRowEl || rowsContainer.lastElementChild;
-
   setupAccordionToggle(card, openBusIds, bus.id, () => scrollTargetEl);
 
   const mapBtn = card.querySelector('[data-role="map"]');
@@ -272,9 +301,11 @@ function createBusCard(bus) {
 
 function renderStopRow(bus, stop, index, lastIdx) {
   const isArrived = stop.status === '到着済';
-  const isThrough = stop.status === '通過';
-  const isNext = index === lastIdx + 1;
+  
+  // 事前に判定した「孤立空フラグ（isPassStop）」、またはstatusが「通過」なら通過停留所とする
+  const isThrough = stop.isPassStop || stop.status === '通過';
 
+  const isNext = index === lastIdx + 1;
   const rowClass = isArrived || isThrough
     ? 'opacity-65 bg-gray-200/50'
     : isNext
@@ -283,6 +314,7 @@ function renderStopRow(bus, stop, index, lastIdx) {
 
   let predTime = '--';
   let delayLabel = '';
+
   if (isThrough) {
     predTime = '通過';
   } else if (isArrived) {
@@ -312,6 +344,7 @@ function renderStopRow(bus, stop, index, lastIdx) {
       ${delayLabel ? `<span class="block text-xs font-bold">${escapeHtml(delayLabel)}</span>` : ''}
     </div>
   `;
+
   row.addEventListener('click', () => openStopModal(stop));
   return row;
 }
@@ -353,7 +386,6 @@ function renderSchedule(timetable) {
 function createScheduleCard(trip, firstTime) {
   const card = document.createElement('div');
   card.className = 'bg-white rounded-xl border border-gray-200 overflow-hidden';
-
   card.innerHTML = `
     <div class="px-4 py-3 flex justify-between items-center cursor-pointer active:bg-gray-50" data-role="toggle">
       <span class="font-bold text-gray-800">${escapeHtml(firstTime)} 発 松本駅お城口</span>
@@ -383,7 +415,6 @@ function createScheduleCard(trip, firstTime) {
     });
 
   setupAccordionToggle(card, openTripKeys, `trip-${trip.tripIndex}`, () => null);
-
   return card;
 }
 
