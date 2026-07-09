@@ -497,8 +497,11 @@ function renderStopRow(bus, stop, index, lastIdx) {
       : 'bg-white rounded-lg border';
 
   // 臨時便は比較対象となる定刻が無いため、そもそも遅延という概念が成立しない。
-  // delayMinutes/predictedDelayMinutesが0で返ってきても「定刻通り」とは表示しない。
+  // また、bus.isRealtimeがfalse（「検知中…」の状態）の場合は、個々のバス停が
+  // 「到着済」となっていても実測に基づく信頼できる遅延情報とは言えないため、
+  // どちらの場合もdelayMinutes/predictedDelayMinutesが0でも「定刻通り」を出さない。
   const isExtraTrip = bus.tripType === '臨時便';
+  const hasReliableDelay = !isExtraTrip && bus.isRealtime;
 
   let predTime = '--';
   let delayLabel = '';
@@ -507,15 +510,15 @@ function renderStopRow(bus, stop, index, lastIdx) {
     predTime = '通過';
   } else if (isArrived) {
     predTime = stop.actualTime || '--';
-    delayLabel = isExtraTrip ? '' : formatDelayLabel(stop.delayMinutes);
+    delayLabel = hasReliableDelay ? formatDelayLabel(stop.delayMinutes) : '';
   } else if (bus.isRealtime) {
     predTime = stop.predictedTime || stop.scheduledTime || '--';
-    delayLabel = isExtraTrip ? '' : formatDelayLabel(stop.predictedDelayMinutes);
+    delayLabel = hasReliableDelay ? formatDelayLabel(stop.predictedDelayMinutes) : '';
   } else {
     predTime = stop.scheduledTime || '--';
   }
 
-  const isDelayedPred = !isArrived && !isThrough && !isExtraTrip && (stop.predictedDelayMinutes || 0) > 1;
+  const isDelayedPred = !isArrived && !isThrough && hasReliableDelay && (stop.predictedDelayMinutes || 0) > 1;
   const predTimeClass = isDelayedPred ? 'text-red-600 font-bold' : 'font-bold';
   const schedClass = isThrough ? 'line-through-double opacity-50' : '';
 
