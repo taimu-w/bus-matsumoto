@@ -271,8 +271,9 @@ function createBusCard(bus) {
 }
 
 function renderStopRow(bus, stop, index, lastIdx) {
-  const isArrived = stop.status === '到着済';
-  const isThrough = stop.status === '通過';
+  // 定刻がない、または status やフラグが「通過」の場合は通過バス停とみなす
+  const isThrough = stop.status === '通過' || stop.isThrough || !stop.scheduledTime;
+  const isArrived = !isThrough && stop.status === '到着済';
   const isNext = index === lastIdx + 1;
 
   const rowClass = isArrived || isThrough
@@ -283,6 +284,8 @@ function renderStopRow(bus, stop, index, lastIdx) {
 
   let predTime = '--';
   let delayLabel = '';
+
+  // 優先的に「通過」を表示する
   if (isThrough) {
     predTime = '通過';
   } else if (isArrived) {
@@ -294,6 +297,7 @@ function renderStopRow(bus, stop, index, lastIdx) {
   } else {
     predTime = stop.scheduledTime || '--';
   }
+
 
   const isDelayedPred = !isArrived && !isThrough && (stop.predictedDelayMinutes || 0) > 1;
   const predTimeClass = isDelayedPred ? 'text-red-600 font-bold' : 'font-bold';
