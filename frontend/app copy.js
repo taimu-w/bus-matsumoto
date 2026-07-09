@@ -149,8 +149,13 @@ function renderFavorites() {
       const targetStop = (bus.stops || []).find(s => s.name === stopName);
       // これから来る（通過ではなく、到着済でもない）場合
       if (targetStop && targetStop.status !== '到着済' && targetStop.status !== '通過' && !targetStop.isPassStop) {
-        // 遅延情報が実際に取得できているかどうかをnull/undefinedのまま保持する（0で潰さない）
-        const rawDelay = targetStop.predictedDelayMinutes ?? targetStop.delayMinutes ?? null;
+        // 遅延情報が実際に取得できているかどうかをnull/undefinedのまま保持する（0で潰さない）。
+        // 臨時便（比較対象の定刻が無い）や非リアルタイム（まだ検知できていない）の場合は
+        // delayMinutesが0でも信用できないため、情報なし（null）扱いにする。
+        const isExtraTrip = bus.tripType === '臨時便';
+        const rawDelay = (!isExtraTrip && bus.isRealtime)
+          ? (targetStop.predictedDelayMinutes ?? targetStop.delayMinutes ?? null)
+          : null;
         approachingBuses.push({
           timeStr: targetStop.predictedTime || targetStop.scheduledTime,
           isRealtime: bus.isRealtime,
@@ -381,10 +386,13 @@ function createBusCard(bus) {
   const currentPos = currentStop ? `${currentStop.name}に到着済` : '始発前';
 
   // 遅延情報が実際に取得できているかどうかをnull/undefinedのまま保持する（0で潰さない）。
-  // これにより、臨時便や時刻表未取得などで遅延が算出できない場合に
-  // 誤って「定刻通り」と表示されるのを防ぐ。
+  // さらに、以下のケースは「delayMinutesが0」であっても遅延判定として信用できないため、
+  // 情報なし扱いにする。
+  //   ・臨時便（tripType === '臨時便'）: 比較対象の定刻が無く、そもそも遅延を算出できない
+  //   ・isRealtimeがfalse（「検知中…」の状態）: まだ実測に基づく遅延ではない
   const delay = bus.delayMinutes;
-  const hasDelayInfo = delay !== null && delay !== undefined;
+  const isExtraTrip = bus.tripType === '臨時便';
+  const hasDelayInfo = delay !== null && delay !== undefined && !isExtraTrip && bus.isRealtime;
   const delayStyle = hasDelayInfo && delay >= 5
     ? 'bg-red-600 text-white delay-highlight'
     : 'bg-blue-100 text-blue-800';
@@ -488,6 +496,10 @@ function renderStopRow(bus, stop, index, lastIdx) {
       ? 'bg-blue-600 text-white shadow-lg rounded-xl'
       : 'bg-white rounded-lg border';
 
+  // 臨時便は比較対象となる定刻が無いため、そもそも遅延という概念が成立しない。
+  // delayMinutes/predictedDelayMinutesが0で返ってきても「定刻通り」とは表示しない。
+  const isExtraTrip = bus.tripType === '臨時便';
+
   let predTime = '--';
   let delayLabel = '';
 
@@ -495,15 +507,15 @@ function renderStopRow(bus, stop, index, lastIdx) {
     predTime = '通過';
   } else if (isArrived) {
     predTime = stop.actualTime || '--';
-    delayLabel = formatDelayLabel(stop.delayMinutes);
+    delayLabel = isExtraTrip ? '' : formatDelayLabel(stop.delayMinutes);
   } else if (bus.isRealtime) {
     predTime = stop.predictedTime || stop.scheduledTime || '--';
-    delayLabel = formatDelayLabel(stop.predictedDelayMinutes);
+    delayLabel = isExtraTrip ? '' : formatDelayLabel(stop.predictedDelayMinutes);
   } else {
     predTime = stop.scheduledTime || '--';
   }
 
-  const isDelayedPred = !isArrived && !isThrough && (stop.predictedDelayMinutes || 0) > 1;
+  const isDelayedPred = !isArrived && !isThrough && !isExtraTrip && (stop.predictedDelayMinutes || 0) > 1;
   const predTimeClass = isDelayedPred ? 'text-red-600 font-bold' : 'font-bold';
   const schedClass = isThrough ? 'line-through-double opacity-50' : '';
 
