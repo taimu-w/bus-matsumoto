@@ -4,6 +4,10 @@ const POLL_MS = 20000;
 const openBusIds = new Set();
 const openTripKeys = new Set();
 
+// 取得した最新データを保持しておく（お気に入り計算・再描画用）
+let currentBuses = [];
+let currentTimetable = [];
+
 function $(id) { return document.getElementById(id); }
 
 async function fetchJson(url) {
@@ -58,12 +62,6 @@ function openStopModal(stop) {
 }
 
 /* ---------- 汎用アコーディオン開閉ヘルパー ---------- */
-/*
- * @param card       カードのルート要素
- * @param openSet    開閉状態を記憶しておくSet（自動更新後の復元に使用）
- * @param key        Set内でこのカードを識別するキー
- * @param scrollToEl 開いたときに自動スクロールする対象要素（無ければnull）
- */
 function setupAccordionToggle(card, openSet, key, getScrollTarget) {
   const acc = card.querySelector('[data-role="accordion"]');
   const arrow = card.querySelector('[data-role="arrow"]');
@@ -74,7 +72,6 @@ function setupAccordionToggle(card, openSet, key, getScrollTarget) {
     if (arrow) arrow.style.transform = open ? 'rotate(180deg)' : 'rotate(0deg)';
   };
 
-  // 自動更新で再構築された場合、前回開いていたカードは開いた状態で復元する（スクロールはしない）
   if (openSet.has(key)) applyOpenState(true);
 
   toggleEl.addEventListener('click', () => {
@@ -82,7 +79,6 @@ function setupAccordionToggle(card, openSet, key, getScrollTarget) {
     applyOpenState(willOpen);
     if (willOpen) {
       openSet.add(key);
-      // レイアウト確定（アコーディオンの展開アニメーション）を待ってから、現在地までスクロールする
       const target = getScrollTarget ? getScrollTarget() : null;
       if (target) {
         setTimeout(() => {
@@ -95,12 +91,182 @@ function setupAccordionToggle(card, openSet, key, getScrollTarget) {
   });
 }
 
+/* ---------- お気に入り機能（localStorage連携） ---------- */
+function getFavorites() {
+  try {
+    return JSON.parse(localStorage.getItem('favStops')) || [];
+  } catch(e) {
+    return [];
+  }
+}
+
+function toggleFavorite(stopName) {
+  let favs = getFavorites();
+  if (favs.includes(stopName)) {
+    favs = favs.filter(s => s !== stopName);
+  } else {
+    favs.push(stopName);
+  }
+  localStorage.setItem('favStops', JSON.stringify(favs));
+}
+
+function setupFavoritesContainer() {
+  if (!$('favorites-container')) {
+    const container = document.createElement('div');
+    container.id = 'favorites-container';
+    container.className = 'mb-6';
+    const target = $('realtime-buses');
+    if (target && target.parentNode) {
+      target.parentNode.insertBefore(container, target);
+    }
+  }
+}
+
+function renderFavorites() {
+  setupFavoritesContainer();
+  const container = $('favorites-container');
+  container.innerHTML = '';
+  const favs = getFavorites();
+
+  if (favs.length === 0) {
+    container.style.display = 'none';
+    return;
+  }
+  container.style.display = 'block';
+
+  const title = document.createElement('h2');
+  title.className = 'text-lg font-bold text-gray-800 mb-3 flex items-center gap-2 px-1';
+  title.innerHTML = '<span>⭐</span> よく使うバス停';
+  container.appendChild(title);
+
+  const now = new Date();
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+
+  favs.forEach(stopName => {
+    // 1. リアルタイム情報（接近中のバス）を探す
+    const approachingBuses = [];
+    currentBuses.forEach(bus => {
+      const targetStop = (bus.stops || []).find(s => s.name === stopName);
+      // これから来る（通過ではなく、到着済でもない）場合
+      if (targetStop && targetStop.status !== '到着済' && targetStop.status !== '通過' && !targetStop.isPassStop) {
+        approachingBuses.push({
+          timeStr: targetStop.predictedTime || targetStop.scheduledTime,
+          isRealtime: bus.isRealtime,
+          delay: targetStop.predictedDelayMinutes || targetStop.delayMinutes || 0,
+          rawStop: targetStop
+        });
+      }
+    });
+
+    // 2. 時刻表から今後の便を探す
+    const scheduledTrips = [];
+    currentTimetable.forEach(trip => {
+      const targetStop = (trip.stops || []).find(s => s.stopName === stopName && s.scheduledTime && s.scheduledTime.includes(':'));
+      if (targetStop) {
+        const [h, m] = targetStop.scheduledTime.split(':').map(Number);
+        const tripMinutes = h * 60 + m;
+        // 現在時刻以降の便を抽出
+        if (tripMinutes >= nowMinutes) {
+          scheduledTrips.push({
+            timeStr: targetStop.scheduledTime,
+            delay: 0,
+            rawStop: targetStop
+          });
+        }
+      }
+    });
+
+    // 3. 両方をマージして直近の2件を抽出する
+    const displayList = [];
+    
+    approachingBuses.forEach(rt => {
+      displayList.push({
+        type: 'realtime',
+        timeStr: rt.timeStr,
+        delay: rt.delay,
+        label: rt.isRealtime ? '接近中' : '運行中',
+        rawStop: rt.rawStop
+      });
+    });
+
+    scheduledTrips.forEach(st => {
+      // リアルタイム情報の中に同じ定刻の便がすでにあれば重複させない
+      const isDuplicate = displayList.some(d => d.type === 'realtime' && d.rawStop.scheduledTime === st.timeStr);
+      if (!isDuplicate) {
+        displayList.push({
+          type: 'scheduled',
+          timeStr: st.timeStr,
+          delay: 0,
+          label: '予定'
+        });
+      }
+    });
+
+    // 時間順にソート（時刻文字列を分に変換）
+    displayList.sort((a, b) => {
+       const aTime = (a.timeStr || '').includes(':') ? a.timeStr : '99:99';
+       const bTime = (b.timeStr || '').includes(':') ? b.timeStr : '99:99';
+       const [ah, am] = aTime.split(':').map(Number);
+       const [bh, bm] = bTime.split(':').map(Number);
+       return (ah * 60 + am) - (bh * 60 + bm);
+    });
+
+    const next2 = displayList.slice(0, 2); // 先発と次発を取得
+
+    // 4. カードのDOM構築
+    const card = document.createElement('div');
+    card.className = 'bg-white rounded-xl shadow-sm border-2 border-yellow-300 overflow-hidden mb-4';
+    
+    let infoHtml = '';
+    if (next2.length === 0) {
+      infoHtml = '<p class="text-sm text-gray-500 py-2 text-center">本日の運行は終了しました</p>';
+    } else {
+      next2.forEach((info, idx) => {
+        const titleText = idx === 0 ? '先発' : '次発';
+        const delayHtml = info.delay > 1 ? `<span class="text-red-500 text-xs font-bold ml-1">(${info.delay}分遅れ)</span>` : '';
+        const badgeClass = info.type === 'realtime' 
+          ? (info.label === '接近中' ? 'bg-green-100 text-green-800 border-green-200 animate-pulse' : 'bg-blue-100 text-blue-800 border-blue-200') 
+          : 'bg-gray-100 text-gray-600 border-gray-200';
+        
+        infoHtml += `
+          <div class="flex items-center justify-between py-2 ${idx === 0 && next2.length > 1 ? 'border-b border-dashed border-yellow-200' : ''}">
+            <div class="flex items-baseline gap-2">
+              <span class="text-xs font-bold text-gray-500 w-8">${titleText}</span>
+              <span class="text-2xl font-bold tracking-tight ${info.delay > 1 ? 'text-red-600' : 'text-gray-800'}">${escapeHtml(info.timeStr)}</span>
+              ${delayHtml}
+            </div>
+            <span class="text-[10px] font-bold px-2.5 py-1 rounded border ${badgeClass}">${info.label}</span>
+          </div>
+        `;
+      });
+    }
+
+    card.innerHTML = `
+      <div class="flex justify-between items-center p-3 bg-yellow-50 border-b border-yellow-200">
+        <h3 class="font-bold text-md text-gray-900">${escapeHtml(stopName)}</h3>
+        <button data-fav-remove="${escapeHtml(stopName)}" class="text-yellow-500 hover:text-gray-400 text-2xl focus:outline-none transition-colors leading-none" title="お気に入り解除">★</button>
+      </div>
+      <div class="px-4 py-2">
+        ${infoHtml}
+      </div>
+    `;
+
+    const removeBtn = card.querySelector('[data-fav-remove]');
+    removeBtn.addEventListener('click', () => {
+      toggleFavorite(stopName);
+      renderFavorites();
+      renderBuses(currentBuses); // リスト内の☆表示を同期させるため
+    });
+
+    container.appendChild(card);
+  });
+}
+
 /* ---------- データ取得（画面の見た目・スクロール位置を維持したまま更新する） ---------- */
 async function loadAll() {
   const icon = $('refresh-icon');
   icon.classList.add('animate-spin');
 
-  // 自動更新でDOMを再構築する前に、現在のスクロール位置を保存しておく
   const scrollX = window.scrollX;
   const scrollY = window.scrollY;
 
@@ -111,15 +277,19 @@ async function loadAll() {
       fetchJson(`${API_BASE}/timetable`)
     ]);
 
+    // お気に入り描画用にデータをグローバル保持
+    currentBuses = busData.buses || [];
+    currentTimetable = timetable || [];
+
     const isFirstLoad = $('loading').style.display !== 'none';
     $('loading').style.display = 'none';
     $('app-content').style.display = 'block';
 
     renderNotices(settings);
-    renderBuses(busData.buses || []);
-    renderSchedule(timetable);
+    renderFavorites(); // お気に入りコンテナの表示
+    renderBuses(currentBuses);
+    renderSchedule(currentTimetable);
 
-    // 初回表示以外は、更新前に見ていた位置へ即座に戻す（ちらつき防止のため描画直後・アニメーションなしで）
     if (!isFirstLoad) {
       window.scrollTo(scrollX, scrollY);
     }
@@ -180,20 +350,17 @@ function renderBuses(buses) {
 function createBusCard(bus) {
   const stops = bus.stops || [];
 
-  // --- 判定ロジック：1つだけ孤立して空（または--）になっているバス停を「通過バス停」と判定する ---
+  // --- 判定ロジック：1つだけ孤立して空になっているバス停を「通過バス停」と判定する ---
   stops.forEach((stop, i) => {
-    // 自身の時刻が空かどうか
     const isSelfEmpty = !stop.scheduledTime || stop.scheduledTime === '--' || stop.scheduledTime === '↓';
 
     if (isSelfEmpty) {
       const prevStop = stops[i - 1];
       const nextStop = stops[i + 1];
 
-      // 前後のバス停の時刻が空かどうか
       const isPrevEmpty = prevStop && (!prevStop.scheduledTime || prevStop.scheduledTime === '--' || prevStop.scheduledTime === '↓');
       const isNextEmpty = nextStop && (!nextStop.scheduledTime || nextStop.scheduledTime === '--' || nextStop.scheduledTime === '↓');
 
-      // 前後が空ではなく「自分だけが空」の場合、または元のステータスが「通過」の場合は通過停留所フラグを真にする
       if ((!isPrevEmpty && !isNextEmpty) || stop.status === '通過') {
         stop.isPassStop = true;
       } else {
@@ -207,7 +374,7 @@ function createBusCard(bus) {
 
   const lastIdx = findLastArrivedIndex(stops);
   const currentStop = lastIdx >= 0 ? stops[lastIdx] : null;
-  const hasDeparted = currentStop !== null; // 始発前（まだどのバス停にも到着していない）かどうか
+  const hasDeparted = currentStop !== null; 
   const currentPos = currentStop ? `${currentStop.name}に到着済` : '始発前';
 
   const delay = bus.delayMinutes || 0;
@@ -271,7 +438,6 @@ function createBusCard(bus) {
   `;
 
   if (!hasDeparted) {
-    // 出発前のバスはアコーディオンを持たない（開閉操作を行わない）
     return card;
   }
 
@@ -280,11 +446,10 @@ function createBusCard(bus) {
 
   stops.forEach((stop, i) => {
     const row = renderStopRow(bus, stop, i, lastIdx);
-    if (i === lastIdx + 1) nextRowEl = row; // 「現在のバス停」＝次に到着予定のバス停の行
+    if (i === lastIdx + 1) nextRowEl = row;
     rowsContainer.appendChild(row);
   });
 
-  // 次のバス停行がない（終点到着済など）場合は、直近の到着済行までスクロールする
   const scrollTargetEl = nextRowEl || rowsContainer.lastElementChild;
   setupAccordionToggle(card, openBusIds, bus.id, () => scrollTargetEl);
 
@@ -301,11 +466,11 @@ function createBusCard(bus) {
 
 function renderStopRow(bus, stop, index, lastIdx) {
   const isArrived = stop.status === '到着済';
-  
-  // 事前に判定した「孤立空フラグ（isPassStop）」、またはstatusが「通過」なら通過停留所とする
   const isThrough = stop.isPassStop || stop.status === '通過';
-
   const isNext = index === lastIdx + 1;
+  const favs = getFavorites();
+  const isFav = favs.includes(stop.name);
+
   const rowClass = isArrived || isThrough
     ? 'opacity-65 bg-gray-200/50'
     : isNext
@@ -333,10 +498,17 @@ function renderStopRow(bus, stop, index, lastIdx) {
 
   const row = document.createElement('div');
   row.className = `grid grid-cols-12 gap-2 p-4 items-center ${rowClass} cursor-pointer transition-all active:scale-[0.98]`;
+  
+  // HTMLに☆ボタンを組み込む
   row.innerHTML = `
-    <div class="col-span-5 text-xl font-bold leading-tight">
-      ${isNext ? '<span class="text-[10px] block opacity-80">次は</span>' : ''}
-      ${escapeHtml(stop.name)}
+    <div class="col-span-5 text-xl font-bold leading-tight flex items-start">
+      <button data-fav="true" class="text-2xl mr-1 -mt-0.5 leading-none focus:outline-none transition-colors ${isFav ? 'text-yellow-400' : 'text-gray-300'}" title="お気に入りに追加/解除">
+        ${isFav ? '★' : '☆'}
+      </button>
+      <div class="leading-tight">
+        ${isNext ? '<span class="text-[10px] block opacity-80 mb-0.5">次は</span>' : ''}
+        ${escapeHtml(stop.name)}
+      </div>
     </div>
     <div class="col-span-3 text-md text-center font-bold ${schedClass}">${escapeHtml(stop.scheduledTime || '--')}</div>
     <div class="col-span-4 text-center">
@@ -345,7 +517,20 @@ function renderStopRow(bus, stop, index, lastIdx) {
     </div>
   `;
 
+  // ☆ボタンのクリック処理（モーダルを開かずにお気に入りをトグル）
+  const favBtn = row.querySelector('[data-fav]');
+  if (favBtn) {
+    favBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleFavorite(stop.name);
+      renderFavorites();
+      renderBuses(currentBuses); // 同一リスト内の他の☆表示も同時に更新する
+    });
+  }
+
+  // それ以外の場所をクリックした時は詳細モーダルを開く
   row.addEventListener('click', () => openStopModal(stop));
+  
   return row;
 }
 
