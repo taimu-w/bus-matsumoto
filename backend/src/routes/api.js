@@ -39,14 +39,24 @@ router.get('/stops', async (req, res) => {
 // GET /api/timetable -> 全便の時刻表（非リアルタイム表示・バス停詳細用）
 router.get('/timetable', async (req, res) => {
   try {
-    const trips = await pool.query('SELECT id, trip_index, first_stop_time FROM schedule_trips ORDER BY trip_index ASC');
+    const trips = await pool.query(
+      'SELECT id, trip_index, first_stop_time FROM schedule_trips ORDER BY trip_index ASC'
+    );
     const times = await pool.query(
       `SELECT st.trip_id, s.seq_order, s.name AS stop_name, st.scheduled_time, st.is_through
-       FROM schedule_stop_times st JOIN stops s ON s.id = st.stop_id
+       FROM schedule_stop_times st
+       JOIN stops s ON s.id = st.stop_id
        ORDER BY st.trip_id ASC, s.seq_order ASC`
     );
+
     const byTrip = new Map();
-    for (const t of trips.rows) byTrip.set(t.id, { tripIndex: t.trip_index, stops: [] });
+    for (const t of trips.rows) {
+      byTrip.set(t.id, {
+        tripIndex: t.trip_index,
+        stops: []
+      });
+    }
+
     for (const r of times.rows) {
       const entry = byTrip.get(r.trip_id);
       if (entry) {
@@ -57,6 +67,7 @@ router.get('/timetable', async (req, res) => {
         });
       }
     }
+
     res.json(Array.from(byTrip.values()));
   } catch (err) {
     console.error('[api] /timetable エラー:', err);
@@ -64,19 +75,33 @@ router.get('/timetable', async (req, res) => {
   }
 });
 
-// GET /api/buses -> 稼働中バスのリアルタイム運行状況（GASの getBusData() 相当）
+// GET /api/buses -> 稼働中バスのリアルタイム運行状況（臨時便は表示しない）
 router.get('/buses', async (req, res) => {
   try {
     const vehicles = await pool.query(
       `SELECT id, car_id, business_start_time, departure_time, trip_type, delay_minutes, trip_id
-       FROM vehicles WHERE status = 'active' ORDER BY id ASC`
+       FROM vehicles
+       WHERE status = 'active'
+         AND trip_type IS DISTINCT FROM '臨時便'
+       ORDER BY id ASC`
     );
 
     const buses = [];
+
     for (const v of vehicles.rows) {
       const stopRows = await pool.query(
-        `SELECT vss.stop_id, vss.seq_order, vss.scheduled_time, vss.status, vss.actual_time,
-                vss.delay_minutes, vss.interpolated, s.name, s.lat, s.lon, s.notice, s.timetable_link
+        `SELECT vss.stop_id,
+                vss.seq_order,
+                vss.scheduled_time,
+                vss.status,
+                vss.actual_time,
+                vss.delay_minutes,
+                vss.interpolated,
+                s.name,
+                s.lat,
+                s.lon,
+                s.notice,
+                s.timetable_link
          FROM vehicle_stop_status vss
          JOIN stops s ON s.id = vss.stop_id
          WHERE vss.vehicle_id = $1
@@ -84,14 +109,18 @@ router.get('/buses', async (req, res) => {
         [v.id]
       );
 
+      // まだ何も検知できていない車両は表示しない
       const hasAnyProgress = stopRows.rows.some((r) => r.status !== '');
-      if (!hasAnyProgress) continue; // まだ何も検知できていない車両は表示しない（GASのhasDataチェック相当）
+      if (!hasAnyProgress) continue;
 
       const predictions = await predictArrivals(pool, v.id);
-      const predictionBySeq = new Map(predictions.map((p) => [p.seqOrder, p]));
+      const predictionBySeq = new Map(
+        predictions.map((p) => [p.seqOrder, p])
+      );
 
       const stops = stopRows.rows.map((r) => {
         const pred = predictionBySeq.get(r.seq_order);
+
         return {
           stopId: r.stop_id,
           seqOrder: r.seq_order,
