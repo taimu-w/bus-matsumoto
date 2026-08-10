@@ -1,0 +1,2 @@
+agency_id,agency_name,agency_url,agency_timezone,agency_lang,agency_phone,agency_fare_url,agency_email
+2000020202029,松本市,https://www.city.matsumoto.nagano.jp/soshiki/222/3237.html,Asia/Tokyo,ja,0263-34-3033,,

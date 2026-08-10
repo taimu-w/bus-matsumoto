@@ -3,7 +3,7 @@
 # ビルドコンテキストはプロジェクトルート（docker-compose.yml と同じ階層）を想定。
 # frontend/ もそのままコピーし、server.js の相対パス参照(../../frontend)を維持する。
 # ==========================================================
-FROM node:18-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 
@@ -11,9 +11,10 @@ WORKDIR /app
 COPY backend/package.json ./backend/package.json
 RUN cd backend && npm install --omit=dev
 
-# アプリ本体をコピー
+# アプリ本体と GTFS データをコピー
 COPY backend ./backend
 COPY frontend ./frontend
+COPY ["data gtfs", "data gtfs"]
 
 WORKDIR /app/backend
 RUN chmod +x docker-entrypoint.sh

@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>管理画面 | バス運行情報</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
+</head>
+<body class="bg-slate-100 text-slate-900" style="font-family:'Noto Sans JP',sans-serif;">
+  <div class="min-h-screen flex items-center justify-center p-4">
+    <div class="w-full max-w-5xl bg-white rounded-2xl shadow-xl overflow-hidden">
+      <div class="bg-blue-900 text-white px-6 py-4">
+        <h1 class="text-2xl font-bold">管理画面</h1>
+        <p class="text-sm text-blue-100 mt-1">外部IDマッピング・バス停座標・時刻表・バス位置情報を確認できます</p>
+      </div>
+
+      <div id="login-card" class="p-6">
+        <h2 class="text-lg font-bold mb-4">ログイン</h2>
+        <div class="space-y-3">
+          <label class="block text-sm font-bold">ユーザー名
+            <input id="username" type="text" class="mt-1 w-full border rounded-lg px-3 py-2" placeholder="admin" />
+          </label>
+          <label class="block text-sm font-bold">パスワード
+            <input id="password" type="password" class="mt-1 w-full border rounded-lg px-3 py-2" placeholder="admin123" />
+          </label>
+          <button id="login-btn" class="w-full bg-blue-700 text-white font-bold rounded-lg px-4 py-3">ログイン</button>
+        </div>
+      </div>
+
+      <div id="editor-card" class="hidden p-6 space-y-6">
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <h2 class="text-lg font-bold">配信内容編集</h2>
+            <p class="text-sm text-slate-500">公開画面の表示用テキストを更新できます。</p>
+          </div>
+          <button id="logout-btn" class="border rounded-lg px-3 py-2 text-sm font-bold">ログアウト</button>
+        </div>
+
+        <div class="grid gap-4 md:grid-cols-2">
+          <label class="block text-sm font-bold">お知らせ1
+            <textarea id="notice1" rows="3" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
+          </label>
+          <label class="block text-sm font-bold">お知らせ2
+            <textarea id="notice2" rows="3" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
+          </label>
+        </div>
+
+        <label class="block text-sm font-bold">重要なお知らせ
+          <textarea id="importantNotice" rows="4" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
+        </label>
+
+        <div class="flex gap-3 flex-wrap">
+          <button id="save-btn" class="bg-green-700 text-white font-bold rounded-lg px-4 py-3">保存</button>
+          <a href="/" class="bg-slate-200 text-slate-900 font-bold rounded-lg px-4 py-3">公開画面へ戻る</a>
+        </div>
+
+        <!-- バス位置情報モニター -->
+        <div class="border-t pt-5 space-y-4">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h3 class="text-lg font-bold">🚌 バス位置情報モニター</h3>
+              <p class="text-sm text-slate-500">直近3分以内にGPSデータを受信したバスの位置を表示します。</p>
+            </div>
+            <button id="refresh-positions-btn" class="bg-blue-700 text-white font-bold rounded-lg px-4 py-2 flex items-center gap-2">
+              <svg id="pos-refresh-icon" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              <span>更新</span>
+            </button>
+          </div>
+          <div id="positions-status" class="text-sm font-bold text-slate-500">「更新」ボタンを押して情報を取得してください</div>
+          <div id="positions-container" class="space-y-3"></div>
+        </div>
+
+        <div class="border-t pt-5 space-y-4">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h3 class="text-lg font-bold">外部ID ↔ GTFS路線ID 対応表</h3>
+              <p class="text-sm text-slate-500">位置情報CSVの `TARGET_EXTRA_ID` を裏で管理するマッピングです。</p>
+            </div>
+            <button id="add-mapping-btn" class="bg-blue-700 text-white font-bold rounded-lg px-3 py-2">行追加</button>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm border-collapse">
+              <thead>
+                <tr class="bg-slate-100 text-slate-700">
+                  <th class="p-2 text-left">GTFS路線</th>
+                  <th class="p-2 text-left">外部ID</th>
+                  <th class="p-2 text-left">削除</th>
+                </tr>
+              </thead>
+              <tbody id="mapping-table"></tbody>
+            </table>
+          </div>
+          <button id="save-mapping-btn" class="bg-indigo-700 text-white font-bold rounded-lg px-4 py-3">対応表を保存</button>
+        </div>
+
+        <div class="border-t pt-5 space-y-4">
+          <div class="flex items-center gap-3 flex-wrap">
+            <h3 class="text-lg font-bold">路線データ編集</h3>
+            <select id="route-edit-select" class="border rounded-lg px-3 py-2"></select>
+            <button id="load-route-data-btn" class="bg-slate-800 text-white font-bold rounded-lg px-3 py-2">読み込み</button>
+          </div>
+          <div id="route-data-editor" class="space-y-4"></div>
+          <button id="save-route-data-btn" class="bg-emerald-700 text-white font-bold rounded-lg px-4 py-3">停留所座標・時刻表を保存</button>
+        </div>
+
+        <div id="status" class="hidden rounded-lg px-4 py-3 text-sm font-bold"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const state = {
+      token: null,
+      routes: [],
+      mappingRows: [],
+      routeData: null,
+    };
+
+    const loginCard = document.getElementById('login-card');
+    const editorCard = document.getElementById('editor-card');
+    const statusBox = document.getElementById('status');
+    const mappingTable = document.getElementById('mapping-table');
+    const routeEditSelect = document.getElementById('route-edit-select');
+    const routeDataEditor = document.getElementById('route-data-editor');
+    const positionsContainer = document.getElementById('positions-container');
+    const positionsStatus = document.getElementById('positions-status');
+
+    function showStatus(message, tone = 'info') {
+      statusBox.textContent = message;
+      statusBox.className = `rounded-lg px-4 py-3 text-sm font-bold ${tone === 'error' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`;
+      statusBox.classList.remove('hidden');
+    }
+
+    function setAuthToken(username, password) {
+      state.token = btoa(`${username}:${password}`);
+    }
+
+    function clearAuthToken() {
+      state.token = null;
+      localStorage.removeItem('adminToken');
+      loginCard.classList.remove('hidden');
+      editorCard.classList.add('hidden');
+    }
+
+    function applyEditorState() {
+      loginCard.classList.add('hidden');
+      editorCard.classList.remove('hidden');
+    }
+
+    async function api(path, options = {}) {
+      const headers = {
+        'Content-Type': 'application/json',
+        ...(options.headers || {}),
+      };
+
+      if (state.token) {
+        headers['Authorization'] = `Basic ${state.token}`;
+      }
+
+      const response = await fetch(path, {
+        ...options,
+        headers,
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || '処理に失敗しました');
+      }
+      return data;
+    }
+
+    function renderRouteOptions() {
+      routeEditSelect.innerHTML = '';
+      state.routes.forEach((route) => {
+        const option = document.createElement('option');
+        option.value = route.id;
+        option.textContent = `${route.id} ${route.name}`;
+        routeEditSelect.appendChild(option);
+      });
+    }
+
+    function renderMappingTable(rows) {
+      mappingTable.innerHTML = '';
+      rows.forEach((row, idx) => {
+        const tr = document.createElement('tr');
+        tr.className = 'border-b';
+        // 方向マッピングの設定は廃止し、backend/src/config/directionMapping.js へ移した。
+        tr.innerHTML = `
+          <td class="p-2">
+            <select class="route-select border rounded-lg px-2 py-1 w-full">
+              ${state.routes.map((route) => `<option value="${route.id}" ${route.id === row.routeId ? 'selected' : ''}>${route.name}</option>`).join('')}
+            </select>
+          </td>
+          <td class="p-2"><input class="external-id-input border rounded-lg px-2 py-1 w-full" value="${row.externalId || ''}" /></td>
+          <td class="p-2"><button class="remove-row-btn bg-red-50 text-red-700 rounded-lg px-3 py-1 font-bold">削除</button></td>
+        `;
+        const removeBtn = tr.querySelector('.remove-row-btn');
+        removeBtn.addEventListener('click', () => {
+          state.mappingRows.splice(idx, 1);
+          renderMappingTable(state.mappingRows);
+        });
+        mappingTable.appendChild(tr);
+      });
+    }
+
+    function renderRouteDataEditor(data) {
+      state.routeData = data;
+      routeDataEditor.innerHTML = '';
+
+      const stopBox = document.createElement('div');
+      stopBox.className = 'space-y-2';
+      stopBox.innerHTML = '<h4 class="font-bold text-slate-700">バス停座標</h4>';
+
+      data.stops.forEach((stop) => {
+        const row = document.createElement('div');
+        row.className = 'grid gap-2 md:grid-cols-5 p-3 rounded-xl border bg-slate-50';
+        row.innerHTML = `
+          <div class="md:col-span-2">
+            <div class="text-xs font-bold text-slate-500">停留所名</div>
+            <div class="font-bold">${stop.name}</div>
+          </div>
+          <label class="block text-sm font-bold">緯度
+            <input type="number" step="0.000001" data-stop-id="${stop.id}" data-stop-field="lat" value="${stop.lat}" class="mt-1 w-full border rounded-lg px-2 py-1" />
+          </label>
+          <label class="block text-sm font-bold">経度
+            <input type="number" step="0.000001" data-stop-id="${stop.id}" data-stop-field="lon" value="${stop.lon}" class="mt-1 w-full border rounded-lg px-2 py-1" />
+          </label>
+          <div class="flex items-end">
+            <span class="text-xs text-slate-500">順序 ${stop.seqOrder}</span>
+          </div>
+        `;
+        stopBox.appendChild(row);
+      });
+
+      const timetableBox = document.createElement('div');
+      timetableBox.className = 'space-y-3';
+      timetableBox.innerHTML = '<h4 class="font-bold text-slate-700">時刻表</h4>';
+
+      data.timetable.forEach((trip) => {
+        const card = document.createElement('div');
+        card.className = 'border rounded-xl p-3 bg-white';
+        card.innerHTML = `<div class="font-bold text-blue-800 mb-2">便 ${trip.tripIndex + 1}</div>`;
+
+        trip.stops.forEach((stop) => {
+          const row = document.createElement('div');
+          row.className = 'grid gap-2 md:grid-cols-3 items-center py-2 border-b last:border-b-0';
+          row.innerHTML = `
+            <div class="font-bold">${stop.stopName}</div>
+            <div class="text-xs text-slate-500">seq ${stop.seqOrder}</div>
+            <label class="block text-sm font-bold">時刻
+              <input type="time" data-trip-id="${trip.tripId}" data-stop-id="${stop.stopId}" data-scheduled-time="${stop.scheduledTime || ''}" value="${stop.scheduledTime || ''}" class="mt-1 w-full border rounded-lg px-2 py-1" />
+            </label>
+          `;
+          card.appendChild(row);
+        });
+
+        timetableBox.appendChild(card);
+      });
+
+      routeDataEditor.appendChild(stopBox);
+      routeDataEditor.appendChild(timetableBox);
+    }
+
+    // バス位置情報の表示
+    function renderBusPositions(data) {
+      positionsContainer.innerHTML = '';
+      
+      if (!data || !data.positions || data.positions.length === 0) {
+        positionsContainer.innerHTML = `
+          <div class="bg-yellow-50 border-2 border-yellow-200 rounded-xl p-4 text-center">
+            <p class="font-bold text-yellow-800">直近3分以内のバス位置情報はありません。</p>
+            <p class="text-sm text-yellow-600 mt-1">位置情報の取得間隔やフィルタ設定を確認してください。</p>
+          </div>
+        `;
+        return;
+      }
+
+      const now = new Date(data.fetchedAt);
+      const fetchedAtStr = now.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+
+      data.positions.forEach((pos) => {
+        const gpsDate = new Date(pos.gpsTimeTs);
+        const diffSec = Math.floor((now.getTime() - gpsDate.getTime()) / 1000);
+        const freshnessLabel = diffSec < 60 ? `${diffSec}秒前` : Math.floor(diffSec / 60) + '分前';
+        const freshnessColor = diffSec < 60 ? 'text-green-600 bg-green-50 border-green-200' : 'text-yellow-700 bg-yellow-50 border-yellow-200';
+        
+        const card = document.createElement('div');
+        card.className = 'border-2 border-slate-200 rounded-xl p-4 bg-white hover:shadow-md transition-shadow';
+        card.innerHTML = `
+          <div class="flex justify-between items-start mb-3">
+            <div class="flex items-center gap-2">
+              <span class="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center text-blue-700 font-bold">${escapeHtml(pos.carId.slice(-2))}</span>
+              <div>
+                <span class="font-bold text-lg text-slate-900">車両 ${escapeHtml(pos.carId)}</span>
+                <span class="text-xs px-2 py-0.5 rounded-full border ${freshnessColor} font-bold ml-2">${freshnessLabel}</span>
+              </div>
+            </div>
+            <a href="https://www.google.com/maps?q=${pos.lat},${pos.lon}" target="_blank" 
+               class="text-blue-600 hover:text-blue-800 text-sm font-bold flex items-center gap-1">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path>
+              </svg>
+              地図
+            </a>
+          </div>
+          <div class="grid grid-cols-2 gap-3 text-sm">
+            <div>
+              <p class="text-slate-400 text-xs font-bold">路線</p>
+              <p class="font-bold">${escapeHtml(pos.routeName)}${pos.directionId === 0 ? '（下り）' : '（上り）'}</p>
+            </div>
+            <div>
+              <p class="text-slate-400 text-xs font-bold">GPS時刻</p>
+              <p class="font-bold">${escapeHtml(pos.gpsTime)}</p>
+            </div>
+            <div class="col-span-2">
+              <p class="text-slate-400 text-xs font-bold">位置</p>
+              <p class="font-bold">${pos.address ? escapeHtml(pos.address) : '住所取得中...'}</p>
+              <p class="text-xs text-slate-400 mt-0.5">${pos.lat}, ${pos.lon}</p>
+            </div>
+          </div>
+        `;
+        positionsContainer.appendChild(card);
+      });
+    }
+
+    async function loadBusPositions() {
+      const icon = document.getElementById('pos-refresh-icon');
+      icon.classList.add('animate-spin');
+      positionsStatus.textContent = '位置情報を取得中...';
+      positionsStatus.className = 'text-sm font-bold text-blue-600';
+
+      try {
+        const data = await api('/api/admin/bus-positions');
+        renderBusPositions(data);
+        const now = new Date(data.fetchedAt);
+        const fetchedAtStr = now.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+        positionsStatus.textContent = `✓ ${data.count} 台のバスを検出（取得時刻: ${fetchedAtStr}）`;
+        positionsStatus.className = 'text-sm font-bold text-green-700';
+      } catch (err) {
+        positionsContainer.innerHTML = `
+          <div class="bg-red-50 border-2 border-red-200 rounded-xl p-4">
+            <p class="font-bold text-red-800">位置情報の取得に失敗しました。</p>
+            <p class="text-sm text-red-600 mt-1">${escapeHtml(err.message)}</p>
+          </div>
+        `;
+        positionsStatus.textContent = 'エラーが発生しました。もう一度お試しください。';
+        positionsStatus.className = 'text-sm font-bold text-red-600';
+      } finally {
+        setTimeout(() => icon.classList.remove('animate-spin'), 500);
+      }
+    }
+
+    async function loadSettings() {
+      const settings = await api('/api/admin/settings');
+      document.getElementById('notice1').value = settings.notice1 || '';
+      document.getElementById('notice2').value = settings.notice2 || '';
+      document.getElementById('importantNotice').value = settings.importantNotice || '';
+    }
+
+    async function loadRoutes() {
+      const routes = await api('/api/routes');
+      state.routes = routes.routes || [];
+      renderRouteOptions();
+      if (!state.routes.length) return;
+      if (!state.mappingRows.length) {
+        state.mappingRows = state.routes.map((route) => ({ routeId: route.id, externalId: '' }));
+      }
+      renderMappingTable(state.mappingRows);
+    }
+
+    async function loadMappings() {
+      const data = await api('/api/admin/route-mappings');
+      state.mappingRows = data.mappings || [];
+      renderMappingTable(state.mappingRows);
+    }
+
+    async function saveMappings() {
+      const mappings = [...mappingTable.querySelectorAll('tr')].map((row) => {
+        const routeId = row.querySelector('.route-select').value;
+        const externalId = row.querySelector('.external-id-input').value.trim();
+        return { routeId, externalId };
+      }).filter((item) => item.externalId);
+
+      await api('/api/admin/route-mappings', {
+        method: 'PUT',
+        body: JSON.stringify({ mappings })
+      });
+      showStatus('外部ID対応表を保存しました。');
+    }
+
+    async function loadRouteData(routeId) {
+      const data = await api(`/api/admin/route-data?routeId=${encodeURIComponent(routeId)}`);
+      renderRouteDataEditor(data);
+    }
+
+    async function saveRouteData() {
+      const stopMap = {};
+      [...routeDataEditor.querySelectorAll('[data-stop-field]')].forEach((el) => {
+        const stopId = Number(el.dataset.stopId);
+        if (!stopMap[stopId]) {
+          stopMap[stopId] = { id: stopId, lat: null, lon: null };
+        }
+        const field = el.dataset.stopField;
+        stopMap[stopId][field] = field === 'lat' || field === 'lon' ? Number(el.value) : el.value;
+      });
+
+      const stopEdits = Object.values(stopMap);
+      const timetableEdits = [...routeDataEditor.querySelectorAll('[data-scheduled-time]')].map((el) => ({
+        tripId: Number(el.dataset.tripId),
+        stopId: Number(el.dataset.stopId),
+        scheduledTime: el.value || null
+      }));
+
+      await api('/api/admin/route-data', {
+        method: 'PUT',
+        body: JSON.stringify({
+          routeId: routeEditSelect.value,
+          stopEdits,
+          timetableEdits
+        })
+      });
+
+      showStatus('停留所座標・時刻表を保存しました。');
+    }
+
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&')
+        .replace(/</g, '<')
+        .replace(/>/g, '>')
+        .replace(/"/g, '"');
+    }
+
+    document.getElementById('login-btn').addEventListener('click', async () => {
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+
+      if (!username || !password) {
+        showStatus('ユーザー名とパスワードを入力してください。', 'error');
+        return;
+      }
+
+      setAuthToken(username, password);
+      try {
+        await Promise.all([
+          loadSettings(),
+          loadRoutes(),
+          loadMappings(),
+        ]);
+        localStorage.setItem('adminToken', state.token);
+        applyEditorState();
+        showStatus('ログインしました。設定・対応表・路線データを編集できます。');
+      } catch (err) {
+        clearAuthToken();
+        showStatus(err.message, 'error');
+      }
+    });
+
+    document.getElementById('save-btn').addEventListener('click', async () => {
+      try {
+        const payload = {
+          notice1: document.getElementById('notice1').value,
+          notice2: document.getElementById('notice2').value,
+          importantNotice: document.getElementById('importantNotice').value,
+          routeName: '横田信大循環線',
+          operatorName: 'ぐるっと松本バス（アルピコ交通）'
+        };
+
+        await api('/api/admin/settings', {
+          method: 'PUT',
+          body: JSON.stringify(payload)
+        });
+
+        showStatus('保存しました。公開画面に反映されます。');
+      } catch (err) {
+        showStatus(err.message, 'error');
+      }
+    });
+
+    document.getElementById('logout-btn').addEventListener('click', () => {
+      clearAuthToken();
+      showStatus('ログアウトしました。', 'info');
+    });
+
+    document.getElementById('add-mapping-btn').addEventListener('click', () => {
+      state.mappingRows.push({ routeId: state.routes[0]?.id || '11', externalId: '' });
+      renderMappingTable(state.mappingRows);
+    });
+
+    document.getElementById('save-mapping-btn').addEventListener('click', saveMappings);
+
+    document.getElementById('load-route-data-btn').addEventListener('click', () => {
+      loadRouteData(routeEditSelect.value).catch((err) => showStatus(err.message, 'error'));
+    });
+
+    document.getElementById('save-route-data-btn').addEventListener('click', saveRouteData);
+
+    // バス位置情報更新ボタン
+    document.getElementById('refresh-positions-btn').addEventListener('click', loadBusPositions);
+
+    const storedToken = localStorage.getItem('adminToken');
+    if (storedToken) {
+      state.token = storedToken;
+      Promise.all([
+        loadSettings(),
+        loadRoutes(),
+        loadMappings(),
+      ])
+        .then(() => {
+          applyEditorState();
+          showStatus('保存済みセッションでログイン中です。');
+        })
+        .catch(() => {
+          clearAuthToken();
+          showStatus('保存済みセッションが無効です。再度ログインしてください。', 'error');
+        });
+    }
+  </script>
+</body>
+</html>

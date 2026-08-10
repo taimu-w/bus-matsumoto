@@ -7,6 +7,7 @@
 // 補正した所要時間を積み上げて残り各バス停の到着時刻を予測する。
 // 統計データが不足する区間・便については、時刻表上の所要時間 or 単純遅延加算に
 // 段階的にフォールバックし、常に何らかの予測値を返せるようにしている。
+const pool = require('../config/db');
 const { timeStrToMinutes, minutesToTimeStr, getDayType, computeDelayMinutes } = require('../utils/time');
 
 const MIN_SAMPLES_FOR_TRUST = 3;
@@ -26,8 +27,13 @@ function isValidTime(t) {
  * completed_trips のうち未集計のものを segment_travel_stats へインクリメンタル反映する。
  */
 async function updateSegmentStats(client) {
+  // is_official = TRUE（＝その便の実績として正とみなす、最後に担当車両だった記録）だけを
+  // 集計する。候補車両止まりの記録を混ぜると、別経路をたまたま走っていた車両の所要時間で
+  // 区間統計が汚染される。また担当が切り替わった便で同じ区間を二重計上することも防げる。
   const pending = await client.query(
-    `SELECT id, day_of_week FROM completed_trips WHERE aggregated = FALSE ORDER BY id ASC LIMIT 200`
+    `SELECT id, day_of_week FROM completed_trips
+     WHERE aggregated = FALSE AND is_official = TRUE
+     ORDER BY id ASC LIMIT 200`
   );
   if (pending.rows.length === 0) return { aggregated: 0 };
 
@@ -95,7 +101,9 @@ async function getSegmentStat(client, fromStopId, toStopId, dayType, hourBucket)
 }
 
 /**
- * 指定車両の残り各バス停に対する予測到着時刻を算出する。
+ * 指定した便への割り当て（assignment）の、残り各バス停に対する予測到着時刻を算出する。
+ * 便起点方式では進捗が (便 × 車両) 単位になったため、車両IDではなく割り当てIDを受け取る。
+ * 予測アルゴリズムそのものは従来から一切変更していない。
  * 戻り値: [{ stopId, seqOrder, predictedTime, predictedDelayMinutes, source }]
  *   source: 'historical'（統計採用） | 'schedule_paced'（時刻表所要時間×ペース補正）
  *         | 'naive_anchored'（通過区間を基準駅からの定刻差分で算出） | 'through_skip'（通過駅本体・時間を進めない）
@@ -110,14 +118,14 @@ async function getSegmentStat(client, fromStopId, toStopId, dayType, hourBucket)
  *   ②通常停車バス停（有効な時刻表を持つ駅）で予測が定刻を下回る場合は、
  *     早発防止のため定刻まで床打ちする。通過駅は対象外。
  */
-async function predictArrivals(client, vehicleId) {
+async function predictArrivals(client, assignmentId) {
   const rows = await client.query(
-    `SELECT vss.stop_id, vss.seq_order, vss.scheduled_time, vss.status, vss.actual_time, s.name
-     FROM vehicle_stop_status vss
-     JOIN stops s ON s.id = vss.stop_id
-     WHERE vss.vehicle_id = $1
-     ORDER BY vss.seq_order ASC`,
-    [vehicleId]
+    `SELECT p.stop_id, p.seq_order, p.scheduled_time, p.status, p.actual_time, s.name
+     FROM trip_stop_progress p
+     JOIN stops s ON s.id = p.stop_id
+     WHERE p.assignment_id = $1
+     ORDER BY p.seq_order ASC`,
+    [assignmentId]
   );
   const stops = rows.rows;
   if (stops.length === 0) return [];
@@ -318,4 +326,101 @@ async function predictArrivals(client, vehicleId) {
   return results;
 }
 
-module.exports = { updateSegmentStats, predictArrivals };
+/**
+ * 全 active な割り当て（担当・候補とも）に対する ETA を一括計算し、
+ * trip_arrival_predictions へ UPSERT する。パイプライン内から delayCalc() の
+ * 直後に呼ばれる（設計書 docs/design-eta-precompute.md）。
+ * predictArrivals() 自体はここでもオンデマンド計算時と同じものを使う。
+ * アルゴリズムを重複実装しないため。
+ * @returns {Promise<{computed: number, stored: number, deleted: number}>}
+ */
+async function computeAndStoreAllArrivals() {
+  const client = await pool.connect();
+  const startedAt = Date.now();
+  let computed = 0;
+  let stored = 0;
+  try {
+    const assignments = await client.query(
+      `SELECT id FROM trip_vehicle_assignments WHERE state = 'active' ORDER BY id ASC`
+    );
+
+    for (const assignment of assignments.rows) {
+      try {
+        const arrivals = await predictArrivals(client, assignment.id);
+        if (arrivals.length === 0) {
+          computed++;
+          continue;
+        }
+
+        await client.query(
+          `INSERT INTO trip_arrival_predictions
+             (assignment_id, stop_id, seq_order, predicted_time, predicted_delay_minutes, source, computed_at, updated_at)
+           SELECT $1, t.stop_id, t.seq_order, t.predicted_time, t.predicted_delay_minutes, t.source, now(), now()
+           FROM unnest($2::int[], $3::int[], $4::text[], $5::int[], $6::text[])
+             AS t(stop_id, seq_order, predicted_time, predicted_delay_minutes, source)
+           ON CONFLICT (assignment_id, stop_id) DO UPDATE SET
+             seq_order = EXCLUDED.seq_order,
+             predicted_time = EXCLUDED.predicted_time,
+             predicted_delay_minutes = EXCLUDED.predicted_delay_minutes,
+             source = EXCLUDED.source,
+             computed_at = EXCLUDED.computed_at,
+             updated_at = now()`,
+          [
+            assignment.id,
+            arrivals.map((a) => a.stopId),
+            arrivals.map((a) => a.seqOrder),
+            arrivals.map((a) => a.predictedTime),
+            arrivals.map((a) => a.predictedDelayMinutes),
+            arrivals.map((a) => a.source)
+          ]
+        );
+        stored += arrivals.length;
+        computed++;
+      } catch (err) {
+        console.error(`[etaPredictor] assignment=${assignment.id} の ETA 計算エラー:`, err.message);
+      }
+    }
+
+    // 48時間以上前の予測は掃除する（便がclosedになった場合のトリップCASCADE削除の
+    // 補完。カスケード対象外の孤児レコードが残る経路は無いはずだが保険）
+    const deleted = await client.query(
+      `DELETE FROM trip_arrival_predictions WHERE computed_at < now() - interval '48 hours'`
+    );
+
+    console.log(
+      `[etaPredictor] ETA プリコンピュート完了: ${computed} 割り当て / ${stored} レコード保存 ` +
+        `/ ${deleted.rowCount} 古いレコード削除 (${Date.now() - startedAt}ms)`
+    );
+
+    return { computed, stored, deleted: deleted.rowCount };
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * 指定した割り当ての到着予測を trip_arrival_predictions から読み出す（DB読み出しのみ）。
+ * predictArrivals() とは異なり計算は一切行わない。
+ * @param {Client} client - PostgreSQL クライアント
+ * @param {number} assignmentId - 割り当て ID
+ * @returns {Promise<Array>} [{stopId, seqOrder, predictedTime, predictedDelayMinutes, source}]
+ */
+async function getArrivalsForAssignment(client, assignmentId) {
+  const res = await client.query(
+    `SELECT stop_id, seq_order, predicted_time, predicted_delay_minutes, source
+     FROM trip_arrival_predictions
+     WHERE assignment_id = $1
+     ORDER BY seq_order ASC`,
+    [assignmentId]
+  );
+
+  return res.rows.map((row) => ({
+    stopId: row.stop_id,
+    seqOrder: row.seq_order,
+    predictedTime: row.predicted_time,
+    predictedDelayMinutes: row.predicted_delay_minutes,
+    source: row.source
+  }));
+}
+
+module.exports = { updateSegmentStats, predictArrivals, computeAndStoreAllArrivals, getArrivalsForAssignment };

@@ -1,4 +1,3 @@
-// GASのユーティリティ関数（getNowTimeInt, isNightTime, timeStrToMinutes等）をNode.jsに移植したもの。
 // タイムゾーンは常にAsia/Tokyo(JST)で統一する。
 
 const TZ = 'Asia/Tokyo';
@@ -38,7 +37,7 @@ function parseHHMM(str) {
  */
 function isNightTime() {
   const nightStart = parseHHMM(process.env.NIGHT_START || '23:00');
-  const nightEnd = parseHHMM(process.env.NIGHT_END || '05:45');
+  const nightEnd = parseHHMM(process.env.NIGHT_END || '05:00');
   const startInt = nightStart.h * 100 + nightStart.m;
   const endInt = nightEnd.h * 100 + nightEnd.m;
   const t = getNowTimeInt();
@@ -107,9 +106,35 @@ function timeStrToDateToday(timeStr) {
 }
 
 /**
+ * 運行日（サービス日）を "YYYY-MM-DD" 形式（JST基準）で返す。
+ * daily_trips.service_date のキーとして使う。
+ */
+function getServiceDateString(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(date);
+  const get = (t) => parts.find((p) => p.type === t).value;
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
+/**
+ * "YYYY-MM-DD" の運行日と「0時起点の分数」から、実時刻のDateを作る。
+ * 分数が1440を超える場合（GTFSの24時超え表記）は翌日の時刻として正しく解釈する。
+ * JSTは UTC+9 固定（夏時間なし）であることを利用する。
+ */
+function serviceDateTimeToDate(serviceDateStr, minutes) {
+  const [y, m, d] = String(serviceDateStr).split('-').map((v) => parseInt(v, 10));
+  if (Number.isNaN(y) || Number.isNaN(m) || Number.isNaN(d) || Number.isNaN(minutes)) return null;
+  return new Date(Date.UTC(y, m - 1, d, -9, 0, 0) + minutes * 60 * 1000);
+}
+
+/**
  * 曜日区分（平日/土曜/休日）を判定する。ETA統計のバケット分けに使用。
  * 日本の祝日カレンダーは持たないため、日曜日のみ「holiday」扱いとし、
  * 祝日運用が必要な場合は system_settings に祝日リストを追加して拡張すること。
+ * 
+ * ※注意: GTFSのservice_id（平日/土休日）とは独立した、ETA統計専用の区分です。
+ *   GTFSの曜日別ダイヤ適用は getActiveServiceIds()（gtfsCalendar.js）で行います。
  */
 function getDayType(date = new Date()) {
   const wd = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' }).format(date);
@@ -159,6 +184,8 @@ module.exports = {
   timeStrToMinutes,
   minutesToTimeStr,
   timeStrToDateToday,
+  getServiceDateString,
+  serviceDateTimeToDate,
   getDayType,
   getDayOfWeek,
   computeDelayMinutes

@@ -1,35 +1,52 @@
-// GASの pass() 系関数群（passStep1And3 / passStep2 / passUpdateAndInterpolate / passInterpolate）に相当。
 // GPS走行ログとバス停マスタを突き合わせ、バス停通過を検知する。
-// 循環線対策は元GASと同じ2条件を踏襲しつつ、DBとの同期ズレを防ぐ安全な設計に変更。
+//
+// 便起点方式では処理単位が「車両」ではなく「便への割り当て(assignment)」になる。
+// 担当車両・候補車両を区別せず、有効な割り当てすべてに対して同じ処理を行う（仕様書 9）。
+// 判定アルゴリズム本体（循環線対策・巻き戻り防止・重複解消・欠落補完）は
+// 従来のまま変更していない（仕様書 14）。
 //   ① 直近の到着済バス停インデックスから4つ先までしか探索しない
-//   ② 出発20分以内は、路線全体の後半80%のバス停を候補から除外する
+//   ② 始発時刻から20分以内は、便全体の後半80%のバス停を候補から除外する
 const pool = require('../config/db');
 const { haversineDistanceMeters } = require('../utils/geo');
 const { timeStrToMinutes, minutesToTimeStr } = require('../utils/time');
 
-async function getActiveVehiclesForPass(client) {
+/**
+ * 処理対象の割り当て一覧。担当・候補の両方が対象。
+ */
+async function getActiveAssignments(client) {
   const res = await client.query(
-    `SELECT id, car_id, departure_time FROM vehicles WHERE status = 'active'`
+    `SELECT a.id AS assignment_id, a.vehicle_id, a.role,
+            d.id AS daily_trip_id, d.route_id, d.start_time, d.start_at,
+            v.car_id
+     FROM trip_vehicle_assignments a
+     JOIN daily_trips d ON d.id = a.daily_trip_id
+     JOIN vehicles v ON v.id = a.vehicle_id
+     WHERE a.state = 'active'
+     ORDER BY a.id ASC`
   );
   return res.rows;
 }
 
-async function getStopMaster(client, vehicleId) {
+/**
+ * その便の停留所と現在の進捗。便の停車パターンだけが対象になるため、
+ * 路線に属していてもその便が通らないバス停は最初から含まれない。
+ */
+async function getStopMaster(client, assignmentId) {
   const res = await client.query(
-    `SELECT vss.stop_id, vss.seq_order, vss.status, s.name, s.lat, s.lon, s.notice
-     FROM vehicle_stop_status vss
-     JOIN stops s ON s.id = vss.stop_id
-     WHERE vss.vehicle_id = $1
-     ORDER BY vss.seq_order ASC`,
-    [vehicleId]
+    `SELECT p.stop_id, p.seq_order, p.status, s.name, s.lat, s.lon, s.notice
+     FROM trip_stop_progress p
+     JOIN stops s ON s.id = p.stop_id
+     WHERE p.assignment_id = $1
+     ORDER BY p.seq_order ASC`,
+    [assignmentId]
   );
   return res.rows;
 }
 
-async function passStep1And3(client, vehicle, stopMaster, gpsRows, radiusMeters, freshnessMs) {
-  const now = Date.now();
+function passStep1And3(assignment, stopMaster, gpsRows, radiusMeters) {
   const totalStops = stopMaster.length;
-  const f3Min = timeStrToMinutes(vehicle.departure_time);
+  // 旧実装の「出発時刻からの経過分」に相当する基準。便起点方式では便の始発時刻を使う。
+  const startMin = timeStrToMinutes(assignment.start_time);
 
   // DB上で確定している「最後に到着したバス停」のインデックスを取得
   // 【循環線対策】このバッチ処理中は、この基準値を書き換えない（固定する）
@@ -44,16 +61,12 @@ async function passStep1And3(client, vehicle, stopMaster, gpsRows, radiusMeters,
   // 【巻き戻り防止用】バッチ内での進行状況を記録する変数（初期値はDBの直近バス停）
   let currentMaxIdx = lastArrivedIdx;
 
-  // 確定済みのバス停セット
   const arrivedSet = new Set(stopMaster.filter((s) => s.status === '到着済').map((s) => s.seq_order));
-  const tentativeMatches = []; // {gpsRowId, stopId, seqOrder, stopName, dist, gpsTime}
+  const tentativeMatches = [];
 
   for (const gps of gpsRows) {
-    const gpsTimeMs = new Date(gps.gps_time_ts).getTime();
-    if (now - gpsTimeMs > freshnessMs) continue;
-
     const gpsMin = timeStrToMinutes(gps.gps_time);
-    const minSinceDep = !Number.isNaN(f3Min) && !Number.isNaN(gpsMin) ? gpsMin - f3Min : NaN;
+    const minSinceStart = !Number.isNaN(startMin) && !Number.isNaN(gpsMin) ? gpsMin - startMin : NaN;
 
     let best = null;
     for (const stop of stopMaster) {
@@ -61,12 +74,12 @@ async function passStep1And3(client, vehicle, stopMaster, gpsRows, radiusMeters,
 
       // 【巻き戻り防止】すでに通過した（またはこのバッチ内で通過判定が出た）バス停は除外
       if (stop.seq_order <= currentMaxIdx) continue;
-      
+
       // 【循環線対策①】探索範囲の制限（確定している直近バス停の4つ先まで）
       if (lastArrivedIdx !== -1 && stop.seq_order > lastArrivedIdx + 4) continue;
-      
-      // 【循環線対策②】初期の誤判定防止（出発20分以内は後半80%を除外）
-      if (!Number.isNaN(minSinceDep) && minSinceDep < 20 && stop.seq_order / totalStops > 0.8) continue;
+
+      // 【循環線対策②】初期の誤判定防止（始発から20分以内は後半80%を除外）
+      if (!Number.isNaN(minSinceStart) && minSinceStart < 20 && stop.seq_order / totalStops > 0.8) continue;
 
       const dist = haversineDistanceMeters(gps.lat, gps.lon, stop.lat, stop.lon);
       if (dist <= radiusMeters) {
@@ -84,7 +97,7 @@ async function passStep1And3(client, vehicle, stopMaster, gpsRows, radiusMeters,
         lon: gps.lon,
         ...best
       });
-      
+
       // 【巻き戻り防止】マッチしたバス停を記録し、次のGPSログからはこれより前を探索させない
       currentMaxIdx = Math.max(currentMaxIdx, best.seqOrder);
     }
@@ -117,11 +130,11 @@ function passStep2Dedup(matches, stopMaster) {
   return kept;
 }
 
-async function passInterpolate(client, vehicleId) {
+async function passInterpolate(client, assignmentId) {
   const rows = await client.query(
-    `SELECT stop_id, seq_order, status, actual_time FROM vehicle_stop_status
-     WHERE vehicle_id = $1 ORDER BY seq_order ASC`,
-    [vehicleId]
+    `SELECT stop_id, seq_order, status, actual_time FROM trip_stop_progress
+     WHERE assignment_id = $1 ORDER BY seq_order ASC`,
+    [assignmentId]
   );
 
   const arrivedList = [];
@@ -154,10 +167,10 @@ async function passInterpolate(client, vehicleId) {
 
       const timeStr = minutesToTimeStr(interpolatedMins);
       await client.query(
-        `UPDATE vehicle_stop_status
+        `UPDATE trip_stop_progress
          SET status = '到着済', actual_time = $1, interpolated = TRUE
-         WHERE vehicle_id = $2 AND stop_id = $3`,
-        [timeStr, vehicleId, target.stop_id]
+         WHERE assignment_id = $2 AND stop_id = $3`,
+        [timeStr, assignmentId, target.stop_id]
       );
       filled++;
     }
@@ -168,78 +181,84 @@ async function passInterpolate(client, vehicleId) {
 async function pass() {
   const client = await pool.connect();
   const radiusMeters = parseFloat(process.env.STOP_RADIUS_METERS || '120');
-  const freshnessMs = parseInt(process.env.GPS_FRESHNESS_MIN || '15', 10) * 60 * 1000;
+  const freshnessMin = parseInt(process.env.GPS_FRESHNESS_MIN || '15', 10);
+  const gpsWindowMin = parseFloat(process.env.ASSIGN_GPS_WINDOW_MIN || '3');
   let totalPassed = 0;
   let totalInterpolated = 0;
 
   try {
-    const vehicles = await getActiveVehiclesForPass(client);
+    const assignments = await getActiveAssignments(client);
 
-    for (const vehicle of vehicles) {
-      const stopMaster = await getStopMaster(client, vehicle.id);
+    for (const assignment of assignments) {
+      const stopMaster = await getStopMaster(client, assignment.assignment_id);
       if (stopMaster.length === 0) continue;
 
+      // この割り当てでまだ消費していないGPSログ。
+      // 「どのGPSを処理済みか」は車両ではなく割り当てごとに管理する必要がある
+      // （1台の車両が複数便の候補になり得るため）。
+      const windowStart = new Date(new Date(assignment.start_at).getTime() - gpsWindowMin * 60 * 1000);
       const gpsRes = await client.query(
-        `SELECT id, gps_time, gps_time_ts, lat, lon FROM vehicle_gps_log
-         WHERE vehicle_id = $1 AND matched_label IS NULL
-         ORDER BY gps_time_ts ASC`,
-        [vehicle.id]
+        `SELECT g.id, g.gps_time, g.gps_time_ts, g.lat, g.lon
+         FROM vehicle_gps_log g
+         WHERE g.vehicle_id = $1
+           AND g.gps_time_ts >= $2
+           AND g.gps_time_ts >= now() - ($3::int * INTERVAL '1 minute')
+           AND NOT EXISTS (
+             SELECT 1 FROM trip_gps_matches m
+             WHERE m.assignment_id = $4 AND m.gps_log_id = g.id
+           )
+         ORDER BY g.gps_time_ts ASC`,
+        [assignment.vehicle_id, windowStart, freshnessMin, assignment.assignment_id]
       );
+
       if (gpsRes.rows.length === 0) {
-        await passInterpolate(client, vehicle.id);
+        await passInterpolate(client, assignment.assignment_id);
         continue;
       }
 
-      const tentative = await passStep1And3(
-        client,
-        vehicle,
-        stopMaster,
-        gpsRes.rows,
-        radiusMeters,
-        freshnessMs
-      );
-      
+      const tentative = passStep1And3(assignment, stopMaster, gpsRes.rows, radiusMeters);
       const kept = passStep2Dedup(tentative, stopMaster);
 
       for (const m of kept) {
         await client.query('BEGIN');
         try {
           await client.query(
-            `UPDATE vehicle_gps_log SET matched_stop_id = $1, matched_label = $2 WHERE id = $3`,
-            [m.stopId, m.stopName, m.gpsRowId]
+            `INSERT INTO trip_gps_matches (assignment_id, gps_log_id, stop_id)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (assignment_id, gps_log_id) DO NOTHING`,
+            [assignment.assignment_id, m.gpsRowId, m.stopId]
           );
           await client.query(
-            `UPDATE vehicle_stop_status
+            `UPDATE trip_stop_progress
              SET status = '到着済', actual_time = $1
-             WHERE vehicle_id = $2 AND stop_id = $3 AND status != '到着済'`,
-            [m.gpsTime, vehicle.id, m.stopId]
+             WHERE assignment_id = $2 AND stop_id = $3 AND status != '到着済'`,
+            [m.gpsTime, assignment.assignment_id, m.stopId]
           );
           await client.query(
-            `UPDATE vehicles SET last_arrived_seq = GREATEST(last_arrived_seq, $1) WHERE id = $2`,
-            [m.seqOrder, vehicle.id]
+            `UPDATE trip_vehicle_assignments
+             SET last_arrived_seq = GREATEST(last_arrived_seq, $1)
+             WHERE id = $2`,
+            [m.seqOrder, assignment.assignment_id]
           );
           await client.query('COMMIT');
           totalPassed++;
-          console.log(`[pass] 通過判定: carId=${vehicle.car_id} バス停=${m.stopName} 時刻=${m.gpsTime}`);
+          console.log(
+            `[pass] 通過判定: 便=${assignment.start_time}発 carId=${assignment.car_id} ` +
+            `バス停=${m.stopName} 時刻=${m.gpsTime}`
+          );
         } catch (err) {
           await client.query('ROLLBACK');
-          console.error(`[pass] エラー carId=${vehicle.car_id}:`, err.message);
+          console.error(`[pass] エラー carId=${assignment.car_id}:`, err.message);
         }
       }
 
-      // マッチしなかった（重複除去で外れた）行は再評価できるよう未処理に戻す
-      const keptIds = new Set(kept.map((k) => k.gpsRowId));
-      const discarded = tentative.filter((m) => !keptIds.has(m.gpsRowId));
-      for (const d of discarded) {
-        await client.query(`UPDATE vehicle_gps_log SET matched_label = NULL WHERE id = $1`, [
-          d.gpsRowId
-        ]);
-      }
+      // 重複除去で外れたGPSログは trip_gps_matches に記録しないため、
+      // 次回のバッチで自動的に再評価される（旧実装の matched_label 戻し処理に相当）。
 
-      const filled = await passInterpolate(client, vehicle.id);
+      const filled = await passInterpolate(client, assignment.assignment_id);
       totalInterpolated += filled;
       if (filled > 0) {
-        console.log(`[pass] 欠落補完: carId=${vehicle.car_id} 件数=${filled}`);
+        console.log(`[pass] 欠落補完: 便=${assignment.start_time}発 carId=${assignment.car_id} 件数=${filled}`);
       }
     }
   } finally {
