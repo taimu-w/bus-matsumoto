@@ -2,7 +2,7 @@ const express = require('express');
 const pool = require('../config/db');
 const { resolveRouteId } = require('../services/gtfsData');
 const { getArrivalsForAssignment } = require('../services/etaPredictor');
-const { searchStops, getRealtimeCandidates, getTimetableCandidates, calculateTransferRoute } = require('../services/routeSearch');
+const { searchStops, searchStopCandidates, resolveStopNameCandidates, searchRoutes } = require('../services/routeSearch');
 const { formatNowNoFormat, getServiceDateString } = require('../utils/time');
 const { getActiveServiceIds } = require('../services/gtfsCalendar');
 const { getCachedServiceStatus } = require('../services/serviceStatusScraper');
@@ -18,6 +18,7 @@ const {
   buildBusEntry,
   startTimeToUrlHhmm
 } = require('../services/realtimeTripLookup');
+const { getApproachingBuses } = require('../services/busStopApproaching');
 
 const router = express.Router();
 
@@ -655,32 +656,59 @@ router.get('/buses-for-map', async (req, res) => {
   }
 });
 
-// GET /api/route-search -> ルート検索（乗り換え案内対応）
+// GET /api/route-search/stops?q=... -> 経路検索の出発地・目的地候補（停留所名でグルーピング）
+// fromStopKey/toStopKey に渡す識別子（＝停留所名）はここで返す `stopKey` を使う。
+router.get('/route-search/stops', async (req, res) => {
+  try {
+    const query = req.query.q;
+    if (!query || query.length < 1) {
+      return res.json({ stops: [] });
+    }
+    const stops = await searchStopCandidates(pool, query);
+    res.json({ stops });
+  } catch (err) {
+    console.error('[api] /route-search/stops エラー:', err);
+    res.status(500).json({ error: '停留所候補の取得に失敗しました。' });
+  }
+});
+
+// GET /api/route-search -> ルート検索（乗り換え案内対応、複数候補を返す）
+// fromStopKey/toStopKey（候補選択済みの停留所識別子）を優先し、無ければ from/to を自由文字列として名称検索する。
 router.get('/route-search', async (req, res) => {
   try {
-    const routeId = req.query.routeId ? resolveRouteId(req.query.routeId) : null;
-    const fromStop = req.query.from;
-    const toStop = req.query.to;
-    const departureTime = req.query.departureTime || formatNowNoFormat();
+    const fromStopKey = req.query.fromStopKey || null;
+    const toStopKey = req.query.toStopKey || null;
 
-    if (!fromStop || !toStop) {
+    if (fromStopKey && toStopKey && fromStopKey === toStopKey) {
+      return res.status(400).json({ error: '出発地と目的地が同じです。目的地を変更してください。' });
+    }
+
+    const fromNames = fromStopKey ? [fromStopKey] : await resolveStopNameCandidates(pool, req.query.from);
+    const toNames = toStopKey ? [toStopKey] : await resolveStopNameCandidates(pool, req.query.to);
+
+    if (fromNames.length === 0 || toNames.length === 0) {
       return res.status(400).json({ error: '出発地と目的地を指定してください。' });
     }
 
-    console.log(`ルート検索: ${fromStop} → ${toStop}, routeId=${routeId || '全路線'}`);
+    const departureTime = req.query.departureTime || formatNowNoFormat();
+    const serviceDate = getServiceDateString();
+    const searchCondition = { from: fromNames[0], to: toNames[0], departureTime };
 
-    const result = await calculateTransferRoute(pool, fromStop, toStop, departureTime);
-    
-    if (!result) {
-      console.log(`ルート検索結果: 見つからず`);
-      return res.json({ 
-        found: false, 
-        message: 'ルートが見つかりませんでした。バス停名を確認してください。' 
+    console.log(`ルート検索: ${fromNames.join('/')} → ${toNames.join('/')}, departureTime=${departureTime}`);
+
+    const routes = await searchRoutes(pool, { fromNames, toNames, departureTime, serviceDate });
+
+    if (routes.length === 0) {
+      console.log('ルート検索結果: 見つからず');
+      return res.json({
+        found: false,
+        searchCondition,
+        message: 'ルートが見つかりませんでした。バス停の候補を選び直してください。'
       });
     }
 
-    console.log(`ルート検索結果: ${result.type}`, result);
-    res.json({ found: true, route: result });
+    console.log(`ルート検索結果: ${routes.length}件（${routes[0].type}）`);
+    res.json({ found: true, searchCondition, routes });
   } catch (err) {
     console.error('[api] /route-search エラー:', err);
     res.status(500).json({ error: 'ルート検索に失敗しました。' });
@@ -874,6 +902,45 @@ router.get('/timetable/trips/:feedId/:routeId/:tripId/:departureTime/realtime', 
   } catch (err) {
     console.error('[api] /timetable/trips/.../realtime エラー:', err);
     res.status(500).json({ error: '便のリアルタイム情報の取得に失敗しました。' });
+  }
+});
+
+// ==========================================================
+// バス停検索機能（補完仕様書）。内部実装は時刻表検索と統一し、
+// エンドポイント名のみ /api/busstop/... に分ける（補完仕様書 10.2）。
+//   /api/busstop/search                  バス停名検索（/timetable/stops/search の別名）
+//   /api/busstop/{stopKey}/approaching   接近中のバス情報（新規）
+// バス停詳細そのものは新規エンドポイントを作らず、既存の
+// /api/timetable/stops/{stopKey} をフロントから直接利用する。
+// ==========================================================
+
+// GET /api/busstop/search?q=...&limit=... -> /api/timetable/stops/search と同一データ
+router.get('/busstop/search', async (req, res) => {
+  try {
+    const query = String(req.query.q || '').trim();
+    if (!query) return res.json({ stops: [] });
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '20', 10) || 20, 1), 50);
+    const stops = await searchTimetableStops(query, limit);
+    res.json({ stops });
+  } catch (err) {
+    console.error('[api] /busstop/search エラー:', err);
+    res.status(500).json({ error: 'バス停検索に失敗しました。' });
+  }
+});
+
+// GET /api/busstop/:stopKey/approaching -> 現在時刻±30分以内に到着予定の便一覧（補完仕様書 3.5）
+// クエリ: date=YYYY-MM-DD（省略時は本日） / platform=標柱のstop_id（省略時は全標柱）
+router.get('/busstop/:stopKey/approaching', async (req, res) => {
+  try {
+    const data = await getApproachingBuses(req.params.stopKey, {
+      date: req.query.date,
+      platform: req.query.platform
+    });
+    if (!data) return res.status(404).json({ error: '指定のバス停が見つかりませんでした。' });
+    res.json(data);
+  } catch (err) {
+    console.error('[api] /busstop/:stopKey/approaching エラー:', err);
+    res.status(500).json({ error: '接近中のバス情報の取得に失敗しました。' });
   }
 });
 
