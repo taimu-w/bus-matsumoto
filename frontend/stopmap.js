@@ -6,7 +6,8 @@
  *             代表点（グループの中心座標）1件のみ表示する。統合ロジックは
  *             backend/src/services/gtfsTimetable.js の buildGroups が担っており、
  *             このファイルは /api/timetable/stops/map が返す結果をそのまま描画するだけ。
- *             バス停をタップすると /timetable/stops/{stop_id} へ遷移する。
+ *             バス停をタップすると /busstop/{stop_id}（バス停情報の総合ポータル）へ遷移する
+ *             （補完仕様書 3.6.3）。
  *
  * 既存の「バスマップ」（#/busmap）はハッシュルーティングだが、この画面は
  * timetable.js と同様に History API（パス）でルーティングする。
@@ -42,7 +43,7 @@
   }
 
   function stopUrl(stopKey) {
-    return `/timetable/stops/${encodeURIComponent(stopKey)}`;
+    return `/busstop/${encodeURIComponent(stopKey)}`;
   }
 
   function setStatus(text) {

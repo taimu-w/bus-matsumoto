@@ -1,9 +1,7 @@
 const fs = require('fs');
 const path = require('path');
-const pool = require('../config/db');
 const { getGtfsDir } = require('./gtfsFeedManager');
-
-const GTFS_DIR = getGtfsDir(null);
+const { getEnabledGtfsFeedIds } = require('../config/feeds');
 
 function parseCsvLine(line) {
   const values = [];
@@ -47,19 +45,15 @@ function readCsv(fileName, feedId = null) {
   });
 }
 
+/**
+ * 有効なGTFSフィードID一覧。取得元は config/feeds.js（コード上の定数）。
+ *
+ * 旧実装はDBを引き、障害時に `data gtfs/` のディレクトリ名をフィードIDとみなす
+ * フォールバックを持っていたが、`.tmp_*` の残骸や無効化したはずの古いフィードを
+ * 拾ってしまう「コード上の定義より信頼できない推測」だったため撤去した。
+ */
 async function getEnabledFeedIds() {
-  try {
-    const result = await pool.query(
-      `SELECT id FROM feeds WHERE feed_type = 'gtfs' AND enabled = TRUE ORDER BY id ASC`
-    );
-    return result.rows.map((row) => row.id);
-  } catch (err) {
-    // DB障害時でも、ローカルに展開済みのフィードを使って時刻表を表示できるようにする。
-    console.warn('[gtfsCalendar] 有効GTFSフィード一覧取得エラー:', err.message);
-    return fs.readdirSync(GTFS_DIR, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name);
-  }
+  return getEnabledGtfsFeedIds();
 }
 
 // calendar.txt と calendar_dates.txt を読み込んで、

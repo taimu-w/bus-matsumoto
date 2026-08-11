@@ -13,8 +13,20 @@ CREATE TABLE IF NOT EXISTS routes (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- フィード管理（GTFSフィード・位置情報フィードの両方を管理）
--- 位置情報CSVとGTFSの対応関係はこのテーブル + feed_mappings で動的に管理する
+-- フィードの稼働状態を記録するテーブル。
+--
+-- ⚠️ これは構成マスタではない。GTFSフィード・位置情報フィードの構成
+-- （id / feed_type / name / url / enabled）と、位置情報フィード⇔GTFSフィードの対応は
+-- backend/src/config/feeds.js（コード）が唯一の情報源であり、
+-- ここの行は seed.js の ensureFeedRows() がそこからUPSERTして用意する。
+-- **DBを直接編集しても次回起動時に上書きされる。**
+--
+-- 実行時に書き込まれる観測データは last_fetched_at / last_status / last_error の3列だけで、
+-- これらはコード化できないためDBに残している（外部IDマッピングのコード化 仕様書 3.3）。
+--
+-- 旧 feed_mappings テーブル（confidence による対応の推測）と
+-- 旧 route_external_ids テーブル（外部ID⇔route_idの対応）は、
+-- いずれもコードへ移したため削除済み。migrate.js が DROP する。
 CREATE TABLE IF NOT EXISTS feeds (
   id            TEXT PRIMARY KEY,
   feed_type     TEXT NOT NULL CHECK (feed_type IN ('gtfs', 'location')),
@@ -25,23 +37,6 @@ CREATE TABLE IF NOT EXISTS feeds (
   last_status   TEXT,
   last_error    TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- 位置情報フィードとGTFSフィードの対応関係（動的管理）
--- コードにハードコードせず、DBで管理する
-CREATE TABLE IF NOT EXISTS feed_mappings (
-  location_feed_id TEXT NOT NULL REFERENCES feeds(id),
-  gtfs_feed_id     TEXT NOT NULL REFERENCES feeds(id),
-  confidence       REAL NOT NULL DEFAULT 0,
-  PRIMARY KEY (location_feed_id, gtfs_feed_id)
-);
-
-CREATE TABLE IF NOT EXISTS route_external_ids (
-  route_id      TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
-  external_id   TEXT NOT NULL,
-  feed_id       TEXT REFERENCES feeds(id),
-  PRIMARY KEY (route_id, external_id),
-  UNIQUE (external_id)
 );
 
 CREATE TABLE IF NOT EXISTS stops (

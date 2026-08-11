@@ -12,7 +12,7 @@
     <div class="w-full max-w-5xl bg-white rounded-2xl shadow-xl overflow-hidden">
       <div class="bg-blue-900 text-white px-6 py-4">
         <h1 class="text-2xl font-bold">管理画面</h1>
-        <p class="text-sm text-blue-100 mt-1">外部IDマッピング・バス停座標・時刻表・バス位置情報を確認できます</p>
+        <p class="text-sm text-blue-100 mt-1">バス停座標・時刻表・バス位置情報を確認できます</p>
       </div>
 
       <div id="login-card" class="p-6">
@@ -73,28 +73,10 @@
           <div id="positions-container" class="space-y-3"></div>
         </div>
 
-        <div class="border-t pt-5 space-y-4">
-          <div class="flex items-center justify-between gap-3">
-            <div>
-              <h3 class="text-lg font-bold">外部ID ↔ GTFS路線ID 対応表</h3>
-              <p class="text-sm text-slate-500">位置情報CSVの `TARGET_EXTRA_ID` を裏で管理するマッピングです。</p>
-            </div>
-            <button id="add-mapping-btn" class="bg-blue-700 text-white font-bold rounded-lg px-3 py-2">行追加</button>
-          </div>
-          <div class="overflow-x-auto">
-            <table class="w-full text-sm border-collapse">
-              <thead>
-                <tr class="bg-slate-100 text-slate-700">
-                  <th class="p-2 text-left">GTFS路線</th>
-                  <th class="p-2 text-left">外部ID</th>
-                  <th class="p-2 text-left">削除</th>
-                </tr>
-              </thead>
-              <tbody id="mapping-table"></tbody>
-            </table>
-          </div>
-          <button id="save-mapping-btn" class="bg-indigo-700 text-white font-bold rounded-lg px-4 py-3">対応表を保存</button>
-        </div>
+        <!--
+          「外部ID ↔ GTFS路線ID 対応表」の編集セクションは削除した。
+          対応は backend/src/config/routeExternalIdMapping.js（コード）で管理する。
+        -->
 
         <div class="border-t pt-5 space-y-4">
           <div class="flex items-center gap-3 flex-wrap">
@@ -115,14 +97,12 @@
     const state = {
       token: null,
       routes: [],
-      mappingRows: [],
       routeData: null,
     };
 
     const loginCard = document.getElementById('login-card');
     const editorCard = document.getElementById('editor-card');
     const statusBox = document.getElementById('status');
-    const mappingTable = document.getElementById('mapping-table');
     const routeEditSelect = document.getElementById('route-edit-select');
     const routeDataEditor = document.getElementById('route-data-editor');
     const positionsContainer = document.getElementById('positions-container');
@@ -179,30 +159,6 @@
         option.value = route.id;
         option.textContent = `${route.id} ${route.name}`;
         routeEditSelect.appendChild(option);
-      });
-    }
-
-    function renderMappingTable(rows) {
-      mappingTable.innerHTML = '';
-      rows.forEach((row, idx) => {
-        const tr = document.createElement('tr');
-        tr.className = 'border-b';
-        // 方向マッピングの設定は廃止し、backend/src/config/directionMapping.js へ移した。
-        tr.innerHTML = `
-          <td class="p-2">
-            <select class="route-select border rounded-lg px-2 py-1 w-full">
-              ${state.routes.map((route) => `<option value="${route.id}" ${route.id === row.routeId ? 'selected' : ''}>${route.name}</option>`).join('')}
-            </select>
-          </td>
-          <td class="p-2"><input class="external-id-input border rounded-lg px-2 py-1 w-full" value="${row.externalId || ''}" /></td>
-          <td class="p-2"><button class="remove-row-btn bg-red-50 text-red-700 rounded-lg px-3 py-1 font-bold">削除</button></td>
-        `;
-        const removeBtn = tr.querySelector('.remove-row-btn');
-        removeBtn.addEventListener('click', () => {
-          state.mappingRows.splice(idx, 1);
-          renderMappingTable(state.mappingRows);
-        });
-        mappingTable.appendChild(tr);
       });
     }
 
@@ -365,31 +321,6 @@
       const routes = await api('/api/routes');
       state.routes = routes.routes || [];
       renderRouteOptions();
-      if (!state.routes.length) return;
-      if (!state.mappingRows.length) {
-        state.mappingRows = state.routes.map((route) => ({ routeId: route.id, externalId: '' }));
-      }
-      renderMappingTable(state.mappingRows);
-    }
-
-    async function loadMappings() {
-      const data = await api('/api/admin/route-mappings');
-      state.mappingRows = data.mappings || [];
-      renderMappingTable(state.mappingRows);
-    }
-
-    async function saveMappings() {
-      const mappings = [...mappingTable.querySelectorAll('tr')].map((row) => {
-        const routeId = row.querySelector('.route-select').value;
-        const externalId = row.querySelector('.external-id-input').value.trim();
-        return { routeId, externalId };
-      }).filter((item) => item.externalId);
-
-      await api('/api/admin/route-mappings', {
-        method: 'PUT',
-        body: JSON.stringify({ mappings })
-      });
-      showStatus('外部ID対応表を保存しました。');
     }
 
     async function loadRouteData(routeId) {
@@ -450,11 +381,10 @@
         await Promise.all([
           loadSettings(),
           loadRoutes(),
-          loadMappings(),
         ]);
         localStorage.setItem('adminToken', state.token);
         applyEditorState();
-        showStatus('ログインしました。設定・対応表・路線データを編集できます。');
+        showStatus('ログインしました。設定・路線データを編集できます。');
       } catch (err) {
         clearAuthToken();
         showStatus(err.message, 'error');
@@ -487,13 +417,6 @@
       showStatus('ログアウトしました。', 'info');
     });
 
-    document.getElementById('add-mapping-btn').addEventListener('click', () => {
-      state.mappingRows.push({ routeId: state.routes[0]?.id || '11', externalId: '' });
-      renderMappingTable(state.mappingRows);
-    });
-
-    document.getElementById('save-mapping-btn').addEventListener('click', saveMappings);
-
     document.getElementById('load-route-data-btn').addEventListener('click', () => {
       loadRouteData(routeEditSelect.value).catch((err) => showStatus(err.message, 'error'));
     });
@@ -509,7 +432,6 @@
       Promise.all([
         loadSettings(),
         loadRoutes(),
-        loadMappings(),
       ])
         .then(() => {
           applyEditorState();

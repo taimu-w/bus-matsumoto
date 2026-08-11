@@ -1,11 +1,15 @@
 // GTFSフィード管理モジュール
 // 複数のGTFS ZIPフィードを自動ダウンロードし、フィードIDごとのディレクトリに展開する。
 // 各フィードは独立して管理され、1つのフィードの失敗が他に影響しない。
+// 対象フィードの一覧は config/feeds.js（コード上の定数）から取得する。
+// feeds テーブルへの書き込みは last_fetched_at / last_status / last_error の
+// 稼働状態のみで、構成そのものはDBに持たない。
 const fs = require('fs');
 const path = require('path');
 const fetch = require('cross-fetch');
 const AdmZip = require('adm-zip');
 const pool = require('../config/db');
+const { getEnabledGtfsFeeds } = require('../config/feeds');
 
 const GTFS_BASE_DIR = path.join(__dirname, '..', '..', '..', 'data gtfs');
 const REQUIRED_GTFS_FILES = [
@@ -24,7 +28,16 @@ const REQUIRED_GTFS_FILES = [
 //
 // translations.txt はバス停名のよみがな・ローマ字（時刻表検索機能で使う）の供給元だが、
 // 同じ理由で必須にはしない。無い場合の扱いは gtfsTimetable.js 側で吸収している。
-const OPTIONAL_GTFS_FILES = ['frequencies.txt', 'translations.txt'];
+//
+// fare_attributes.txt / fare_rules.txt は経路検索の運賃表示（gtfsFare.js）で使う。
+// これらも同じ理由で REQUIRED にはしない。無い場合は「運賃不明」として扱い、
+// 経路検索自体は成立させる（経路検索機能_改善仕様書 4.1）。
+const OPTIONAL_GTFS_FILES = [
+  'frequencies.txt',
+  'translations.txt',
+  'fare_attributes.txt',
+  'fare_rules.txt'
+];
 
 const MANAGED_GTFS_FILES = [...REQUIRED_GTFS_FILES, ...OPTIONAL_GTFS_FILES];
 
@@ -37,16 +50,6 @@ let lastGtfsUpdateAt = 0;
 function getGtfsDir(feedId) {
   if (!feedId) return GTFS_BASE_DIR;
   return path.join(GTFS_BASE_DIR, feedId);
-}
-
-/**
- * feedsテーブルから有効なGTFSフィード一覧を取得する。
- */
-async function getEnabledGtfsFeeds(client) {
-  const res = await client.query(
-    `SELECT id, name, url FROM feeds WHERE feed_type = 'gtfs' AND enabled = TRUE ORDER BY id ASC`
-  );
-  return res.rows;
 }
 
 /**
@@ -255,7 +258,7 @@ async function updateAllGtfsFeeds() {
   let updated = 0;
   let failed = 0;
   try {
-    const feeds = await getEnabledGtfsFeeds(client);
+    const feeds = getEnabledGtfsFeeds();
     if (feeds.length === 0) {
       console.log('[gtfsFeedManager] 有効なGTFSフィードがありません。');
       return { updated: 0, failed: 0 };
@@ -288,6 +291,8 @@ async function updateAllGtfsFeeds() {
       require('./dailyTripBuilder').invalidateDailyTripCache();
       // 時刻表検索用のインメモリインデックスもGTFSファイル由来なので作り直す。
       require('./gtfsTimetable').invalidateTimetableIndex();
+      // 運賃インデックス（経路検索の運賃表示）も同じくGTFSファイル由来。
+      require('./gtfsFare').invalidateFareIndex();
       console.log('[gtfsFeedManager] GTFS更新に伴いDBへ再投入しました。');
     } catch (err) {
       console.error('[gtfsFeedManager] DB再投入エラー:', err.message);
@@ -301,7 +306,6 @@ async function updateAllGtfsFeeds() {
 
 module.exports = {
   getGtfsDir,
-  getEnabledGtfsFeeds,
   updateAllGtfsFeeds,
   downloadAndExtractGtfsFeed,
   ensureGtfsFilesPresent,

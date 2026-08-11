@@ -44,6 +44,22 @@ function navigateToPath(url) {
 }
 
 /**
+ * DBのバス停名（GTFSのstop_nameをそのまま保持。CLAUDE.md記載のとおりGTFS stop_idは持たない）から
+ * バス停検索機能（/busstop）のstopKeyへ、既存の検索APIを使って橋渡しする。
+ * 完全一致する候補が見つからなければ何もしない（soft-fail。新規の橋渡し用APIは作らない）。
+ */
+async function navigateToBusStopByName(name) {
+  if (!name) return;
+  try {
+    const data = await fetchJson(`${API_BASE}/busstop/search?q=${encodeURIComponent(name)}&limit=5`);
+    const match = (data.stops || []).find((s) => s.stopName === name);
+    if (match) navigateToPath(`/busstop/${encodeURIComponent(match.stopKey)}`);
+  } catch (err) {
+    // 橋渡し失敗時は何もしない（このバス停名タップは補助的な導線のため）
+  }
+}
+
+/**
  * 遅延分数の表示文字列を返す。0〜1分は誤差として「定刻通り」と表示する。
  * データが存在しない場合（null/undefined）は空文字を返す。
  */
@@ -575,350 +591,19 @@ function createScheduleCard(trip, firstTime, directionLabel = '') {
       const row = document.createElement('div');
       row.className = `flex justify-between items-center px-3 py-2 rounded-lg ${isThrough ? 'opacity-50' : 'bg-white border border-gray-100'}`;
       row.innerHTML = `
-        <span class="font-bold text-gray-800">${escapeHtml(stop.stopName)}</span>
+        <span data-role="stop-name-link" class="font-bold text-gray-800 underline decoration-dotted cursor-pointer active:text-blue-700">${escapeHtml(stop.stopName)}</span>
         <span class="font-bold ${isThrough ? 'line-through-double text-gray-400' : 'text-blue-800'}">${isThrough ? '経由なし' : escapeHtml(stop.scheduledTime)}</span>
       `;
+      // バス停名タップで /busstop/{stop_id} へ（補完仕様書 3.6.2）。
+      row.querySelector('[data-role="stop-name-link"]').addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigateToBusStopByName(stop.stopName);
+      });
       rowsContainer.appendChild(row);
     });
 
   setupAccordionToggle(card, openTripKeys, `trip-${trip.tripIndex}`, () => null);
   return card;
-}
-
-/* ---------- ルート検索機能 ---------- */
-let selectedFromStop = null;
-let selectedToStop = null;
-
-async function searchStops(query) {
-  try {
-    // ルート検索用は全路線から検索
-    const result = await fetchJson(`${API_BASE}/stops/search?q=${encodeURIComponent(query)}`);
-    return result.stops || [];
-  } catch (err) {
-    console.error('バス停検索エラー:', err);
-    return [];
-  }
-}
-
-function renderSuggestions(stops, containerId, inputId, onSelect) {
-  const container = $(containerId);
-  container.innerHTML = '';
-  
-  if (stops.length === 0) {
-    container.style.display = 'none';
-    return;
-  }
-  
-  container.style.display = 'block';
-  
-  // バス停名で重複除去（路線表示は残す）
-  const seen = new Set();
-  const unique = [];
-  stops.forEach(stop => {
-    const key = `${stop.route_id}_${stop.name}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      unique.push(stop);
-    }
-  });
-  
-  unique.slice(0, 8).forEach(stop => {
-    const div = document.createElement('div');
-    div.className = 'bg-white border-2 border-purple-200 rounded-lg p-3 cursor-pointer hover:bg-purple-50 active:scale-95 transition-all';
-    div.innerHTML = `
-      <div class="font-bold text-gray-900">${escapeHtml(stop.name)}</div>
-    `;
-    div.addEventListener('click', () => {
-      $(inputId).value = stop.name;
-      onSelect(stop);
-      container.innerHTML = '';
-      container.style.display = 'none';
-    });
-    container.appendChild(div);
-  });
-}
-
-async function setupStopAutocomplete(inputId, suggestionsId, onSelect) {
-  const input = $(inputId);
-  const container = $(suggestionsId);
-  let debounceTimer;
-  
-  input.addEventListener('input', (e) => {
-    clearTimeout(debounceTimer);
-    const query = e.target.value.trim();
-    
-    if (query.length < 1) {
-      container.innerHTML = '';
-      container.style.display = 'none';
-      return;
-    }
-    
-    debounceTimer = setTimeout(async () => {
-      const stops = await searchStops(query);
-      renderSuggestions(stops, suggestionsId, inputId, onSelect);
-    }, 300);
-  });
-  
-  input.addEventListener('blur', () => {
-    setTimeout(() => {
-      container.innerHTML = '';
-      container.style.display = 'none';
-    }, 200);
-  });
-}
-
-async function performRouteSearch() {
-  const fromInput = $('from-stop').value.trim();
-  const toInput = $('to-stop').value.trim();
-  const departureTime = $('departure-time').value;
-  
-  if (!fromInput || !toInput) {
-    alert('出発地と目的地を入力してください。');
-    return;
-  }
-  
-  const resultContainer = $('route-result');
-  const modalContent = $('route-result-content');
-  
-  // 検索中表示
-  resultContainer.style.display = 'block';
-  resultContainer.innerHTML = `
-    <div class="bg-blue-50 border-2 border-blue-300 rounded-xl p-4">
-      <p class="text-sm font-bold text-blue-900">検索中...</p>
-    </div>
-  `;
-  
-  try {
-    // ルート検索は全路線から検索（routeIdを省略）
-    const result = await fetchJson(
-      `${API_BASE}/route-search?from=${encodeURIComponent(fromInput)}&to=${encodeURIComponent(toInput)}&departureTime=${encodeURIComponent(departureTime || '')}`
-    );
-    
-    console.log('ルート検索結果:', result); // デバッグ用
-    
-    if (!result.found) {
-      resultContainer.innerHTML = `
-        <div class="bg-yellow-50 border-2 border-yellow-300 rounded-xl p-4">
-          <p class="text-sm font-bold text-yellow-900">${escapeHtml(result.message || 'ルートが見つかりませんでした。バス停名を確認してください。')}</p>
-        </div>
-      `;
-      return;
-    }
-    
-    const route = result.route;
-    console.log('ルートデータ:', route); // デバッグ用
-    
-    let html = '';
-    
-    // routeType フィールドを確認（後方互換性のため type も確認）
-    const routeType = route.routeType || route.type;
-    
-    if (routeType === 'direct') {
-      html = renderDirectRoute(route);
-    } else if (routeType === 'transfer') {
-      html = renderTransferRoute(route);
-    } else {
-      html = `<div class="bg-red-50 border-2 border-red-300 rounded-xl p-4">
-        <p class="text-sm font-bold text-red-900">不明なルートタイプです: ${escapeHtml(routeType || 'undefined')}</p>
-        <pre class="text-xs mt-2">${JSON.stringify(route, null, 2)}</pre>
-      </div>`;
-    }
-    
-    // インライン表示とモーダルの両方に表示
-    resultContainer.innerHTML = html;
-    modalContent.innerHTML = html;
-    openModal('route-result-modal');
-    
-  } catch (err) {
-    console.error('ルート検索エラー:', err);
-    resultContainer.innerHTML = `
-      <div class="bg-red-50 border-2 border-red-300 rounded-xl p-4">
-        <p class="text-sm font-bold text-red-900">ルート検索に失敗しました: ${escapeHtml(err.message)}</p>
-      </div>
-    `;
-    alert('ルート検索に失敗しました。詳細はコンソールを確認してください。');
-  }
-}
-
-function getRouteName(routeId) {
-  const route = routeOptions.find(r => r.id === routeId);
-  return route ? route.name : (routeId || '');
-}
-
-function renderDirectRoute(route) {
-  const candidate = route;
-  const delayText = candidate.delayMinutes > 1 ? `<span class="text-red-600 font-bold ml-2">(${candidate.delayMinutes}分遅れ)</span>` : '';
-  const realtimeBadge = candidate.isRealtime 
-    ? '<span class="text-xs font-bold text-green-700 bg-green-50 px-2 py-1 rounded border border-green-200 ml-2 animate-pulse">● リアルタイム</span>'
-    : '<span class="text-xs font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded border border-gray-200 ml-2">📋 時刻表</span>';
-  
-  const arrivalTime = candidate.arrivalTime || candidate.predictedArrival || candidate.scheduledArrival || '--';
-  const routeName = getRouteName(route.routeId);
-  
-  return `
-    <div class="space-y-4">
-      <div class="bg-purple-50 border-2 border-purple-200 rounded-xl p-4">
-        <h3 class="text-lg font-bold text-purple-900 mb-3 flex items-center gap-2">
-          <span class="bg-purple-600 text-white w-7 h-7 rounded-full flex items-center justify-center text-sm">1</span>
-          直接ルート（乗り換えなし）
-        </h3>
-        <div class="space-y-3">
-          <div class="flex items-center gap-3 bg-white rounded-lg p-3 border border-purple-100">
-            <div class="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center text-green-600 font-bold text-lg">A</div>
-            <div>
-              <p class="text-xs text-gray-500 font-bold">出発</p>
-              <p class="font-bold text-gray-900 text-lg">${escapeHtml(route.fromStop)}</p>
-            </div>
-          </div>
-          <div class="flex justify-center">
-            <div class="w-1 h-8 bg-purple-300 rounded-full"></div>
-          </div>
-          <div class="flex items-center gap-3 bg-white rounded-lg p-3 border border-purple-100">
-            <div class="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center text-red-600 font-bold text-lg">B</div>
-            <div>
-              <p class="text-xs text-gray-500 font-bold">到着</p>
-              <p class="font-bold text-gray-900 text-lg">${escapeHtml(route.toStop)}</p>
-            </div>
-          </div>
-        </div>
-      </div>
-      
-      <div class="bg-white border-2 border-gray-200 rounded-xl p-4">
-        <h4 class="text-md font-bold text-gray-800 mb-3">運行詳細</h4>
-        <div class="space-y-3">
-          <div class="flex justify-between items-center py-2 border-b border-gray-100">
-            <span class="text-sm font-bold text-gray-600">路線</span>
-            <span class="font-bold text-gray-900">${escapeHtml(routeName)}</span>
-          </div>
-          <div class="flex justify-between items-center py-2 border-b border-gray-100">
-            <span class="text-sm font-bold text-gray-600">種別</span>
-            <div>${realtimeBadge}</div>
-          </div>
-          ${candidate.type === 'realtime' ? `
-            <div class="flex justify-between items-center py-2 border-b border-gray-100">
-              <span class="text-sm font-bold text-gray-600">車両</span>
-              <span class="font-bold text-gray-900">${escapeHtml(candidate.vehicleId)}</span>
-            </div>
-            <div class="flex justify-between items-center py-2 border-b border-gray-100">
-              <span class="text-sm font-bold text-gray-600">出発</span>
-              <span class="font-bold text-gray-900">${escapeHtml(candidate.departureTime)}</span>
-            </div>
-          ` : `
-            <div class="flex justify-between items-center py-2 border-b border-gray-100">
-              <span class="text-sm font-bold text-gray-600">便</span>
-              <span class="font-bold text-gray-900">${candidate.tripIndex !== undefined ? (candidate.tripIndex + 1) + '番目' : '--'}</span>
-            </div>
-          `}
-          <div class="flex justify-between items-center py-2">
-            <span class="text-sm font-bold text-gray-600">到着予定</span>
-            <span class="text-2xl font-bold text-purple-600">${escapeHtml(arrivalTime)}${delayText}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function renderTransferRoute(route) {
-  const firstDelay = route.firstLeg.delayMinutes > 1 ? `<span class="text-red-600 font-bold ml-2">(${route.firstLeg.delayMinutes}分遅れ)</span>` : '';
-  const secondDelay = route.secondLeg.delayMinutes > 1 ? `<span class="text-red-600 font-bold ml-2">(${route.secondLeg.delayMinutes}分遅れ)</span>` : '';
-  
-  const firstRealtimeBadge = route.firstLeg.isRealtime 
-    ? '<span class="text-xs font-bold text-green-700 bg-green-50 px-2 py-1 rounded border border-green-200 animate-pulse">● リアルタイム</span>'
-    : '<span class="text-xs font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded border border-gray-200">📋 時刻表</span>';
-  
-  const firstRouteName = getRouteName(route.firstLeg.routeId);
-  const secondRouteName = getRouteName(route.secondLeg.routeId);
-  
-  return `
-    <div class="space-y-4">
-      <div class="bg-purple-50 border-2 border-purple-200 rounded-xl p-4">
-        <h3 class="text-lg font-bold text-purple-900 mb-3 flex items-center gap-2">
-          <span class="bg-purple-600 text-white w-7 h-7 rounded-full flex items-center justify-center text-sm">1⇄2</span>
-          乗り換えルート
-        </h3>
-        <div class="space-y-3">
-          <div class="flex items-center gap-3 bg-white rounded-lg p-3 border border-purple-100">
-            <div class="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center text-green-600 font-bold text-lg">A</div>
-            <div>
-              <p class="text-xs text-gray-500 font-bold">出発</p>
-              <p class="font-bold text-gray-900">${escapeHtml(route.fromStop)}</p>
-            </div>
-          </div>
-          <div class="flex justify-center">
-            <div class="w-1 h-8 bg-blue-300 rounded-full"></div>
-          </div>
-          <div class="flex items-center gap-3 bg-blue-50 rounded-lg p-3 border border-blue-200">
-            <div class="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 font-bold text-lg">⇄</div>
-            <div>
-              <p class="text-xs text-blue-600 font-bold">乗り換え</p>
-              <p class="font-bold text-gray-900">${escapeHtml(route.transferStop)}</p>
-              <p class="text-xs text-gray-500">${escapeHtml(route.firstLeg.arrivalTime)} 着</p>
-            </div>
-          </div>
-          <div class="flex justify-center">
-            <div class="w-1 h-8 bg-green-300 rounded-full"></div>
-          </div>
-          <div class="flex items-center gap-3 bg-white rounded-lg p-3 border border-purple-100">
-            <div class="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center text-red-600 font-bold text-lg">B</div>
-            <div>
-              <p class="text-xs text-gray-500 font-bold">到着</p>
-              <p class="font-bold text-gray-900">${escapeHtml(route.toStop)}</p>
-              <p class="text-xs text-gray-500">${escapeHtml(route.totalArrivalTime)} 着</p>
-            </div>
-          </div>
-        </div>
-      </div>
-      
-      <div class="bg-blue-50 border-2 border-blue-200 rounded-xl p-4">
-        <h4 class="text-md font-bold text-blue-900 mb-3 flex items-center">
-          <span class="bg-blue-600 text-white w-6 h-6 rounded-full flex items-center justify-center text-xs mr-2">1</span>
-          第一区間
-        </h4>
-        <div class="space-y-2 ml-8">
-          <div class="flex justify-between items-center py-1">
-            <span class="text-sm font-bold text-gray-600">路線</span>
-            <span class="font-bold text-gray-900">${escapeHtml(firstRouteName)}</span>
-          </div>
-          <div class="flex justify-between items-center py-1">
-            <span class="text-sm font-bold text-gray-600">種別</span>
-            <div>${firstRealtimeBadge}</div>
-          </div>
-          ${route.firstLeg.type === 'realtime' ? `
-            <div class="flex justify-between items-center py-1">
-              <span class="text-sm font-bold text-gray-600">車両</span>
-              <span class="font-bold text-gray-900">${escapeHtml(route.firstLeg.vehicleId)}</span>
-            </div>
-          ` : ''}
-          <div class="flex justify-between items-center py-1">
-            <span class="text-sm font-bold text-gray-600">乗り換え到着</span>
-            <span class="text-lg font-bold text-blue-600">${escapeHtml(route.firstLeg.arrivalTime)}${firstDelay}</span>
-          </div>
-        </div>
-      </div>
-      
-      <div class="bg-green-50 border-2 border-green-200 rounded-xl p-4">
-        <h4 class="text-md font-bold text-green-900 mb-3 flex items-center">
-          <span class="bg-green-600 text-white w-6 h-6 rounded-full flex items-center justify-center text-xs mr-2">2</span>
-          第二区間
-        </h4>
-        <div class="space-y-2 ml-8">
-          <div class="flex justify-between items-center py-1">
-            <span class="text-sm font-bold text-gray-600">路線</span>
-            <span class="font-bold text-gray-900">${escapeHtml(secondRouteName)}</span>
-          </div>
-          <div class="flex justify-between items-center py-1">
-            <span class="text-sm font-bold text-gray-600">種別</span>
-            <span class="text-xs font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded border border-gray-200">📋 時刻表</span>
-          </div>
-          <div class="flex justify-between items-center py-1">
-            <span class="text-sm font-bold text-gray-600">最終到着</span>
-            <span class="text-lg font-bold text-green-600">${escapeHtml(route.totalArrivalTime)}${secondDelay}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
 }
 
 /* ---------- タブ切り替え機能 ---------- */
@@ -928,7 +613,7 @@ function setPageTitle(title, subtitle) {
 }
 
 function hideAllPages() {
-  ['section-home', 'section-route-list', 'section-realtime', 'section-routesearch', 'section-map', 'section-busmap', 'section-stopmap', 'section-timetable', 'notices'].forEach((id) => {
+  ['section-home', 'section-route-list', 'section-realtime', 'section-routesearch', 'section-map', 'section-busmap', 'section-stopmap', 'section-timetable', 'section-busstop', 'notices'].forEach((id) => {
     const el = $(id);
     if (el) el.style.display = 'none';
   });
@@ -971,9 +656,14 @@ function parseHashRoute() {
   return { page: 'realtime-detail', routeId: feedId === 'default' ? routeId : `${feedId}:${routeId}` };
 }
 
-// 旧タブ操作からもハッシュURLへ遷移させる。
+// 旧タブ操作からも現在のURL設計へ遷移させる。
+// 経路検索はハッシュ（#/search）ではなくパス（/routesearch）へ移行済み。
 function switchTab(tab) {
-  window.location.hash = tab === 'routesearch' ? '#/search' : '#/realtime';
+  if (tab === 'routesearch') {
+    navigateToPath('/routesearch');
+    return;
+  }
+  window.location.hash = '#/realtime';
 }
 
 /* ---------- マップ関連 ---------- */
@@ -1219,6 +909,20 @@ async function renderCurrentRoute() {
     await window.StopMapView.render();
     return;
   }
+  // バス停検索（バス停情報の総合ポータル）も同様にパス（/busstop）でルーティングする。
+  if (window.BusStopView && window.BusStopView.isBusStopPath()) {
+    await window.BusStopView.render();
+    return;
+  }
+  // 経路検索も同様にパス（/routesearch）でルーティングする。
+  // 検索条件をURLに持たせているので、結果から /busstop へ移動して戻っても復元される。
+  if (window.RouteSearchView && window.RouteSearchView.isRouteSearchPath()) {
+    $('section-routesearch').style.display = 'block';
+    await window.RouteSearchView.render();
+    return;
+  }
+  // 経路検索を離れたらリアルタイム更新も止める
+  if (window.RouteSearchView) window.RouteSearchView.stopPolling();
 
   const state = parseHashRoute();
   try {
@@ -1228,8 +932,8 @@ async function renderCurrentRoute() {
       return;
     }
     if (state.page === 'search') {
-      setPageTitle('ルート検索', 'Route Search');
-      $('section-routesearch').style.display = 'block';
+      // 旧URL（#/search）は経路検索のパスへ移行済み。ブックマーク対策のリダイレクト。
+      window.location.replace('/routesearch');
       return;
     }
     if (state.page === 'map') {
@@ -1266,7 +970,6 @@ async function renderCurrentRoute() {
 /* ---------- 初期化 ---------- */
 const refreshBtn = $('refresh-btn');
 const routeSelect = $('route-select');
-const searchRouteBtn = $('search-route-btn');
 const tabRealtime = $('tab-realtime');
 const tabRoutesearch = $('tab-routesearch');
 
@@ -1286,40 +989,6 @@ if (tabRealtime) {
 }
 if (tabRoutesearch) {
   tabRoutesearch.addEventListener('click', () => switchTab('routesearch'));
-}
-
-// バス停オートコンプリート設定
-setupStopAutocomplete('from-stop', 'from-suggestions', (stop) => {
-  selectedFromStop = stop;
-});
-
-setupStopAutocomplete('to-stop', 'to-suggestions', (stop) => {
-  selectedToStop = stop;
-});
-
-// Enterキーでルート検索を実行
-$('from-stop').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') performRouteSearch();
-});
-$('to-stop').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') performRouteSearch();
-});
-$('departure-time').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') performRouteSearch();
-});
-
-// ルート検索ボタン
-if (searchRouteBtn) {
-  searchRouteBtn.addEventListener('click', performRouteSearch);
-}
-
-// 出発時間に現在時刻をセット
-const departureTimeInput = $('departure-time');
-if (departureTimeInput) {
-  const now = new Date();
-  const hours = String(now.getHours()).padStart(2, '0');
-  const minutes = String(now.getMinutes()).padStart(2, '0');
-  departureTimeInput.value = `${hours}:${minutes}`;
 }
 
 window.addEventListener('hashchange', renderCurrentRoute);

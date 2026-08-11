@@ -2,11 +2,15 @@
 // 複数の位置情報CSVフィード（事業者ごと）をすべて取得し、それぞれのバス位置情報を
 // vehicle_positions_raw に追記する。
 // 各フィードは独立したtry/catchで処理され、1つの事業者の取得失敗が他に影響しない。
-// 位置情報CSVとGTFSの対応関係は feeds / feed_mappings テーブルで動的に管理する。
+// 位置情報フィードの一覧とGTFSフィードとの対応は config/feeds.js、
+// 外部ID→route_idの対応は config/routeExternalIdMapping.js がそれぞれ唯一の情報源である。
+// （旧: feeds / feed_mappings / route_external_ids テーブルによるDB管理・confidence推測は廃止）
 const fetch = require('cross-fetch');
 const pool = require('../config/db');
 const { formatNowNoFormat, formatTimeNoFormat } = require('../utils/time');
 const { resolveDirectionId } = require('../config/directionMapping');
+const { getEnabledLocationFeeds, getGtfsFeedIdsFor } = require('../config/feeds');
+const { getExternalIdsForFeeds } = require('../config/routeExternalIdMapping');
 
 function parseCsvLine(line) {
   // 単純なCSVパーサ（ダブルクォート囲みに簡易対応）。フィードはシンプルなCSVのため十分。
@@ -36,65 +40,18 @@ function parseCsv(text) {
 }
 
 /**
- * 位置情報フィード一覧をfeedsテーブルから取得する。
- */
-async function getEnabledLocationFeeds(client) {
-  const res = await client.query(
-    `SELECT id, name, url FROM feeds WHERE feed_type = 'location' AND enabled = TRUE ORDER BY id ASC`
-  );
-  return res.rows;
-}
-
-/**
- * 位置情報フィード⇔GTFSフィードの対応関係をfeed_mappingsテーブルから取得する。
- * コードにハードコードせず、DBのfeed_mappingsを最優先で参照する。
- */
-async function getFeedMappings(client) {
-  const res = await client.query(
-    `SELECT location_feed_id, gtfs_feed_id, confidence FROM feed_mappings ORDER BY confidence DESC`
-  );
-  const mappings = new Map();
-  for (const row of res.rows) {
-    if (!mappings.has(row.location_feed_id)) {
-      mappings.set(row.location_feed_id, row.gtfs_feed_id);
-    }
-  }
-  return mappings;
-}
-
-/**
  * 単一の位置情報フィードを取得してvehicle_positions_rawに追記する。
  * 失敗してもthrowせず、feedsテーブルにエラー情報を記録して0件を返す。
  */
-async function fetchLocationFeed(client, feed, externalIdMap, feedMappings, freshnessMin, now, timeLimit, nowLabel) {
+async function fetchLocationFeed(client, feed, freshnessMin, now, timeLimit, nowLabel) {
   const feedId = feed.id;
   const url = feed.url;
 
-  // 位置情報フィードに対応するGTFSフィードを特定する
-  // feed_mappingsテーブルに基づいてexternalIdMapをフィードごとに絞り込む
-  const gtfsFeedId = feedMappings.get(feedId) || null;
-  let feedSpecificExternalIdMap = externalIdMap;
-  if (gtfsFeedId) {
-    // この位置情報フィードに紐づくGTFSフィードのマッピングのみを使用する
-    const matching = new Map();
-    for (const [externalId, routeId] of externalIdMap.entries()) {
-      // route_idが「gtfsFeedId:」プレフィックスを持つ場合のみ使用
-      if (routeId.startsWith(`${gtfsFeedId}:`)) {
-        matching.set(externalId, routeId);
-      }
-    }
-    // プレフィックスなしの旧ルートもフォールバックとして含める（既存DB互換）
-    // ただし、プレフィックス付きルートが既にマッチしている場合は優先する
-    for (const [externalId, routeId] of externalIdMap.entries()) {
-      if (!routeId.includes(':') && !matching.has(externalId)) {
-        matching.set(externalId, routeId);
-      }
-    }
-    if (matching.size > 0) {
-      feedSpecificExternalIdMap = matching;
-    }
-  }
-  const effectiveExternalIdMap = feedSpecificExternalIdMap;
+  // この位置情報フィードに対応するGTFSフィード（複数可）の外部IDだけに絞り込む。
+  // 旧実装は feed_mappings から confidence 降順で**1件だけ**選んでいたため、
+  // 同値の場合に採用フィードが不定になり、またがる事業者の片方が落ちていた。
+  // 対応が未設定（空配列）の場合、getExternalIdsForFeeds は絞り込まず全件を返す。
+  const effectiveExternalIdMap = getExternalIdsForFeeds(getGtfsFeedIdsFor(feedId));
 
   let response;
   try {
@@ -248,24 +205,8 @@ async function fetchLocationFeed(client, feed, externalIdMap, feedMappings, fres
 async function fetchLocation() {
   const freshnessMin = parseInt(process.env.GPS_FRESHNESS_MIN || '15', 10);
 
-  // 外部IDマッピング・フィード情報を取得
-  const client = await pool.connect();
-  let externalIdMap = new Map();
-  let locationFeeds = [];
-  let feedMappings = new Map();
-  try {
-    const mappingRes = await client.query(
-      `SELECT route_id, external_id FROM route_external_ids ORDER BY external_id ASC`
-    );
-    for (const row of mappingRes.rows) {
-      externalIdMap.set(row.external_id, row.route_id);
-    }
-
-    locationFeeds = await getEnabledLocationFeeds(client);
-    feedMappings = await getFeedMappings(client);
-  } finally {
-    client.release();
-  }
+  // フィード一覧・外部IDマッピングはいずれもコード上の設定なのでDBを引かない。
+  const locationFeeds = getEnabledLocationFeeds();
 
   if (locationFeeds.length === 0) {
     console.error('[locationFetcher] 有効な位置情報フィードが設定されていません。');
@@ -285,8 +226,6 @@ async function fetchLocation() {
       const result = await fetchLocationFeed(
         feedClient,
         feed,
-        externalIdMap,
-        feedMappings,
         freshnessMin,
         now,
         timeLimit,

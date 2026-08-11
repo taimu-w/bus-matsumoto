@@ -2,8 +2,9 @@ const express = require('express');
 const pool = require('../config/db');
 const { resolveRouteId } = require('../services/gtfsData');
 const { getArrivalsForAssignment } = require('../services/etaPredictor');
-const { searchStops, searchStopCandidates, resolveStopNameCandidates, searchRoutes } = require('../services/routeSearch');
-const { formatNowNoFormat, getServiceDateString } = require('../utils/time');
+const { searchStops } = require('../services/routeSearch');
+const { searchJourneys, searchRouteSearchStops } = require('../services/gtfsRouteSearch');
+const { getServiceDateString } = require('../utils/time');
 const { getActiveServiceIds } = require('../services/gtfsCalendar');
 const { getCachedServiceStatus } = require('../services/serviceStatusScraper');
 const {
@@ -179,59 +180,9 @@ router.get('/admin/settings', requireAdminAuth, async (req, res) => {
   }
 });
 
-// GET /api/admin/route-mappings -> 外部IDとGTFS路線IDの対応表を取得
-// direction_id の対応設定は管理画面から廃止し、config/directionMapping.js へ移した（仕様書 6.1）。
-router.get('/admin/route-mappings', requireAdminAuth, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT r.id AS route_id, r.name AS route_name, rei.external_id
-       FROM route_external_ids rei
-       JOIN routes r ON r.id = rei.route_id
-       ORDER BY r.id ASC, rei.external_id ASC`
-    );
-    res.json({ mappings: result.rows.map((row) => ({ routeId: row.route_id, routeName: row.route_name, externalId: row.external_id })) });
-  } catch (err) {
-    console.error('[api] /admin/route-mappings 取得エラー:', err);
-    res.status(500).json({ error: '外部ID対応表の取得に失敗しました。' });
-  }
-});
-
-// PUT /api/admin/route-mappings -> 外部IDとGTFS路線IDの対応表を更新
-router.put('/admin/route-mappings', requireAdminAuth, async (req, res) => {
-  const mappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
-  try {
-    await pool.query('BEGIN');
-    await pool.query('DELETE FROM route_external_ids');
-    for (const item of mappings) {
-      const routeId = resolveRouteId(item.routeId);
-      const externalId = String(item.externalId || '').trim();
-      if (!routeId || !externalId) continue;
-      // route_external_ids には UNIQUE (external_id) があるため、ON CONFLICT の対象は
-      // (route_id, external_id) ではなく (external_id) にする必要がある。
-      // 同じ外部IDを2つの路線に指定した入力でも500にせず、後に指定した方を採用する。
-      await pool.query(
-        `INSERT INTO route_external_ids (route_id, external_id, feed_id)
-         VALUES ($1, $2, (SELECT feed_id FROM routes WHERE id = $1))
-         ON CONFLICT (external_id) DO UPDATE
-           SET route_id = EXCLUDED.route_id,
-               feed_id = EXCLUDED.feed_id`,
-        [routeId, externalId]
-      );
-    }
-    await pool.query('COMMIT');
-    const result = await pool.query(
-      `SELECT r.id AS route_id, r.name AS route_name, rei.external_id
-       FROM route_external_ids rei
-       JOIN routes r ON r.id = rei.route_id
-       ORDER BY r.id ASC, rei.external_id ASC`
-    );
-    res.json({ mappings: result.rows.map((row) => ({ routeId: row.route_id, routeName: row.route_name, externalId: row.external_id })) });
-  } catch (err) {
-    await pool.query('ROLLBACK').catch(() => undefined);
-    console.error('[api] /admin/route-mappings 更新エラー:', err);
-    res.status(500).json({ error: '外部ID対応表の更新に失敗しました。' });
-  }
-});
+// 外部ID ⇔ GTFS route_id の対応表の取得・編集API（GET/PUT /admin/route-mappings）は、
+// 対応を config/routeExternalIdMapping.js へ移したため削除した。
+// 保存できるのに反映されないUIを残さないための措置である（仕様書 3.2.1 / 6）。
 
 // GET /api/admin/route-data -> 路線データを管理画面へ返す
 router.get('/admin/route-data', requireAdminAuth, async (req, res) => {
@@ -656,15 +607,21 @@ router.get('/buses-for-map', async (req, res) => {
   }
 });
 
-// GET /api/route-search/stops?q=... -> 経路検索の出発地・目的地候補（停留所名でグルーピング）
-// fromStopKey/toStopKey に渡す識別子（＝停留所名）はここで返す `stopKey` を使う。
+// ==========================================================
+// 経路検索機能（GTFSインデックス直読み。DBの stops/daily_trips は探索に使わない）
+// 経路検索機能_改善仕様書 8章。
+//   stopKey は時刻表検索・バス停検索とまったく同じ識別子であり、
+//   結果から /busstop/{stopKey} や /timetable/trips/... へそのまま遷移できる。
+// ==========================================================
+
+// GET /api/route-search/stops?q=... -> 出発地・目的地の候補
+// 漢字・ひらがな・カタカナ・ローマ字（大文字小文字/全半角不問）に対応する。
 router.get('/route-search/stops', async (req, res) => {
   try {
-    const query = req.query.q;
-    if (!query || query.length < 1) {
-      return res.json({ stops: [] });
-    }
-    const stops = await searchStopCandidates(pool, query);
+    const query = String(req.query.q || '').trim();
+    if (!query) return res.json({ stops: [] });
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '20', 10) || 20, 1), 50);
+    const stops = await searchRouteSearchStops(query, limit);
     res.json({ stops });
   } catch (err) {
     console.error('[api] /route-search/stops エラー:', err);
@@ -672,43 +629,30 @@ router.get('/route-search/stops', async (req, res) => {
   }
 });
 
-// GET /api/route-search -> ルート検索（乗り換え案内対応、複数候補を返す）
-// fromStopKey/toStopKey（候補選択済みの停留所識別子）を優先し、無ければ from/to を自由文字列として名称検索する。
+// GET /api/route-search -> 経路検索（乗換2回まで・徒歩接続あり・任意日付・運賃つき）
+// クエリ: fromStopKey|from / toStopKey|to / date=YYYY-MM-DD / time=HH:MM / limit
+//   departureTime は旧APIの名前。time の別名として受け付ける。
 router.get('/route-search', async (req, res) => {
   try {
-    const fromStopKey = req.query.fromStopKey || null;
-    const toStopKey = req.query.toStopKey || null;
+    const result = await searchJourneys({
+      fromStopKey: req.query.fromStopKey || null,
+      from: req.query.from || null,
+      toStopKey: req.query.toStopKey || null,
+      to: req.query.to || null,
+      date: req.query.date || null,
+      time: req.query.time || req.query.departureTime || null,
+      limit: req.query.limit
+    });
 
-    if (fromStopKey && toStopKey && fromStopKey === toStopKey) {
-      return res.status(400).json({ error: '出発地と目的地が同じです。目的地を変更してください。' });
+    if (result.found) {
+      console.log(
+        `[api] 経路検索: ${result.from.name} → ${result.to.name} ` +
+        `(${result.date} ${result.baseTime}) → ${result.journeys.length}件 / ${result.relaxation}`
+      );
+    } else {
+      console.log(`[api] 経路検索: 見つからず (${result.reason})`);
     }
-
-    const fromNames = fromStopKey ? [fromStopKey] : await resolveStopNameCandidates(pool, req.query.from);
-    const toNames = toStopKey ? [toStopKey] : await resolveStopNameCandidates(pool, req.query.to);
-
-    if (fromNames.length === 0 || toNames.length === 0) {
-      return res.status(400).json({ error: '出発地と目的地を指定してください。' });
-    }
-
-    const departureTime = req.query.departureTime || formatNowNoFormat();
-    const serviceDate = getServiceDateString();
-    const searchCondition = { from: fromNames[0], to: toNames[0], departureTime };
-
-    console.log(`ルート検索: ${fromNames.join('/')} → ${toNames.join('/')}, departureTime=${departureTime}`);
-
-    const routes = await searchRoutes(pool, { fromNames, toNames, departureTime, serviceDate });
-
-    if (routes.length === 0) {
-      console.log('ルート検索結果: 見つからず');
-      return res.json({
-        found: false,
-        searchCondition,
-        message: 'ルートが見つかりませんでした。バス停の候補を選び直してください。'
-      });
-    }
-
-    console.log(`ルート検索結果: ${routes.length}件（${routes[0].type}）`);
-    res.json({ found: true, searchCondition, routes });
+    res.json(result);
   } catch (err) {
     console.error('[api] /route-search エラー:', err);
     res.status(500).json({ error: 'ルート検索に失敗しました。' });

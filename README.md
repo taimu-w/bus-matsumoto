@@ -10,9 +10,9 @@
 
 ## 1. システム全体の仕組み（1分でわかる概要）
 
-1. **GTFSフィードの自動更新**: `feeds`テーブルに登録されたGTFS ZIPフィードを定期的にダウンロード・展開し、バス停・時刻表・運行日カレンダーのマスタデータを最新に保つ。
+1. **GTFSフィードの自動更新**: `backend/src/config/feeds.js`に定義されたGTFS ZIPフィードを定期的にダウンロード・展開し、バス停・時刻表・運行日カレンダーのマスタデータを最新に保つ。
 2. **当日の運行便を先に生成する**: GTFSの運行日カレンダーに基づき、その日運行する便をあらかじめすべてDBへ展開する（`frequencies.txt`による頻度ベース運行の仮想便も含む）。この時点では担当車両を持たない。
-3. 複数の位置情報フィード（事業者ごとのCSV）からGPS位置情報を定期的に取得し、`feeds`テーブルで管理されたフィードIDとGTFSフィードの対応関係（`feed_mappings`）に基づいて路線を特定する。
+3. 複数の位置情報フィード（事業者ごとのCSV）からGPS位置情報を定期的に取得し、`config/feeds.js`に明記された位置情報フィード⇔GTFSフィードの対応と、`config/routeExternalIdMapping.js`の外部ID⇔route_id対応に基づいて路線を特定する。
 4. **便の始発時刻になった時点で車両を割り当てる**: 始発時刻直前のGPSを見て、始発バス停から100m以内にいる車両を候補にし、最も近い車両を担当車両とする。残りも候補車両として保持する。
 5. 担当車両・候補車両の両方について、GPSの軌跡から「バス停通過」「運行終了」を検知し、定刻と実績を比較して遅延を計算する。
 6. 過去の走行実績（区間ごとの所要時間統計）を使って、まだ到着していない先のバス停の**到着予測時刻**を算出する。
@@ -57,7 +57,11 @@ bussystem/
 │   │   │   ├── gtfsCalendar.js     GTFSカレンダー（曜日・祝日の運行区分）
 │   │   │   ├── gtfsData.js         GTFSファイルの読み込み・route_id解決
 │   │   │   ├── gtfsTimetable.js    ★時刻表検索のインメモリインデックス（16章）
-│   │   │   └── routeSearch.js      バス停検索・乗換ルート検索
+│   │   │   ├── gtfsRouteSearch.js  ★経路検索エンジン（RAPTOR型。8章）
+│   │   │   ├── gtfsFare.js         運賃データ（fare_attributes/fare_rules）の索引と照会
+│   │   │   ├── realtimeTripLookup.js GTFS識別子⇔当日の運行実績の橋渡し
+│   │   │   ├── busStopApproaching.js バス停検索の「接近中のバス」
+│   │   │   └── routeSearch.js      DBのバス停名検索（`/api/stops/search`専用）
 │   │   ├── routes/
 │   │   │   └── api.js            REST APIエンドポイント一覧
 │   │   └── utils/
@@ -72,7 +76,11 @@ bussystem/
 │   ├── guruttomatsumotobus2/     ぐるっと松本バス2（GTFSフィード展開先）
 │   └── ...                       静的GTFS（フィード未設定時のフォールバック）
 ├── frontend/                     素のHTML/CSS/JS（利用者向け画面・管理画面）
-│   ├── index.html / app.js       利用者向け運行状況画面（お気に入り・ルート検索対応）
+│   ├── index.html / app.js       利用者向け運行状況画面（お気に入り・SPAルーティング）
+│   ├── timetable.js              時刻表検索画面（/timetable）
+│   ├── busstop.js                バス停検索画面（/busstop）
+│   ├── stopmap.js                バス停マップ画面（/stopmap）
+│   ├── routesearch.js            経路検索画面（/routesearch。路線カラー基調・8章）
 │   ├── admin.html                管理画面（要Basic認証）
 │   └── style.css                 共通スタイル
 ├── Dockerfile / docker-compose.yml
@@ -137,7 +145,7 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 
 `updateAllGtfsFeeds()`の処理内容：
 
-1. `feeds`テーブルから`feed_type = 'gtfs'`かつ`enabled = TRUE`のフィード一覧を取得する。
+1. `config/feeds.js`の`getEnabledGtfsFeeds()`で有効なGTFSフィード一覧を取得する（DBは引かない）。
 2. `GTFS_UPDATE_INTERVAL_MIN`（既定60分）で更新間隔を制御する。0以下の場合は毎回更新する（プロセス内キャッシュ`lastGtfsUpdateAt`で管理）。
 3. 各フィードについてZIPをダウンロードし、以下の必須GTFSファイルをチェックする：
    `agency.txt` / `routes.txt` / `trips.txt` / `stops.txt` / `stop_times.txt` / `calendar.txt` / `calendar_dates.txt`
@@ -150,9 +158,9 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 
 `fetchLocation()`の処理内容：
 
-1. `feeds`テーブルから`feed_type = 'location'`かつ`enabled = TRUE`のフィード一覧を取得する（複数事業者対応）。
-2. `feed_mappings`テーブルから位置情報フィード⇔GTFSフィードの対応関係を取得する。コードにハードコードせずDBで動的に管理する。
-3. 対応するGTFSフィードに紐づく`route_external_ids`（外部ID⇔自社route_idの対応表）だけを使って路線を特定する。
+1. `config/feeds.js`の`getEnabledLocationFeeds()`で有効な位置情報フィード一覧を取得する（複数事業者対応）。DBは引かない。
+2. `config/feeds.js`の`getGtfsFeedIdsFor(feedId)`で、その位置情報フィードに対応するGTFSフィードIDの**配列**を得る。アルピコ交通のように2つのGTFSフィードにまたがる事業者があるため、1件に畳まず配列のまま扱う。
+3. `config/routeExternalIdMapping.js`の対応表を、上で得たGTFSフィードのプレフィックス（`feedId:`）で絞り込み、**いずれかに一致する**エントリだけを使って路線を特定する。配列が空、または一致が0件の場合は絞り込みを行わず全件を対象にする（設定漏れで位置情報が全滅しないため）。
 4. 各CSVフィードを個別に`fetch`で取得する。ステータスが429/502/503や5xx系ならサーバー障害とみなして今回はスキップ（例外を投げずリトライは次回ポーリングに委ねる）。
 5. 各行から車両ID・GPS時刻・緯度経度・方向列を取り出し、`GPS_FRESHNESS_MIN`（既定15分）より古い、または未来の時刻のデータは除外する。
 6. 方向列の値を`direction_mapping`（`csvValue0`/`csvValueOther`）に従って自社の`direction_id`に変換する。
@@ -181,7 +189,7 @@ GTFSの`frequencies.txt`（頻度ベース運行）を読み込み、当日分�
    - `daily_trips`をUPSERTし、`daily_trip_stop_times`に**オフセット適用済みの定刻**を焼き込む。
 4. GTFSから消えた便のうち、まだ車両を割り当てていないものを削除する。
 
-**オフセットをここで焼き込むのが設計の要点**です。以降の全処理（割り当て・通過判定・遅延計算・ETA・API・ルート検索）は`daily_trip_stop_times`だけを読めばよく、仮想便と通常便を区別する条件分岐がコード全体に散らばりません。
+**オフセットをここで焼き込むのが設計の要点**です。以降の全処理（割り当て・通過判定・遅延計算・ETA・API）は`daily_trip_stop_times`だけを読めばよく、仮想便と通常便を区別する条件分岐がコード全体に散らばりません。
 
 ⚠️ **既に車両を割り当て済みの便（`assignment_state <> 'pending'`）は書き換えません。** GTFSは1時間ごとに再取得され、成功すると`seed()`が走ってマスタが入れ替わりますが、走行中の便の定刻まで書き換えると遅延計算と実績が破綻するためです。
 
@@ -395,9 +403,9 @@ GTFSの`frequencies.txt`（頻度ベース運行）を読み込み、当日分�
 
 - `etaPredictor.js`の`computeAndStoreAllArrivals()`が、`pipeline.js`の`runPipeline()`から`delayCalc()`の直後（⑧番目のステップ）に呼ばれる。役割（担当・候補）を問わず`state = 'active'`な全割り当てに対して`predictArrivals()`を実行し、結果を`trip_arrival_predictions`テーブルへUPSERTする（`assignment_id, stop_id`が複合主キー）。あわせて`computed_at`が48時間より古いレコードを削除する。
 - `predictArrivals()`自体（アルゴリズム本体）は一切変更していない。計算を行う場所が「APIリクエスト時」から「パイプライン実行時」に変わっただけ。
-- API・ルート検索側は計算を一切行わず、`getArrivalsForAssignment(client, assignmentId)`で`trip_arrival_predictions`から読み出すだけになった。呼び出し元は主に2箇所：
+- API側は計算を一切行わず、`getArrivalsForAssignment(client, assignmentId)`で`trip_arrival_predictions`から読み出すだけになった。呼び出し元は主に2箇所：
   - `routes/api.js`の`GET /api/buses`: 稼働中バス一覧の各バス停に予測時刻を付与する。
-  - `services/routeSearch.js`の`getRealtimeCandidates()` / `calculateTransferRouteDetail()`: ルート検索（乗換案内）で、対象バス停への予測到着時刻を使う。
+  - `services/realtimeTripLookup.js`の`buildBusEntry()`: 便詳細ページ・バス停検索の「接近中のバス」・経路検索のリアルタイム重ね合わせ（8.6章）が共通で使う。
 - トレードオフ: 予測値のリアルタイム性が「<5秒」から「最大60秒（パイプライン間隔）」に低下する。バス運行の性質上この程度のラグは許容範囲とされている。
 
 ---
@@ -432,7 +440,7 @@ scheduler.js上、独立したタイマー（1分間隔）で実行されます�
 2. **最後に担当車両だった割り当て1件**を`is_official = TRUE`で`completed_trips`＋`completed_trip_stop_times`に保存する。`actual_time`（"H:mm"文字列）は`actual_minutes`（0時起点の分数）にも変換する（**5章の統計集計で使うため**）。
 3. 担当を経験した他の車両（再割り当て前の旧担当など）は`is_official = FALSE`で監査用に保存する。
 4. **一度も担当にならなかった候補車両はアーカイブしない。** 別経路をたまたま走っていた可能性があり、区間統計を汚染するためです。
-5. `daily_trips.closed_at`を立てる。便は時刻表上のデータとしては存続し、ルート検索にも出続けます。`closed_at`は「リアルタイム運行情報の対象から外れた」ことを表します。
+5. `daily_trips.closed_at`を立てる。`closed_at`は「リアルタイム運行情報の対象から外れた」ことを表すだけで、便自体は時刻表上のデータとして存続します（経路検索はそもそもGTFSインデックス側を見るため影響を受けません）。
 
 その後`etaPredictor.js`の`updateSegmentStats()`を呼び、区間統計を更新します。つまり**「バスが1便走り終える」→「統計が育つ」→「次の予測精度が上がる」**というループがここで完結しています。
 
@@ -464,25 +472,93 @@ scheduler.js上、独立したタイマー（1分間隔）で実行されます�
 ### 7.3 `db/seed.js` / `db/migrate.js`
 
 - `seed.js`: GTFSのCSV群から`routes`・`stops`・`schedule_trips`・`schedule_stop_times`テーブルへマスタデータを投入する（起動のたびに実行しても壊れないよう`ON CONFLICT`で冪等化されている）。
-  - **フィード初期設定**: `DEFAULT_FEEDS`としてGTFSフィード2件（ぐるっと松本バス1・2）と位置情報フィード3件（松本市民バス・アルピコ交通・松本市営）を`feeds`テーブルに投入する。
-  - **フィード対応関係**: `DEFAULT_FEED_MAPPINGS`として位置情報フィード⇔GTFSフィードの対応関係（推測値）を`feed_mappings`テーブルに投入する。
-  - **複数フィード対応**: 有効なGTFSフィードが存在する場合はフィードごとに`seedRoutes()`と`seedStopsAndTimetable()`を実行する。route_idは`feedId:routeId`形式でグローバル一意にし、service_idも`feedId:service_id`形式にする。
-  - 外部IDマッピング（`route_external_ids`）もここで初期投入する。
-- `migrate.js`: 既存DBに対する後発のスキーマ変更を`ALTER TABLE ... IF NOT EXISTS`で安全に適用する。`docker-entrypoint.sh`から起動時に毎回呼ばれる。
+  - **フィード稼働状態レコードの用意**: `ensureFeedRows()`が`config/feeds.js`の全フィード（GTFS 2件・位置情報 3件）について`feeds`テーブルの行をUPSERTする。`id`/`feed_type`/`name`/`url`/`enabled`はコードが正で、DBを直接編集しても上書きされる。⚠️ `last_fetched_at`/`last_status`/`last_error`はSET句に含めない（含めると再起動のたびに稼働状態が失われる）。
+  - **複数フィード対応**: 有効なGTFSフィード（`config/feeds.js`の`getEnabledGtfsFeeds()`）ごとに`seedRoutes()`と`seedStopsAndTimetable()`を実行する。route_idは`feedId:routeId`形式でグローバル一意にし、service_idも`feedId:service_id`形式にする。
+  - **設定の検証**: `validateCodeConfig()`が`config/feeds.js`・`config/routeExternalIdMapping.js`と実際のGTFSデータの整合（フィードIDの重複、未定義フィードの参照、実在しないroute_idの参照など）を確認し、問題があれば**警告ログを出すだけ**で起動は止めない。GTFS更新でroute_idが一時的に消えたときにシステム全体が起動不能になるのを避けるため。
+  - 外部ID⇔route_idの対応はDBに投入しない（`config/routeExternalIdMapping.js`をランタイムが直接参照する）。
+- `migrate.js`: 既存DBに対する後発のスキーマ変更を`ALTER TABLE ... IF NOT EXISTS`で安全に適用する。`docker-entrypoint.sh`から起動時に毎回呼ばれる。旧`route_external_ids`・`feed_mappings`テーブルの`DROP TABLE IF EXISTS`もここで行う（ステップ8）。
 
 ---
 
-## 8. `services/routeSearch.js` — バス停検索・乗換ルート検索
+## 8. `services/gtfsRouteSearch.js` — 経路検索（乗換案内）
 
-利用者向け画面の「ルート検索（乗換案内）」機能を担当します。**全路線対応**で、同名バス停は上り下りを区別せず同一視します。
+利用者向け画面の「経路検索」（`/routesearch`）を担当します。設計の全体像と要望の対応関係は
+[docs/経路検索機能_改善仕様書.md](docs/経路検索機能_改善仕様書.md)にまとめてあります。
 
-- `searchStops()`: バス停名の部分一致検索（`ILIKE`）。`routeId`指定時はその路線内、未指定時は全路線から検索。`distinct`引数で、フロントエンドのサジェスト表示用（同名バス停をまとめる）か、ルート計算用（全件必要）かを切り替える。
-- `getRealtimeCandidates()`: 指定バス停をまだ通過していない稼働中車両を探し、`predictArrivals()`で予測到着時刻を取得して候補に加える（＝リアルタイム候補）。
-- `getTimetableCandidates()`: まだGPSで検知されていない、これから発車する時刻表上の便を候補に加える（＝時刻表候補、GTFSカレンダーで当日運行分のみに絞り込み）。
-- `calculateTransferRoute()`: 出発地・目的地のバス停名から、
-  1. まず同一路線内の直接ルート（`calculateDirectRoute()`）を探し、あれば最速のものを返す。
-  2. 直接ルートが無ければ、出発地側の路線と目的地側の路線に**同名バス停（乗換ポイント）**が存在する組み合わせを総当たりで探し、乗換ルート（`calculateTransferRouteDetail()`）を計算する。
-  3. リアルタイム・時刻表それぞれの候補を混ぜて、最も到着が早いものを選ぶ。
+### 8.1 探索の土台はDBではなくGTFSインデックス
+
+**探索は`gtfsTimetable.js`のインメモリインデックスだけで完結します（DBを一切見ません）。**
+2026年8月に、DBの`daily_trips`/`stops`を検索していた旧実装（`routeSearch.js`）から全面的に移しました。旧実装には次の構造的な限界がありました。
+
+| 旧実装の作り | 引き起こしていた問題 |
+|---|---|
+| DBの`daily_trips`（当日ぶんしか生成されない）を見る | 日付を選んで検索できない。当日便の生成に失敗すると結果がゼロになる |
+| DBの`stops`はGTFSの`stop_id`・`zone_id`・標柱を持たない | 運賃を引けない。`/busstop`のstopKeyへ変換できない |
+| 停留所の一致判定がバス停名の完全一致 | 表記の違う近接バス停がつながらず、経路が見つからない |
+| 乗換は「直通が0件のときだけ・1回まで・同名バス停のみ・各区間は最速1本」 | 乗換2回や徒歩数十mの乗り継ぎがまったく出ない |
+
+これにより、**任意の日付・ひらがな/ローマ字検索・路線カラー・運賃・通過バス停一覧・`/busstop`への直リンク**がすべて同じ経路で扱えるようになっています。
+
+### 8.2 探索アルゴリズム（RAPTOR型）
+
+ラウンド（＝乗車回数）ごとに到着時刻を更新していくRAPTOR方式です。ダイクストラではなくRAPTORにしているのは、**乗換回数ごとの最良解（パレート最適解）が1回の実行でまとめて得られる**ためで、「直通は遅いが乗換1回なら早い」といった複数案をそのまま列挙できます。
+
+```
+ラウンド0 : 出発地に基準時刻を置き、徒歩接続で近傍バス停へ展開
+ラウンドk : 直前ラウンドで更新されたバス停から乗車できる便を走査し、
+            その便の以降のバス停の到着時刻を更新 → 徒歩接続を relax
+```
+
+- 乗車条件は`pickup_type != 1`かつ「発車時刻 ≥ 到着時刻＋乗換余裕（同一バス停60秒／徒歩は徒歩所要時間）」。最初の乗車には乗換余裕を課しません。降車条件は`drop_off_type != 1`。
+- **徒歩接続（footpath）**：バス停グループ間の直線距離が既定400m（フォールバック時800m）以内なら徒歩で乗り継げるものとし、80m/分で徒歩時間を見積もります。緯度経度のグリッドで近傍だけ比較し、半径ごとに1度だけ作ってキャッシュします。**旧実装で経路が見つからなかった最大の原因（同名バス停でしか乗り換えられない）への対策です。**
+- **徒歩の連鎖は禁止**しています（`relaxFootpaths()`が、そのラウンドで既に徒歩ラベルが付いたバス停からは再relaxしない）。許すと「4分歩いて5分歩いて…」という非現実的な経路が最速解になります。
+- 便の走査は1ラウンド1回だけ（`scanned`）。停車時刻は固定なので、どの停留所から乗っても以降の到着時刻は変わらず、再走査しても改善しないためです。
+- 目的地への現時点の最良到着時刻を超える更新は捨てます（枝刈り）。
+- **日跨ぎ**：前日サービスの24時超え便を−86400秒、翌日サービスを+86400秒シフトして同時に探索対象へ入れます。深夜0時台の検索や終バス後の検索（＝翌朝の始発を提示）が自然に成立します。
+- `frequencies.txt`由来の便は仮想便へ展開してから探索します（現行フィードには存在しませんが、将来フィードが変わっても壊れないように）。
+
+### 8.3 複数候補と並び順
+
+先頭区間の発車を1分ずつ進めながら再探索し、次発・次々発を最大5件そろえます。加えて、**徒歩接続を使わない探索も必ず実行して結果に混ぜます**。徒歩を許すと「1駅手前で降りて歩く」方が最速になり、バスだけで完結する案が枝刈りで消えてしまうためです（利用者はふつう歩かない案も知りたい）。
+
+並び順は到着時刻→乗換回数の順。`isRecommended`（おすすめ）は`到着時刻 + 乗換回数×5分 + 徒歩時間×0.5`が最小の1件に付けます。単純な最速ではなく「乗換が少なく歩かない経路」を適度に優遇するためです。
+
+### 8.4 「経路が見つからない」への段階的フォールバック
+
+結果が0件のあいだ、次の順に条件を緩めます。どの段階で見つかったかは`relaxation`としてレスポンスに含め、画面に明示します。
+
+| 段階 | 条件 |
+|---|---|
+| `normal` | 探索窓6時間・乗換2回まで・徒歩400m |
+| `wide-window` | 探索窓を30時間へ拡張 |
+| `walk-transfer` | 徒歩800m・乗換3回まで |
+
+それでも0件なら、理由を切り分けて「次に取れる行動」を必ず返します（`buildNotFoundResponse()`）。
+
+- 出発地・目的地にその日1本も発着が無い → 近くのバス停（徒歩圏で発着のあるもの）を提示
+- その時刻以降に便が無い → その日の始発時刻を提示
+- その日は運行が無い → 7日先まで探して**次の運行日**を提示
+- バス停名が解決できない → 名称検索の候補を提示
+
+### 8.5 運賃（`services/gtfsFare.js`）
+
+`fare_attributes.txt`/`fare_rules.txt`をフィードごとに索引し、区間（leg）ごとに運賃を引きます。
+
+- `stops.txt`の`zone_id`を経由して`origin_id`/`destination_id`と突き合わせます（松本市のフィードでは`zone_id = stop_id`ですが、仕様どおり`zone_id`で引きます）。
+- 空欄は「何にでも一致」（GTFS仕様）。複数該当した場合は**より限定的なルール**（出発+到着指定 > 片方だけ > 両方なし）を優先し、同順位なら安い方を採用します。該当が無ければ`null`＝運賃不明とし、**推測はしません**。
+- 経路全体の運賃は区間の単純合計です（`transfers=0`＝乗継割引なし、というデータどおりの扱い）。一部の区間だけ不明なときは合計に「一部不明」を添えます。
+- 運賃ファイルは**任意ファイル**です。`REQUIRED_GTFS_FILES`に足してはいけません（持たないフィードがあると全フィードのGTFS更新が止まる）。
+
+### 8.6 リアルタイムの重ね合わせ
+
+**検索日が本日のときだけ**、確定した経路に対して後からリアルタイムを重ねます。
+`realtimeTripLookup.findLiveAssignment()`で当日の担当割り当てを引き、`buildBusEntry()`の停車進捗・到着予測・車両位置を、**バス停名の一致**で各区間に割り当てます（DBの`stops`は標柱を持たないため名前一致が唯一の接点。`busStopApproaching.js`と同じ制約）。
+引けなかった区間は定刻のまま表示します（soft-fail）。重ね合わせが失敗しても経路そのものは必ず成立します。
+
+### 8.7 `services/routeSearch.js` に残っているもの
+
+`/api/stops/search`（DBの`stops`に対するバス停名の部分一致検索）だけです。**ここへ経路探索を戻さないでください。**
+
 
 ---
 
@@ -514,9 +590,7 @@ scheduler.js上、独立したタイマー（1分間隔）で実行されます�
 | テーブル | 役割 |
 |---|---|
 | `routes` | 路線マスタ（`feed_id`でどのGTFSフィード由来かを追跡） |
-| `feeds` | **GTFSフィード・位置情報フィードの管理**（`feed_type` / `url` / `enabled` / 取得状態） |
-| `feed_mappings` | **位置情報CSV⇔GTFSフィードの対応関係**（動的管理用） |
-| `route_external_ids` | 外部の位置情報フィード上のIDと自社route_idの対応、フィードID（`direction_mapping`列は未使用・残置） |
+| `feeds` | **フィードの稼働状態**（`last_fetched_at` / `last_status` / `last_error`）。構成（`feed_type` / `url` / `enabled` 等）は`config/feeds.js`が正で、行は`seed.js`がそこからUPSERTする |
 | `stops` | バス停マスタ（路線・方向・順序・座標・名称（かな/英語）・お知らせ・時刻表リンク） |
 | `schedule_trips` | 時刻表の「便」（`service_id`＝曜日区分ごと、`gtfs_trip_id`＝GTFS原文のtrip_id、`headsign`＝行先表示） |
 | `schedule_stop_times` | 便ごとのバス停定刻（`scheduled_time`がNULLかつ`is_through=true`は非停車＝`↓`） |
@@ -552,14 +626,13 @@ scheduler.js上、独立したタイマー（1分間隔）で実行されます�
 | GET | `/api/timetable` | 本日運行対象の便の時刻表（`daily_trips`ベース。frequencies由来の仮想便も含む） |
 | GET | `/api/buses` | **担当車両が割り当てられている当日便のリアルタイム運行状況＋到着予測**（`trip_arrival_predictions`から`getArrivalsForAssignment()`で読み出すだけ。計算はパイプライン側でプリコンピュート済み → 5.4章）。候補車両は公開しない |
 | GET | `/api/buses-for-map` | バスマップ用の走行中バス位置（担当車両のみ・到着予測なしの軽量版）。**`routeId`は任意で、省略時（および`routeId=all`）は全路線**を返す |
-| GET | `/api/route-search` | 乗換ルート検索（全路線対応） |
+| GET | `/api/route-search` | **経路検索**（8章）：乗換2回まで・徒歩接続あり・任意日付・運賃つき。`fromStopKey`/`from`・`toStopKey`/`to`・`date=YYYY-MM-DD`・`time=HH:MM`・`limit`（旧`departureTime`は`time`の別名として受付） |
+| GET | `/api/route-search/stops` | **経路検索**：出発地・目的地の候補（漢字/ひらがな/カタカナ/ローマ字。返す`stopKey`は時刻表検索・バス停検索と共通） |
 | GET | `/api/timetable/stops/search` | **時刻表検索**：バス停名の検索（漢字/ひらがな/カタカナ/ローマ字）。16章参照 |
 | GET | `/api/timetable/stops/:stopKey` | **時刻表検索**：バス停の時刻表（`?date=YYYY-MM-DD`・`?platform=標柱のstop_id`） |
 | GET | `/api/timetable/trips/:feedId/:routeId/:tripId/:departureTime` | **時刻表検索**：便の通過時刻一覧（`?stop=`でハイライト対象を指定） |
 | GET | `/api/admin/settings` | （要Basic認証）お知らせ設定の取得 |
 | PUT | `/api/admin/settings` | （要Basic認証）お知らせ設定の更新 |
-| GET | `/api/admin/route-mappings` | （要Basic認証）外部ID⇔route_idの対応表取得 |
-| PUT | `/api/admin/route-mappings` | （要Basic認証）対応表の更新 |
 | GET | `/api/admin/route-data` | （要Basic認証）バス停座標・時刻表の編集用データ取得 |
 | PUT | `/api/api/admin/route-data` | （要Basic認証）バス停座標・時刻表の更新　※パスに`/api`が二重になっている点は既存コードのまま |
 | GET | `/api/admin/bus-positions` | （要Basic認証）直近3分のバス位置情報＋Yahoo!リバースジオコーダによる住所表示 |
@@ -574,15 +647,15 @@ scheduler.js上、独立したタイマー（1分間隔）で実行されます�
   - `POLL_MS`（20秒）間隔で`/api/buses`等をポーリングして表示を更新する。
   - 路線セレクターで路線を切り替えられる（複数路線対応）。
   - お気に入りバス停（localStorage連携）で先発・次発を表示。
-  - ルート検索（乗換案内）機能（全路線対応）。
   - GTFSの`headsign`（行先表示）を優先して方向ラベルを表示する。
   - 開いているアコーディオンやスクロール位置は再描画をまたいで保持される。
   - バスマップ（`#/busmap`、Leaflet + OpenStreetMap）：`/api/buses-for-map`を`POLL_MS`間隔でポーリングし、**全路線**の走行中バスを路線色のマーカーで表示する。注意点は以下の3つ。
     - **地図を作り直すときは`busMarkers`／`userMarker`も必ず捨てる。** 破棄済みの地図に紐づくマーカーを使い回すと、2回目以降にバスマップを開いたとき1台も描画されない。
     - **現在地の取得（`addUserLocation()`）を`await`してからバスを取得しない。** 位置情報の許可ダイアログは利用者が答えるまで解決せず、その間バスが表示されないため。
     - **`#map`の高さはCSSで確定させ、表示直後に`invalidateSize()`を呼ぶ。** 高さ0や非表示状態のコンテナではLeafletが何も描画しない。
-- `frontend/timetable.js`: 時刻表検索機能（16章）。**ハッシュではなくHistory API（パス`/timetable...`）でルーティングする**唯一の画面。`app.js`の`renderCurrentRoute()`から`window.TimetableView.render()`が呼ばれる。
-- `frontend/admin.html`: 管理画面（お知らせ編集、外部IDマッピング編集、バス停座標・時刻表編集、直近バス位置の住所付き一覧）。Basic認証情報をブラウザに保持してAPIを呼び出す。
+- `frontend/timetable.js`: 時刻表検索機能（16章）。**ハッシュではなくHistory API（パス`/timetable...`）でルーティングする**画面のひとつ。`app.js`の`renderCurrentRoute()`から`window.TimetableView.render()`が呼ばれる。`a[data-spa]`のクリック委任リスナーは**この`timetable.js`だけがdocument全体へ登録**しており、`busstop.js`・`routesearch.js`はそれに相乗りする（重複登録しない）。
+- `frontend/routesearch.js`: 経路検索画面（8章）。同じくパス（`/routesearch`）でルーティングし、**検索条件をURLのクエリに持たせる**（`?from=…&fromKey=…&to=…&toKey=…&date=…&time=…`）。結果から`/busstop`へ移動して戻っても検索結果が復元されるようにするため。表示は路線カラー基調で、区間の縦帯・路線チップ・所要時間バーに`route_color`を使い、コントラストが足りない色は`chipTextColor()`/`routeColorStyle()`で文字色を反転させる（`timetable.js`・`busstop.js`と同一ロジック）。本日の検索のときだけ20秒間隔でリアルタイム更新する。旧ハッシュ`#/search`は`/routesearch`へリダイレクトされる。
+- `frontend/admin.html`: 管理画面（お知らせ編集、バス停座標・時刻表編集、直近バス位置の住所付き一覧）。Basic認証情報をブラウザに保持してAPIを呼び出す。外部IDマッピングの編集セクションは、対応を`config/routeExternalIdMapping.js`へコード化したため削除済み。
 - `frontend/style.css`: 共通スタイル（時刻表の「縦=時 / 横=分」レイアウトもここ）。
 
 > **`index.html`の静的ファイル参照は必ず絶対パス（`/app.js`など）にすること。**
@@ -617,7 +690,7 @@ scheduler.js上、独立したタイマー（1分間隔）で実行されます�
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin123` | 管理画面のBasic認証情報 |
 | `YAHOO_CLIENT_ID` | - | 管理画面の住所逆引き（Yahoo!リバースジオコーダ）用APIキー |
 
-> 位置情報CSVやGTFS ZIPのURLは環境変数ではなく、**`feeds`テーブル**（および`feed_mappings`テーブルの対応関係）で管理されます。初期値は`db/seed.js`の`DEFAULT_FEEDS`・`DEFAULT_FEED_MAPPINGS`で投入されます。
+> 位置情報CSVやGTFS ZIPのURL、および位置情報フィード⇔GTFSフィードの対応は、環境変数でもDBでもなく**`backend/src/config/feeds.js`（コード）**で管理されます。外部ID⇔route_idの対応は**`backend/src/config/routeExternalIdMapping.js`**です。いずれも変更にはデプロイが必要です（管理画面からは編集できません）。
 
 ---
 
@@ -640,7 +713,7 @@ npm run setup     # migrate.js → seed.js を実行
 npm start          # または npm run dev（ファイル変更監視）
 ```
 
-PostgreSQLは別途起動しておき、`.env`（または環境変数）で接続情報を指定してください。`feeds`テーブルに位置情報フィード・GTFSフィードのURLが登録されている必要があります（`npm run setup`でデフォルト値が投入されます）。
+PostgreSQLは別途起動しておき、`.env`（または環境変数）で接続情報を指定してください。位置情報フィード・GTFSフィードのURLは`backend/src/config/feeds.js`にコードで定義されているため、DBへの登録作業は不要です（`npm run setup`が稼働状態記録用の行を用意します）。
 
 ---
 
@@ -652,7 +725,7 @@ PostgreSQLは別途起動しておき、`.env`（または環境変数）で接�
 - **「同時刻帯＝始発時刻の差が10分以内」を「稼働中の車両は他の便に割り当てない」に単純化しないこと**。8:00便の担当車両が8:11便の担当になるのは仕様上正しい動作（4.6〜4.9節参照）。
 - **`vehicles`の`business_start_time` / `departure_time` / `trip_id` / `trip_type` / `last_arrived_seq` / `delay_minutes`、および`vehicle_stop_status`テーブルは未使用**（旧・車両起点方式の名残）。移行のロールバック余地のために残してあるだけなので、新しいコードから参照しないこと。
 - **`stops`の`seq_order`は路線×方向で共有されている**（`seed.js`がGTFSの`stop_sequence - 1`を`UNIQUE (route_id, direction_id, seq_order)`に載せる設計）。同一路線内で停車パターンの異なる便があると、同じ`seq_order`に別のバス停が入り込む余地が残っている。便起点方式では進捗を便ごとの停車パターンで作るため悪化はしないが、根本解決は別課題。
-- **`services/gtfsCalendar.js`**: `feeds`テーブル上で有効な各GTFSフィードのディレクトリから`calendar.txt`・`calendar_dates.txt`を読み込み、`feedId:serviceId`形式で当日有効な`service_id`を返す。フィード未設定時は`data gtfs`直下の静的GTFSへフォールバックする。
+- **`services/gtfsCalendar.js`**: `config/feeds.js`で有効な各GTFSフィードのディレクトリから`calendar.txt`・`calendar_dates.txt`を読み込み、`feedId:serviceId`形式で当日有効な`service_id`を返す。フィード未設定時は`data gtfs`直下の静的GTFSへフォールバックする。
 - **24時以降の便**: `daily_trips.start_at`（TIMESTAMPTZ）では正しく扱えるが、`"H:mm"`表示と`computeDelayMinutes()`は従来どおりの制約を引きずる。深夜帯停止（23:00〜05:00）と併せ、実質的に対象外である点は変わらない。
 - **`routes/api.js`のPUT `/api/admin/route-data`**: エンドポイントのパスに`/api`が二重になっている（`router`が既に`/api`配下にマウントされているため、実際のパスは`/api/api/admin/route-data`になる）。フロントエンド側の呼び出しと整合していれば実害はないが、命名の一貫性という観点では要注意。
 - **`getDayType()`（`utils/time.js`）と`getActiveServiceIds()`（`gtfsCalendar.js`）は別の曜日区分ロジック**であり、意図的に分離されています。前者はETA統計のバケット分け専用（祝日カレンダー非対応、日曜のみholiday扱い）、後者はGTFSの正式なcalendar.txt/calendar_dates.txtに基づくダイヤ選択用です。混同しないよう注意してください。

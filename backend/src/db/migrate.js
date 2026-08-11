@@ -1,7 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 
-// マイグレーション: service_id対応 + 複数事業者対応（feeds / feed_mappings）
+// マイグレーション: service_id対応 + 複数事業者対応（feeds）
+// フィード構成・外部ID対応はコード（config/feeds.js / config/routeExternalIdMapping.js）へ移し、
+// 旧 route_external_ids / feed_mappings テーブルはステップ8で削除する。
 async function migrate() {
   const pool = require('../config/db');
   const client = await pool.connect();
@@ -93,17 +95,14 @@ async function migrate() {
       ADD COLUMN IF NOT EXISTS feed_id TEXT
     `);
     
-    // 8. route_external_ids に direction_mapping を追加（CSVの方向列とdirection_idの対応を保存）
-    await client.query(`
-      ALTER TABLE route_external_ids 
-      ADD COLUMN IF NOT EXISTS direction_mapping JSONB DEFAULT '{"csvValue0":1,"csvValueOther":0}'::jsonb
-    `);
-
-    // 8.5. route_external_ids に feed_id を追加（どのGTFSフィード由来かを追跡）
-    await client.query(`
-      ALTER TABLE route_external_ids 
-      ADD COLUMN IF NOT EXISTS feed_id TEXT
-    `);
+    // 8. 旧 route_external_ids / feed_mappings テーブルの削除
+    //    外部ID⇔route_id の対応は config/routeExternalIdMapping.js、
+    //    位置情報フィード⇔GTFSフィードの対応は config/feeds.js へ移した。
+    //    どちらも他テーブルから参照される側ではない（routes / feeds を参照する側）ため
+    //    CASCADE は不要で、他テーブルへの波及もない。
+    //    ⚠️ feeds は DROP しない。稼働状態の記録先として残す（仕様書 3.3）。
+    await client.query(`DROP TABLE IF EXISTS route_external_ids`);
+    await client.query(`DROP TABLE IF EXISTS feed_mappings`);
 
     // 9. schedule_trips に headsign を追加（GTFS trip_headsign。行先表示のハードコード解消のため）
     await client.query(`
@@ -118,6 +117,7 @@ async function migrate() {
     `);
 
     // 11. feeds テーブルの作成（既にスキーマで作成済み。ここでは既存DB向けに保証）
+    //     構成はコード（config/feeds.js）が正で、この表が持つのは稼働状態だけである。
     await client.query(`
       CREATE TABLE IF NOT EXISTS feeds (
         id            TEXT PRIMARY KEY,
@@ -132,16 +132,6 @@ async function migrate() {
       )
     `);
 
-    // 12. feed_mappings テーブルの作成（位置情報CSV⇔GTFSの対応関係を動的管理）
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS feed_mappings (
-        location_feed_id TEXT NOT NULL REFERENCES feeds(id),
-        gtfs_feed_id     TEXT NOT NULL REFERENCES feeds(id),
-        confidence       REAL NOT NULL DEFAULT 0,
-        PRIMARY KEY (location_feed_id, gtfs_feed_id)
-      )
-    `);
-    
     // ==========================================================
     // 13. 便起点の車両割り当て方式への移行
     //     （GTFS便を先に生成し、始発時刻に車両を割り当てる）

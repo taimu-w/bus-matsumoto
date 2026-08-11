@@ -2,39 +2,22 @@ const fs = require('fs');
 const path = require('path');
 const pool = require('../config/db');
 const { getGtfsDir, unqualifyRouteId } = require('./gtfsFeedManager');
+const { getEnabledGtfsFeedIds } = require('../config/feeds');
 
 const GTFS_DIR = getGtfsDir(null);
 const EXTERNAL_ROUTE_ID_ALIASES = {
   '01h9j06f82mw3wvnddsbs4z7fs': 'guruttomatsumotobus1:11'
 };
 
-// GTFSフィードIDのキャッシュ（1分間有効）
-let gtfsFeedIdCache = {
-  feeds: [],
-  fetchedAt: 0
-};
-const GTFS_FEED_CACHE_TTL_MS = 60 * 1000;
-
 /**
- * DBから有効なGTFSフィードID一覧を取得する（キャッシュ付き）。
+ * 有効なGTFSフィードID一覧を取得する。
+ *
+ * 取得元は config/feeds.js（コード上の定数）であり、DBを引かないため失敗しえない。
+ * そのため旧実装が持っていたTTLキャッシュとDB障害時フォールバックは撤去した。
+ * 呼び出し元が await しているので async のまま残してある。
  */
 async function getActiveGtfsFeedIds() {
-  const now = Date.now();
-  if (gtfsFeedIdCache.feeds.length > 0 && now - gtfsFeedIdCache.fetchedAt < GTFS_FEED_CACHE_TTL_MS) {
-    return gtfsFeedIdCache.feeds;
-  }
-
-  try {
-    const res = await pool.query(
-      `SELECT id FROM feeds WHERE feed_type = 'gtfs' AND enabled = TRUE ORDER BY id ASC`
-    );
-    gtfsFeedIdCache = { feeds: res.rows.map((r) => r.id), fetchedAt: now };
-    return gtfsFeedIdCache.feeds;
-  } catch (err) {
-    console.error('[gtfsData] GTFSフィード一覧取得エラー:', err.message);
-    // フォールバック: キャッシュ済みフィードを使う
-    return gtfsFeedIdCache.feeds;
-  }
+  return getEnabledGtfsFeedIds();
 }
 
 /**

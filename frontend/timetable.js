@@ -287,8 +287,10 @@
           })
           .join('');
         const more = (stop.routes || []).length > 6 ? `<span class="text-[10px] font-bold text-gray-500">ほか${stop.routes.length - 6}路線</span>` : '';
+        // 検索結果のタップ先は /busstop/{stop_id}（バス停情報の総合ポータル）。
+        // そこから「時刻表へ」ボタンで改めてこの画面の /timetable/stops/{stop_id} に来られる（補完仕様書 3.6.1）。
         return `
-          <a href="${esc(stopUrl(stop.stopKey))}" data-spa
+          <a href="/busstop/${encodeURIComponent(stop.stopKey)}" data-spa
              class="block bg-white border-2 border-gray-200 rounded-xl p-3 hover:border-sky-500 active:scale-[0.99] transition-all">
             <div class="flex items-center justify-between gap-2">
               <div class="min-w-0">

@@ -40,7 +40,7 @@ docker compose up --build
 
 このリポジトリにはテストスイートもlint設定も存在しません。これらのためのnpmスクリプトを勝手に作らないでください。
 
-PostgreSQL接続は`DATABASE_URL`（ホスティング環境向け、SSL接続前提）または`PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD`（ローカル向け）で設定します。調整可能な環境変数（判定半径・タイムアウト閾値・ポーリング間隔など）は`backend/.env.example`を参照してください。位置情報フィードやGTFS ZIPフィードのURLは環境変数**ではなく**、`feeds`テーブル・`feed_mappings`テーブル（`db/seed.js`の`DEFAULT_FEEDS`/`DEFAULT_FEED_MAPPINGS`で初期投入）で管理されています。
+PostgreSQL接続は`DATABASE_URL`（ホスティング環境向け、SSL接続前提）または`PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD`（ローカル向け）で設定します。調整可能な環境変数（判定半径・タイムアウト閾値・ポーリング間隔など）は`backend/.env.example`を参照してください。位置情報フィードやGTFS ZIPフィードのURLは環境変数**でもDBでもなく**、`backend/src/config/feeds.js`（コード）で管理されています。外部ID⇔GTFS route_idの対応も同じくコード（`backend/src/config/routeExternalIdMapping.js`）です。
 
 ## アーキテクチャ
 
@@ -69,7 +69,7 @@ daily_trips（当日の便。例：8:00発）
 `backend/src/jobs/pipeline.js`の`runPipeline()`は、以下のステップを**毎回のポーリングでこの順序のまま直列実行**します。各ステップの結果（DBの状態）を次のステップが前提にしているため、順序を変えると壊れます。
 
 ```
-updateAllGtfsFeeds()  ⓪ feedsテーブルに基づきGTFS ZIPを更新（独自のtry/catch、失敗しても後続は継続）
+updateAllGtfsFeeds()  ⓪ config/feeds.jsに基づきGTFS ZIPを更新（独自のtry/catch、失敗しても後続は継続）
 ensureDailyTrips()     ① 当日の運行便を生成 → daily_trips / daily_trip_stop_times（生成済みなら即リターン）
 fetchLocation()         ② 有効な位置情報フィード全件からGPSを取得 → vehicle_positions_raw
 sortCarId()              ③ 生ログを車両ごとのログに振り分け（vehicle_gps_log）、新規車両を登録
@@ -90,7 +90,12 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 
 ### 複数フィード対応の設計
 
-GTFSフィード・位置情報フィードのいずれもハードコードではなくDB駆動（`feeds`テーブル）で、複数事業者・複数路線を同時にサポートします。`feed_mappings`は、位置情報フィードがどのGTFSフィードの`route_external_ids`を使って路線を解決すべきかを紐付けます。異なるGTFSフィード間でroute_idをグローバルに一意にするため、プレフィックス方式（`feedId:routeId`）を使っており、`gtfsFeedManager.js`の`qualifyRouteId`/`unqualifyRouteId`が変換を担います。`service_id`（`feedId:service_id`）も同様のパターンです。
+**フィード構成と対応はコード（`backend/src/config/feeds.js`）で管理し、`feeds`テーブルは稼働状態（`last_fetched_at`/`last_status`/`last_error`）の記録のみを担います。** GTFSフィード・位置情報フィードのURL・有効/無効・両者の対応はすべて`config/feeds.js`にあり、複数事業者・複数路線を同時にサポートします。設計背景は[docs/外部IDマッピングのコード化_仕様書.md](docs/外部IDマッピングのコード化_仕様書.md)を参照してください。
+
+- 位置情報フィードがどのGTFSフィードの路線を解決対象にするかは、`config/feeds.js`の`gtfsFeedIds`（**配列**）で明示します。アルピコ交通のように複数のGTFSフィードにまたがる事業者を1件へ畳まないための配列です。旧`feed_mappings`テーブルの`confidence`（信頼度）による推測は、同値のとき採用フィードが不定になるため全廃しました。
+- 外部ID（位置情報CSVの系統ID）から路線を引く対応表は`backend/src/config/routeExternalIdMapping.js`にあり、**qualified route id（`feedId:routeId`）を直接記述します**。路線名は解決に使いません（旧方式は`routes.name`の文字列一致で解決しており、「ケ/ヶ」のような表記ゆれ1文字で対応が黙って欠落していました）。ファイル中のコメントアウト済みエントリは「対応するGTFS路線がまだ存在しない外部ID」の記録なので、消さないでください。
+- 異なるGTFSフィード間でroute_idをグローバルに一意にするため、プレフィックス方式（`feedId:routeId`）を使っており、`gtfsFeedManager.js`の`qualifyRouteId`/`unqualifyRouteId`が変換を担います。`service_id`（`feedId:service_id`）も同様のパターンです。
+- フィード構成・外部ID対応の追加・変更は**コード側を編集してデプロイします**。管理画面からは編集できません（静的設定であり、誤設定が黙って通るリスクの方が大きいという判断です）。
 
 ### 車両割り当ての判定条件（`services/tripAssignment.js`）
 
@@ -108,6 +113,19 @@ GTFSフィード・位置情報フィードのいずれもハードコードで�
 
 過去の区間別走行時間統計（`segment_travel_stats`、曜日区分×時間帯でバケット化）と、その車両直近の走行ペース（`liveFactor`、0.5〜2.5倍にクランプ、直近の完了区間から算出）を組み合わせます。データの有無に応じて段階的にフォールバックします：過去統計+ペース補正 → 時刻表所要時間×ペース補正 → 時刻表差分そのまま → 固定5分。定刻を持たない通過専用の区間は`naive_anchored`で別途処理し、直近の「定刻を持っていた」バス停まで遡って基準点にします。これは固定5分の推測が通過区間の連続で積み重なってしまうのを防ぐためです。完全な判定表（`source`フィールドの値：`schedule`、`actual`、`historical`、`schedule_paced`、`naive`、`through_skip`、`naive_anchored`）はREADME.md §5を参照してください。
 
+### 経路検索（`services/gtfsRouteSearch.js` / `frontend/routesearch.js`）
+
+リアルタイム運行状況とは**探索のデータ経路が完全に独立した機能**です。2026年8月に、DBの`daily_trips`/`stops`を検索していた旧実装（`routeSearch.js`）から、時刻表検索と同じGTFSインメモリインデックス（`gtfsTimetable.js`）を直接探索する方式へ全面的に置き換えました。設計背景と要望の対応は[docs/経路検索機能_改善仕様書.md](docs/経路検索機能_改善仕様書.md)、実装の詳細はREADME.md §8を参照してください。
+
+- 探索は**DBを一切見ません**。任意の日付で検索でき、当日便の生成状況にも、DBの死活にも影響されません。
+- アルゴリズムはRAPTOR型（ラウンド＝乗車回数）。乗換2回まで（フォールバック時3回）、バス停グループ間400m（同800m）以内は徒歩で乗り継げるものとして扱います。
+- **徒歩の連鎖（徒歩→徒歩）は意図的に禁止しています。** 許すと「4分歩いて5分歩いて…」が最速解になり、現実的でない経路が上位に出ます。
+- **徒歩ありの探索結果に、徒歩なしの探索結果を必ず混ぜています。** 徒歩を許すと「1駅手前で降りて歩く」方が最速になり、枝刈りでバスだけの案が消えてしまうためです。
+- 結果0件のときは条件を段階的に緩め（`RELAXATION_STEPS`）、それでも0件なら「次の運行日」「その日の始発」「近くのバス停」を返します。**「見つかりませんでした」だけを返さないこと。**
+- 運賃は`gtfsFare.js`が`fare_attributes.txt`/`fare_rules.txt`（**任意ファイル**）から引きます。該当ルールが無ければ「運賃不明」とし、推測はしません。
+- リアルタイムは**本日の検索のときだけ**、確定した経路に`realtimeTripLookup.js`経由で後から重ねます（重ね合わせに失敗しても定刻で成立させるsoft-fail）。
+- `stopKey`は時刻表検索・バス停検索とまったく同じ識別子です。結果のバス停名から`/busstop/{stopKey}`へ、便から`/timetable/trips/...`へそのまま遷移できます。
+
 ### 時刻表検索（`services/gtfsTimetable.js` / `frontend/timetable.js`）
 
 リアルタイム運行状況とは**データ経路が完全に独立した機能**です。DB（`stops`/`schedule_*`）を一切使わず、ディスク上のGTFSファイルをそのままの粒度でメモリにインデックス化します。既存の`stops`テーブルはGTFSの`stop_id`・標柱・`stop_headsign`を保持していないため、時刻表検索の要件を満たせないからです。インデックスは30分TTLで、GTFS更新成功時に`invalidateTimetableIndex()`で無効化されます。詳細はREADME.md §16を参照してください。
@@ -118,12 +136,13 @@ GTFSフィード・位置情報フィードのいずれもハードコードで�
 
 ### フロントエンド
 
-素のHTML/CSS/JS、ビルドステップなし。`frontend/index.html` + `app.js`（利用者向け運行状況画面。20秒間隔で`/api/buses`等をポーリング、お気に入りはlocalStorage、ルート検索・乗換UI）。`frontend/timetable.js`（時刻表検索）。`frontend/admin.html`（Basic認証で保護された管理画面。お知らせ編集、路線IDマッピング、バス停・時刻表編集、住所逆引き付きの直近車両位置）。
+素のHTML/CSS/JS、ビルドステップなし。`frontend/index.html` + `app.js`（利用者向け運行状況画面。20秒間隔で`/api/buses`等をポーリング、お気に入りはlocalStorage、SPAルーティングの入口）。`frontend/timetable.js`（時刻表検索）、`frontend/busstop.js`（バス停検索）、`frontend/stopmap.js`（バス停マップ）、`frontend/routesearch.js`（経路検索）はいずれもハッシュではなくパスでルーティングします。`frontend/admin.html`（Basic認証で保護された管理画面。お知らせ編集、バス停・時刻表編集、住所逆引き付きの直近車両位置）。外部IDマッピングの編集セクションは、対応をコード化したため削除済みです。
 
 ## 既知の注意点（理解せずに「修正」しないこと）
 
-- **`frequencies.txt`・`translations.txt`を`gtfsFeedManager.js`の`REQUIRED_GTFS_FILES`に足してはいけません。** 持たないフィードがあると、必須にした瞬間にGTFS更新が全フィードで「必須ファイル欠損」となり、システム全体が止まります。`OPTIONAL_GTFS_FILES`側に置いてあるのは意図的です（`translations.txt`が無い場合の扱いは`gtfsTimetable.js`が吸収します）。
+- **`frequencies.txt`・`translations.txt`・`fare_attributes.txt`・`fare_rules.txt`を`gtfsFeedManager.js`の`REQUIRED_GTFS_FILES`に足してはいけません。** 持たないフィードがあると、必須にした瞬間にGTFS更新が全フィードで「必須ファイル欠損」となり、システム全体が止まります。`OPTIONAL_GTFS_FILES`側に置いてあるのは意図的です（`translations.txt`が無い場合の扱いは`gtfsTimetable.js`が、運賃ファイルが無い場合の扱いは`gtfsFare.js`が「運賃不明」として吸収します）。
 - **`frontend/index.html`の静的ファイル参照は必ず絶対パス（`/app.js`・`/style.css`）にしてください。** 時刻表検索は`/timetable/stops/{stop_id}`のような階層のあるURLを使うため、相対パスだとブラウザが`/timetable/stops/app.js`を取りに行き、サーバーのSPAフォールバックがindex.htmlを返してスクリプトが一切動かなくなります。
+- **`services/routeSearch.js`へ経路探索を戻さないでください。** 現在このファイルに残っているのは`/api/stops/search`用のDB検索だけです。経路探索は`services/gtfsRouteSearch.js`（GTFSインデックス直読み）が担当します。
 - **曜日区分・運行日判定のロジックは用途ごとに3つ独立しています。統合しないでください。** `utils/time.js`の`getDayType()`（ETA統計のバケット分け専用）、`gtfsCalendar.js`の`getActiveServiceIds()`（当日便生成専用。DB保存形式の文字列を返し、有効期間チェックなし）、`gtfsTimetable.js`の`getActiveServices()`（時刻表検索専用。任意の日付・有効期間チェック・表示ラベルあり）。
 - **「同時刻帯＝始発時刻の差が10分以内」という重複割り当て防止のルールを、「稼働中の車両は他の便に割り当てない」に単純化しないでください。** 8:00便の担当車両が8:11便の担当になるのは仕様上正しい動作です。判定は`tripAssignment.js`の`hasSamePeriodConflict()`に集約してあります（`ASSIGN_SAME_PERIOD_MIN`、既定10分）。
 - **通過バス停の扱い（`tripAssignment.js`の`openAssignment()` / `delayCalc.js`）**：あるバス停が`通過`ステータスに確定されるのは、それが便の中で実質的な終点（`lastValidSeq`、実際に定刻を持つ最後のバス停）より**手前**にある経由フラグ付きバス停の場合のみです。`lastValidSeq`より先にある経由フラグ付きバス停は、単に未確定なだけで通過ではありません。この2つを混同したことが実際の過去のバグの原因でした（README §4.11参照）。`delayCalc.js`は`scheduled_time`が無いことを理由にステータスを強制上書きする処理を意図的に廃止しています。
@@ -133,4 +152,7 @@ GTFSフィード・位置情報フィードのいずれもハードコードで�
 - 上記の3つの曜日区分ロジックについて補足：`getDayType()`は平日/土曜/休日の3区分で、日曜のみholiday扱い（祝日カレンダー非対応）。`getActiveServiceIds()`はGTFSの正式な`calendar.txt`/`calendar_dates.txt`に基づく当日便生成用の運行日判定です。
 - **`dailyTripBuilder.js`が「既に車両を割り当て済みの便は書き換えない」ガードを持つのは意図的です。** GTFSは1時間ごとに再取得され、成功すると`seed()`が走ってマスタが入れ替わります。このとき走行中の便の定刻まで書き換えると、遅延計算と実績が破綻します。
 - **`vehicles`テーブルの`business_start_time` / `departure_time` / `trip_id` / `trip_type` / `last_arrived_seq` / `delay_minutes`は、旧・車両起点方式の名残で未使用です。** 移行のロールバック余地のために列だけ残してあります。新しいコードから参照しないでください。
-- GTFSカレンダーの読み込み（`gtfsCalendar.js`）は、`feeds`テーブル上で有効な各GTFSフィードのディレクトリから読みます。フィード由来のカレンダーは`feedId:service_id`というプレフィックス規約によって機能しており、別のコードパスがあるわけではありません。
+- GTFSカレンダーの読み込み（`gtfsCalendar.js`）は、`config/feeds.js`で有効な各GTFSフィードのディレクトリから読みます。フィード由来のカレンダーは`feedId:service_id`というプレフィックス規約によって機能しており、別のコードパスがあるわけではありません。
+- **有効フィード一覧の取得口は`config/feeds.js`だけです。各サービスが独自に`SELECT ... FROM feeds`を書かないでください。** 移行前は同じSQLが`gtfsFeedManager.js`・`gtfsData.js`・`gtfsCalendar.js`・`gtfsTimetable.js`の4箇所に重複しており、1箇所でも取り残すと「サービス間で有効なフィードの認識がずれる」静かなデータ不整合（表示されるのにバスが来ない路線、車両が割り当たらないゴースト便など）を生む温床でした。一覧が欲しくなったら`config/feeds.js`に関数を足してください。
+- **`feeds`テーブルへのUPSERT（`seed.js`の`ensureFeedRows()`）で、`last_fetched_at`/`last_status`/`last_error`を`ON CONFLICT DO UPDATE`のSET句に含めてはいけません。** 含めると再起動のたびに稼働状態がリセットされ、「最後に取得に成功したのはいつか」が失われます。逆に`id`/`feed_type`/`name`/`url`/`enabled`はコードが正で、DBを直接編集しても次回起動時に上書きされます。
+- **`gtfsTimetable.js`の`listFeedIds()`にある`fs.existsSync()`のフィルタを外さないでください。** これはDB障害対策ではなく「設定にはあるが、まだZIPを展開していないフィード」（初回起動時など）を除外するためのもので、外すと存在しないディレクトリを読みに行って時刻表インデックスの構築が落ちます。同じ関数にあったディスク走査フォールバックは、コード側が常に正しい一覧を返せるようになったため撤去済みです（`gtfsCalendar.js`・`gtfsData.js`も同様）。
