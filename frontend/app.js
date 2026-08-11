@@ -656,14 +656,28 @@ function parseHashRoute() {
   return { page: 'realtime-detail', routeId: feedId === 'default' ? routeId : `${feedId}:${routeId}` };
 }
 
-// 旧タブ操作からも現在のURL設計へ遷移させる。
-// 経路検索はハッシュ（#/search）ではなくパス（/routesearch）へ移行済み。
-function switchTab(tab) {
-  if (tab === 'routesearch') {
-    navigateToPath('/routesearch');
-    return;
-  }
-  window.location.hash = '#/realtime';
+/* ---------- 下部ナビゲーションのハイライト同期 ---------- */
+// ハッシュルーティング（リアルタイム・マップ等）とパスルーティング（時刻表・バス停検索・
+// 経路検索・バス停マップ）が混在しているため、現在地の判定は各画面が公開している
+// isXxxPath() をそのまま使う（判定ロジックを二重に持たない）。
+function currentNavPage() {
+  if (window.TimetableView && window.TimetableView.isTimetablePath()) return 'timetable';
+  if (window.BusStopView && window.BusStopView.isBusStopPath()) return 'busstop';
+  if (window.RouteSearchView && window.RouteSearchView.isRouteSearchPath()) return 'routesearch';
+  if (window.StopMapView && window.StopMapView.isStopMapPath()) return null; // バス停マップは主要5タブの対象外
+  const state = parseHashRoute();
+  if (state.page === 'home') return 'home';
+  if (state.page === 'realtime-list' || state.page === 'realtime-detail') return 'realtime';
+  return null; // マップ・バスマップ等、下部タブに対応がない画面ではどれも点灯させない
+}
+
+function updateBottomNav() {
+  const nav = $('bottom-nav');
+  if (!nav) return;
+  const current = currentNavPage();
+  nav.querySelectorAll('[data-nav-page]').forEach((link) => {
+    link.classList.toggle('active', link.dataset.navPage === current);
+  });
 }
 
 /* ---------- マップ関連 ---------- */
@@ -892,6 +906,9 @@ function stopBusMapPolling() {
 }
 
 async function renderCurrentRoute() {
+  // 関数のどの return 経路を通っても下部ナビの点灯状態を最新化するため、
+  // 本体全体を try/finally で包む（更新処理そのものが失敗しても表示は継続させる）。
+  try {
   hideAllPages();
   // バスマップから離れたら自動更新も止める（バスマップを開いたときに再開する）
   stopBusMapPolling();
@@ -927,7 +944,7 @@ async function renderCurrentRoute() {
   const state = parseHashRoute();
   try {
     if (state.page === 'home') {
-      setPageTitle('松本市バス案内', 'Bus Information');
+      setPageTitle('バスタイム', 'Real-time Bus Guide');
       $('section-home').style.display = 'block';
       return;
     }
@@ -946,6 +963,12 @@ async function renderCurrentRoute() {
     }
     await ensureRouteOptions();
     if (state.page === 'realtime-list') {
+      // 稼働路線が1件だけの場合は「路線を選択」画面を挟まず、その路線の運行状況へ直接進む
+      // （複数路線がある場合はこれまで通り一覧を表示する。操作性の改善）。
+      if (routeOptions.length === 1) {
+        window.location.hash = routeHref(routeOptions[0].id);
+        return;
+      }
       setPageTitle('リアルタイム運行情報', 'Select a Route');
       renderRouteList();
       $('section-route-list').style.display = 'block';
@@ -965,13 +988,14 @@ async function renderCurrentRoute() {
   } catch (err) {
     console.error('画面表示エラー:', err);
   }
+  } finally {
+    updateBottomNav();
+  }
 }
 
 /* ---------- 初期化 ---------- */
 const refreshBtn = $('refresh-btn');
 const routeSelect = $('route-select');
-const tabRealtime = $('tab-realtime');
-const tabRoutesearch = $('tab-routesearch');
 
 if (refreshBtn) refreshBtn.addEventListener('click', () => {
   if (parseHashRoute().page === 'realtime-detail') loadAll();
@@ -981,14 +1005,6 @@ if (routeSelect) {
     selectedRouteId = e.target.value;
     loadAll();
   });
-}
-
-// タブ切り替え
-if (tabRealtime) {
-  tabRealtime.addEventListener('click', () => switchTab('realtime'));
-}
-if (tabRoutesearch) {
-  tabRoutesearch.addEventListener('click', () => switchTab('routesearch'));
 }
 
 window.addEventListener('hashchange', renderCurrentRoute);

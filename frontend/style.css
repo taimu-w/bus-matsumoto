@@ -1,6 +1,35 @@
 /* Tailwind(CDN)で表現しきれない部分のみ最小限に定義する。
    本体の配色・余白・角丸などは index.html 側のユーティリティクラスで完結させる。 */
 
+/* ==========================================================
+   バスタイム デザイントークン
+   配色そのものはTailwindの青系スケール（blue-50〜blue-900）に統一し、
+   ここではTailwindのユーティリティだけでは表現しづらい挙動のみ定義する。
+   ========================================================== */
+:root {
+  --focus-ring: #2563eb; /* Tailwind blue-600 相当。フォーカスリングの色を1箇所に集約 */
+}
+
+/* タップ時の灰色ハイライトを消し、ボタン等はactive:scale-95などの
+   トランジションで押下フィードバックを表現する（iOS/Android共通の見た目にするため）。 */
+a, button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* キーボード操作時のみフォーカスリングを表示する（マウス・タップ操作では出さない）。
+   これまでフォーカス時の見た目が未定義で、キーボード操作でどこに焦点があるか
+   分からなかったための追加（アクセシビリティ・操作性の改善）。 */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2.5px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
 .delay-highlight {
   animation: pulse 2s infinite;
 }
@@ -170,4 +199,45 @@ html {
 /* 便詳細で閲覧中のバス停を強調する行 */
 .tt-current-stop {
   box-shadow: 0 0 0 2px #2563eb inset;
+}
+
+/* ==========================================================
+   下部ナビゲーション（主要5機能への固定タブ）
+   index.html・servicestatus.html に配置する。index.html側だけ
+   app.js の updateBottomNav() が data-nav-page 属性を見て
+   .active を付け替える（servicestatus.htmlは常にどれも非点灯）。
+   ========================================================== */
+#bottom-nav {
+  /* iPhoneのホームインジケーター等の下に隠れないようにする（viewport-fit=cover採用のため） */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.bn-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 0.5rem 0.25rem 0.55rem;
+  color: #94a3b8;
+  font-size: 0.63rem;
+  font-weight: 700;
+  line-height: 1.2;
+  transition: color 0.15s ease, transform 0.1s ease;
+}
+.bn-item svg {
+  width: 22px;
+  height: 22px;
+}
+.bn-item.active {
+  color: #1d4ed8;
+}
+.bn-item:active {
+  transform: scale(0.92);
+}
+
+/* 下部ナビの高さぶん、本文の最後のカードが隠れないよう余白を確保する。
+   main要素側の pb-* だけでは可変高フォントで足りない環境があるため二重に確保する。 */
+.has-bottom-nav {
+  padding-bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
 }
