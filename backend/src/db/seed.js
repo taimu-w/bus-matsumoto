@@ -62,6 +62,24 @@ function toClockTime(value) {
 }
 
 /**
+ * 便のstop_times行（stop_sequence昇順）に「同一stop_idが同じ便の中で何回目の通過か」
+ * （0始まりの通過回数）を付与する。循環路線の折返しなどで同じ物理停留所を1便の中で
+ * 複数回通る場合、stop_idだけをキーにすると2回目以降の通過がstopsテーブル上で
+ * 1回目と同一行に潰れてしまう（定刻・進捗が上書きされる）ため、occurrenceKey
+ * （`${stop_id}#${通過回数}`）を停留所行の識別キーとして使う。
+ * seedStopsAndTimetable内の2つのループ（stops構築／schedule_stop_times構築）で
+ * 同じ並び・同じロジックを使うことで、同じ便の同じ通過には必ず同じoccurrenceKeyが付く。
+ */
+function withOccurrenceKeys(sortedStopRows) {
+  const seenCounts = new Map();
+  return sortedStopRows.map((row) => {
+    const count = seenCounts.get(row.stop_id) || 0;
+    seenCounts.set(row.stop_id, count + 1);
+    return { row, occurrenceKey: `${row.stop_id}#${count}` };
+  });
+}
+
+/**
  * config/feeds.js で定義された全フィードについて、feedsテーブルの行の存在を保証する。
  *
  * feeds テーブルはもう構成マスタではなく、**コードで定義されたフィードの稼働状態を
@@ -230,38 +248,46 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
     for (const { directionId, serviceId, trips: routeTrips } of directionServiceTrips) {
       if (routeTrips.length === 0) continue;
 
-      const routeStopIds = new Map();
-      const stopSeqByRouteStop = new Map();
+      // occurrenceKey（`${stop_id}#${便内の通過回数}`）ごとに、停留所テーブル行を1つ持つ。
+      // 循環路線の折返しで同じ物理停留所を1便の中で複数回通っても、通過回数ごとに
+      // 別行になるため、2回目以降の定刻・進捗が1回目の行に潰れて上書きされることがない。
+      const routeStopIdByOccurrence = new Map();
+      const stopSeqByOccurrence = new Map();
 
       for (const trip of routeTrips) {
         const tripStopRows = (stopTimesByTrip.get(trip.trip_id) || [])
+          .slice()
           .sort((a, b) => Number.parseInt(a.stop_sequence, 10) - Number.parseInt(b.stop_sequence, 10));
 
-        for (const row of tripStopRows) {
+        for (const { row, occurrenceKey } of withOccurrenceKeys(tripStopRows)) {
           const stopMeta = stopMetaById.get(row.stop_id);
           if (!stopMeta) continue;
           const seq = Number.parseInt(row.stop_sequence, 10);
           if (Number.isNaN(seq)) continue;
 
-          const key = `${row.stop_id}`;
-          if (!stopSeqByRouteStop.has(key) || seq < stopSeqByRouteStop.get(key)) {
-            stopSeqByRouteStop.set(key, seq);
+          if (!stopSeqByOccurrence.has(occurrenceKey) || seq < stopSeqByOccurrence.get(occurrenceKey)) {
+            stopSeqByOccurrence.set(occurrenceKey, seq);
           }
-          routeStopIds.set(key, row.stop_id);
+          routeStopIdByOccurrence.set(occurrenceKey, row.stop_id);
         }
       }
 
-      const stopRecords = Array.from(routeStopIds.values()).sort((a, b) => {
-        const aSeq = stopSeqByRouteStop.get(a) ?? Number.MAX_SAFE_INTEGER;
-        const bSeq = stopSeqByRouteStop.get(b) ?? Number.MAX_SAFE_INTEGER;
+      const occurrenceKeys = Array.from(routeStopIdByOccurrence.keys()).sort((a, b) => {
+        const aSeq = stopSeqByOccurrence.get(a) ?? Number.MAX_SAFE_INTEGER;
+        const bSeq = stopSeqByOccurrence.get(b) ?? Number.MAX_SAFE_INTEGER;
         return aSeq - bSeq;
       });
 
-      for (const stopId of stopRecords) {
+      // seq_orderは表示順のためだけの値なので、（複数の異なる物理停留所が同じ最小
+      // stop_sequenceを持ち得る=衝突し得る）生のstop_sequenceをそのまま使わず、
+      // ソート後に0始まりで詰め直す。
+      const stopRowIdByOccurrence = new Map();
+      let seqOrder = 0;
+      for (const occurrenceKey of occurrenceKeys) {
+        const stopId = routeStopIdByOccurrence.get(occurrenceKey);
         const meta = stopMetaById.get(stopId);
         if (!meta) continue;
-        const seq = stopSeqByRouteStop.get(stopId) ?? 0;
-        await client.query(
+        const result = await client.query(
           `INSERT INTO stops (route_id, direction_id, seq_order, name, name_kana, name_en, lat, lon, notice, timetable_link)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            ON CONFLICT (route_id, direction_id, seq_order) DO UPDATE
@@ -271,9 +297,12 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
                  lat = EXCLUDED.lat,
                  lon = EXCLUDED.lon,
                  notice = EXCLUDED.notice,
-                 timetable_link = EXCLUDED.timetable_link`,
-          [routeId, directionId, seq - 1, meta.stop_name, '', '', parseFloat(meta.stop_lat), parseFloat(meta.stop_lon), '', '']
+                 timetable_link = EXCLUDED.timetable_link
+           RETURNING id`,
+          [routeId, directionId, seqOrder, meta.stop_name, '', '', parseFloat(meta.stop_lat), parseFloat(meta.stop_lon), '', '']
         );
+        stopRowIdByOccurrence.set(occurrenceKey, result.rows[0].id);
+        seqOrder += 1;
         totalStops++;
       }
 
@@ -331,15 +360,14 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
         const minSeq = Math.min(...allSeqs);
         const maxSeq = Math.max(...allSeqs);
 
-        for (const row of tripStopRows) {
+        // occurrenceKeyの算出は上のstops構築ループと同じ並び・同じロジックで行う必要がある
+        // （同じ便の同じ通過には必ず同じoccurrenceKeyが付くようにするため）。
+        for (const { row, occurrenceKey } of withOccurrenceKeys(tripStopRows)) {
           const stopMeta = stopMetaById.get(row.stop_id);
           if (!stopMeta) continue;
           const stopSeq = Number.parseInt(row.stop_sequence, 10);
-          const stopRes = await client.query(
-            `SELECT id FROM stops WHERE route_id = $1 AND direction_id = $2 AND seq_order = $3`,
-            [routeId, directionId, stopSeq - 1]
-          );
-          if (stopRes.rows.length === 0) continue;
+          const stopRowId = stopRowIdByOccurrence.get(occurrenceKey);
+          if (!stopRowId) continue;
 
           // 始発バス停（最小シーケンス）と終点バス停（最大シーケンス）は、
           // pickup_type/drop_off_type が 1 でも通過扱いにしない（時刻を正しく表示するため）
@@ -355,7 +383,7 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
                SET scheduled_time = EXCLUDED.scheduled_time,
                    is_through = EXCLUDED.is_through,
                    stop_headsign = EXCLUDED.stop_headsign`,
-            [routeTripIds[tripIndex], stopRes.rows[0].id, scheduledTime, isThrough, stopHeadsign]
+            [routeTripIds[tripIndex], stopRowId, scheduledTime, isThrough, stopHeadsign]
           );
         }
       }

@@ -462,6 +462,17 @@ function lowerBound(boardings, seconds) {
  * 経路の組み立て（labels → APIレスポンス）
  * ========================================================== */
 
+/**
+ * 循環路線などで同じ物理停留所を1便の中で複数回通る場合、この便の中で
+ * stopTimeが何回目の通過か（0始まり）を求める。DB側は標柱・通過回数を持たず
+ * バス停名でしか突き合わせられないため（busStopApproaching.jsと同じ制約）、
+ * リアルタイム重ね合わせ時に「同名バス停の何回目の通過に対応する定刻か」を
+ * 一致させるために使う（attachRealtime参照）。
+ */
+function computeStopVisitIndex(stopTimes, stopTime) {
+  return stopTimes.filter((st) => st.stopId === stopTime.stopId && st.sequence <= stopTime.sequence).length - 1;
+}
+
 function serializeStopRef(index, stop, groupKey) {
   const group = groupKey ? index.groups.get(groupKey) : null;
   // 通過するバス停は、そのバス停の全乗り場ではなく実際に通る乗り場単独のページへ遷移させる。
@@ -525,6 +536,7 @@ function buildJourney(index, labels) {
       stops.push({
         ...serializeStopRef(index, stop, stop ? stop.groupKey : null),
         sequence: stopTime.sequence,
+        stopVisitIndex: computeStopVisitIndex(stopTimes, stopTime),
         arrivalSeconds,
         departureSeconds,
         arrivalTime: formatTime(arrivalSeconds),
@@ -559,8 +571,14 @@ function buildJourney(index, labels) {
       ),
       headsign: resolveHeadsign(boardStopTime, trip),
       directionId: trip.directionId,
-      fromStop: serializeStopRef(index, boardStop, boardStop ? boardStop.groupKey : null),
-      toStop: serializeStopRef(index, alightStop, alightStop ? alightStop.groupKey : null),
+      fromStop: {
+        ...serializeStopRef(index, boardStop, boardStop ? boardStop.groupKey : null),
+        stopVisitIndex: computeStopVisitIndex(stopTimes, boardStopTime)
+      },
+      toStop: {
+        ...serializeStopRef(index, alightStop, alightStop ? alightStop.groupKey : null),
+        stopVisitIndex: computeStopVisitIndex(stopTimes, alightStopTime)
+      },
       departureSeconds: label.departureSeconds,
       arrivalSeconds: label.arrivalSeconds,
       departureTime: formatTime(label.departureSeconds),
@@ -676,11 +694,22 @@ async function attachRealtime(journeys) {
 
         const { match, entry } = cached;
         // DB側の stops は標柱を持たないため、バス停名でしか突き合わせられない
-        // （busStopApproaching.js と同じ制約）。
+        // （busStopApproaching.js と同じ制約）。同名バス停ごとに一致候補を全件保持し、
+        // 循環路線などで1便の中に同名バス停が複数回登場する場合は
+        // stopVisitIndex（この便の中で何回目の通過か）が一致するものを選ぶ。
+        // 最初の1件だけを採用すると、2回目の通過（区間の乗車・降車）に
+        // 1回目（既に通過済み）の定刻・進捗を誤って重ねてしまう。
         const byName = new Map();
         entry.stops.forEach((stop, i) => {
-          if (!byName.has(stop.name)) byName.set(stop.name, { stop, index: i });
+          if (!byName.has(stop.name)) byName.set(stop.name, []);
+          byName.get(stop.name).push({ stop, index: i });
         });
+        const pickOccurrence = (name, visitIndex) => {
+          const candidates = byName.get(name);
+          if (!candidates || candidates.length === 0) return null;
+          const idx = Number.isInteger(visitIndex) ? visitIndex : 0;
+          return candidates[Math.min(idx, candidates.length - 1)];
+        };
 
         let lastArrivedIndex = -1;
         entry.stops.forEach((stop, i) => {
@@ -688,7 +717,7 @@ async function attachRealtime(journeys) {
         });
 
         for (const stop of leg.stops) {
-          const matched = byName.get(stop.name);
+          const matched = pickOccurrence(stop.name, stop.stopVisitIndex);
           if (!matched) continue;
           stop.predictedTime = matched.stop.predictedTime || matched.stop.scheduledTime || null;
           stop.status = matched.stop.status || null;
@@ -698,8 +727,8 @@ async function attachRealtime(journeys) {
           }
         }
 
-        const boardMatch = byName.get(leg.fromStop.name);
-        const alightMatch = byName.get(leg.toStop.name);
+        const boardMatch = pickOccurrence(leg.fromStop.name, leg.fromStop.stopVisitIndex);
+        const alightMatch = pickOccurrence(leg.toStop.name, leg.toStop.stopVisitIndex);
         leg.realtime = {
           hasRealtime: true,
           vehicleId: match.car_id,

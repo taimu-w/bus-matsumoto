@@ -93,8 +93,15 @@ async function buildApproachingEntry(departure, targetStopName) {
     if (!match) return entry;
 
     const bus = await buildBusEntry(match, qualifyRouteId(departure.routeId, departure.feedId), departure.routeName);
-    const targetIndex = bus.stops.findIndex((s) => s.name === targetStopName);
-    if (targetIndex === -1) return entry;
+    // 循環路線などで同じ名前のバス停を1便の中で複数回通ることがあるため、名前一致だけでは
+    // どの通過に対応するのか一意に決まらない（見つかった最初の一致を使うと、既に通過済みの
+    // 1回目の定刻・進捗を2回目の接近情報として誤表示してしまう）。departure側で求めた
+    // 「この便の中で何回目の通過の定刻か」（stopVisitIndex）と同じ順番の一致を選ぶ。
+    const matchingIndices = [];
+    bus.stops.forEach((s, i) => { if (s.name === targetStopName) matchingIndices.push(i); });
+    if (matchingIndices.length === 0) return entry;
+    const visitIndex = Number.isInteger(departure.stopVisitIndex) ? departure.stopVisitIndex : 0;
+    const targetIndex = matchingIndices[Math.min(visitIndex, matchingIndices.length - 1)];
 
     let lastArrivedIndex = -1;
     bus.stops.forEach((s, i) => { if (s.status === '到着済') lastArrivedIndex = i; });
