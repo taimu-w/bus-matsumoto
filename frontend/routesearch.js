@@ -25,6 +25,9 @@
   let suggestSeq = 0;
   // 確定済みのバス停（候補から選んだもの）。テキストを編集すると解除される。
   let selected = { from: null, to: null };
+  // 「近くのバス停」候補（出発地欄）。位置情報の許可ダイアログを毎回出さないよう使い回す。
+  let nearbyStopsCache = null;
+  let nearbyStopsPromise = null;
   // 「通過バス停」を開いている区間のキー（再描画をまたいで維持する）
   const openLegKeys = new Set();
   let realtimeTimer = null;
@@ -408,6 +411,17 @@
     if (side === 'from' && state.fromKey) showMeta(metaId, { stopKey: state.fromKey, name: state.fromText });
     if (side === 'to' && state.toKey) showMeta(metaId, { stopKey: state.toKey, name: state.toText });
 
+    const pick = (stop) => {
+      input.value = stop.name;
+      selected[side] = stop;
+      showMeta(metaId, stop);
+      box.innerHTML = '';
+    };
+
+    // 入力欄への自動フォーカス（＝キーボードの自動表示）は廃止し、出発地が未入力のときは
+    // 代わりに近くのバス停を候補として出す（目的地は現在地との関連が薄いので対象外）。
+    if (side === 'from' && !input.value.trim()) showNearbyStopSuggestions(box, pick);
+
     input.addEventListener('input', () => {
       // テキストを編集した時点で確定を解除する（自由文字列検索へ戻す）
       selected[side] = null;
@@ -416,6 +430,7 @@
       const query = input.value.trim();
       if (!query) {
         box.innerHTML = '';
+        if (side === 'from') showNearbyStopSuggestions(box, pick);
         return;
       }
       suggestTimers[side] = setTimeout(async () => {
@@ -428,12 +443,7 @@
           console.error('バス停候補の取得エラー:', err);
         }
         if (seq !== suggestSeq) return;
-        renderSuggestions(box, stops, (stop) => {
-          input.value = stop.name;
-          selected[side] = stop;
-          showMeta(metaId, stop);
-          box.innerHTML = '';
-        });
+        renderSuggestions(box, stops, pick);
       }, 180);
     });
 
@@ -443,12 +453,50 @@
     });
   }
 
-  function renderSuggestions(box, stops, onSelect) {
+  /** 現在地から近いバス停（最大5件）。位置情報の許可ダイアログは1画面につき1回だけ出す。 */
+  async function getNearbyStops() {
+    if (nearbyStopsCache) return nearbyStopsCache;
+    if (!nearbyStopsPromise) {
+      nearbyStopsPromise = (async () => {
+        if (typeof window.getUserLocation !== 'function') return [];
+        const location = await window.getUserLocation();
+        if (!location) return [];
+        try {
+          const query = new URLSearchParams({ lat: location.lat, lon: location.lng, limit: 5 });
+          const result = await fetchJson(`${API_BASE}/busstop/nearby?${query.toString()}`);
+          return result.stops || [];
+        } catch (err) {
+          return [];
+        }
+      })();
+    }
+    nearbyStopsCache = await nearbyStopsPromise;
+    return nearbyStopsCache;
+  }
+
+  /** 出発地欄が空のときの初期候補（soft-fail：取得できなければ何も出さない）。 */
+  async function showNearbyStopSuggestions(box, onSelect) {
+    const stops = await getNearbyStops();
+    // 取得を待つ間に入力・フォーカス解除されていたら上書きしない
+    if (box.innerHTML !== '' || !box.isConnected) return;
+    if (stops.length === 0) return;
+    renderSuggestions(box, stops.map((stop) => ({
+      stopKey: stop.stopKey,
+      name: stop.stopName,
+      kana: stop.nameHiragana,
+      romaji: stop.nameRomaji,
+      platformCount: stop.platformCount,
+      routes: stop.routes
+    })), onSelect, { label: '近くのバス停' });
+  }
+
+  function renderSuggestions(box, stops, onSelect, { label = '' } = {}) {
     if (stops.length === 0) {
-      box.innerHTML = '<p class="text-xs font-bold text-gray-500 px-1">一致するバス停がありません。</p>';
+      box.innerHTML = label ? '' : '<p class="text-xs font-bold text-gray-500 px-1">一致するバス停がありません。</p>';
       return;
     }
-    box.innerHTML = stops
+    const header = label ? `<p class="text-[11px] font-bold text-gray-500 px-1 mb-1">${esc(label)}</p>` : '';
+    box.innerHTML = header + stops
       .map((stop, i) => `
         <button type="button" data-index="${i}"
                 class="w-full text-left bg-white border-2 border-purple-100 rounded-lg p-3 hover:bg-purple-50 active:scale-95 transition-all">

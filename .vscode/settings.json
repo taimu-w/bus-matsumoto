@@ -1,3 +1,14 @@
 {
-    "circleci.persistedProjectSelection": []
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "allow": [
+      "PowerShell(Start-Sleep *)",
+      "PowerShell(curl *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(*)",
+      "Bash(node *)",
+      "Bash(curl *)",
+      "Bash(*)"
+    ]
+  }
 }

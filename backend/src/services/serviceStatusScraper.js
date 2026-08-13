@@ -6,10 +6,24 @@ const pool = require('../config/db');
 
 const STATUS_URL = process.env.ALPICO_STATUS_URL || 'https://www.alpico.co.jp/traffic/trafficinfo/matsumoto/';
 
-// <br> を改行文字に変換してからテキスト化する（お知らせ本文の改行を保持するため）
-function htmlToTextWithBreaks($, el) {
+// <br> を改行文字に変換し、<a href> はテキスト化で失われないよう「[表示文字列](URL)」の
+// 形式に変換してからテキスト化する（お知らせ本文の改行・リンクを保持するため。フロント側の
+// servicestatus.js がこの記法を解釈してクリックできるリンクとして描画する）。
+function htmlToTextWithBreaks($, el, baseUrl) {
   const clone = $(el).clone();
   clone.find('br').replaceWith('\n');
+  clone.find('a[href]').each((_, a) => {
+    const $a = $(a);
+    const href = $a.attr('href');
+    const label = $a.text().trim();
+    let resolved = href;
+    try {
+      resolved = new URL(href, baseUrl).toString();
+    } catch (err) {
+      // 相対URLの解決に失敗した場合は元のhref文字列をそのまま使う（リンクが壊れるより表示優先）
+    }
+    $a.replaceWith(label ? `[${label}](${resolved})` : resolved);
+  });
   return clone
     .text()
     .split('\n')
@@ -42,7 +56,7 @@ async function fetchServiceStatus(url = STATUS_URL) {
         const name = $(boxEl).find('.header p').first().text().trim();
         const status = $(boxEl).find('.data .status span').first().text().trim();
         const detailEl = $(boxEl).find('.data .details p').first();
-        const detail = detailEl.length ? htmlToTextWithBreaks($, detailEl) : '';
+        const detail = detailEl.length ? htmlToTextWithBreaks($, detailEl, url) : '';
         if (name) routes.push({ name, status, detail });
       });
 

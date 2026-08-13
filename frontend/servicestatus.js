@@ -26,6 +26,27 @@ function statusCardBorderClass(status) {
   return 'border-gray-200';
 }
 
+// スクレイピング元（アルピコ交通公式サイト）の <a href> は、backend の
+// htmlToTextWithBreaks() で「[表示文字列](URL)」の記法に変換して保持されている。
+// ここではまず全体をエスケープしてから、その記法と裸のURLをクリックできるリンクに変換する
+// （エスケープ後の文字列に対して行うのでXSSの心配はない）。
+const LINK_PATTERN = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<]+)/g;
+const TRAILING_PUNCT_PATTERN = /[、。，,．.）」』\)\]]+$/;
+
+function linkifyDetail(text) {
+  const escaped = escapeHtml(text);
+  return escaped.replace(LINK_PATTERN, (match, label, bracketUrl, bareUrl) => {
+    if (bracketUrl) {
+      return `<a href="${bracketUrl}" target="_blank" rel="noopener noreferrer" class="text-blue-700 underline font-bold break-all">${label}</a>`;
+    }
+    // 文末の句読点・括弧類はURLの一部ではないことが多いので、リンクの外側に残す
+    const trailingMatch = bareUrl.match(TRAILING_PUNCT_PATTERN);
+    const trailing = trailingMatch ? trailingMatch[0] : '';
+    const url = trailing ? bareUrl.slice(0, bareUrl.length - trailing.length) : bareUrl;
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="text-blue-700 underline font-bold break-all">${url}</a>${trailing}`;
+  });
+}
+
 function createRouteCard(route) {
   const status = route.status || '';
   const card = document.createElement('div');
@@ -35,7 +56,7 @@ function createRouteCard(route) {
       <h3 class="font-bold text-gray-900 leading-snug">${escapeHtml(route.name)}</h3>
       <span class="shrink-0 text-xs font-bold px-2.5 py-1 rounded border ${statusBadgeClass(status)}">${escapeHtml(status || '情報なし')}</span>
     </div>
-    ${route.detail ? `<p class="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">${escapeHtml(route.detail)}</p>` : ''}
+    ${route.detail ? `<p class="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">${linkifyDetail(route.detail)}</p>` : ''}
   `;
   return card;
 }

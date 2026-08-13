@@ -464,6 +464,8 @@ function lowerBound(boardings, seconds) {
 
 function serializeStopRef(index, stop, groupKey) {
   const group = groupKey ? index.groups.get(groupKey) : null;
+  // 通過するバス停は、そのバス停の全乗り場ではなく実際に通る乗り場単独のページへ遷移させる。
+  const platformQuery = stop ? `?platform=${encodeURIComponent(`${stop.feedId}_${stop.stopId}`)}` : '';
   return {
     stopKey: groupKey || null,
     stopId: stop ? stop.stopId : null,
@@ -472,7 +474,7 @@ function serializeStopRef(index, stop, groupKey) {
     platformCode: stop ? stop.platformCode || '' : '',
     lat: stop ? stop.lat : group ? group.lat : null,
     lon: stop ? stop.lon : group ? group.lon : null,
-    busstopUrl: groupKey ? `/busstop/${encodeURIComponent(groupKey)}` : null
+    busstopUrl: groupKey ? `/busstop/${encodeURIComponent(groupKey)}${platformQuery}` : null
   };
 }
 

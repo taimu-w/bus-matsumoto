@@ -19,6 +19,10 @@
 
   let mapInstance = null;
   let stopMarkers = [];
+  let userMarker = null;
+  // 現在地が取得できてズームを合わせた後は、バス停側の fitBounds で
+  // 表示範囲を市内全域に戻さないようにするためのフラグ。
+  let userLocated = false;
 
   async function fetchJson(url) {
     const res = await fetch(url);
@@ -62,6 +66,8 @@
       mapInstance = null;
     }
     stopMarkers = [];
+    userMarker = null;
+    userLocated = false;
 
     mapInstance = window.L.map('stopmap').setView([36.2381, 137.9701], 13);
     window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -99,7 +105,9 @@
       stopMarkers.push(marker);
     });
 
-    if (latLngs.length > 0) {
+    // 現在地に合わせてズームを済ませている場合は、バス停全件のfitBoundsで
+    // 市内全域まで表示範囲を引き戻さない（現在地周辺を拡大表示したまま保つ）。
+    if (latLngs.length > 0 && !userLocated) {
       mapInstance.fitBounds(window.L.latLngBounds(latLngs).pad(0.1), { maxZoom: 16 });
     }
   }
@@ -117,6 +125,31 @@
     }
   }
 
+  /**
+   * 現在地に地図を合わせる。バスマップ（app.jsのaddUserLocation）と同じ理由で、
+   * 位置情報の許可ダイアログをawaitで待ってからバス停を取得すると、その間ずっと
+   * バス停が1件も出ないため、バス停の取得とは独立して（awaitせず）動かす。
+   */
+  async function centerOnUserLocation() {
+    if (typeof window.getUserLocation !== 'function') return;
+    const location = await window.getUserLocation();
+    if (!location || !mapInstance) return;
+    userLocated = true;
+    mapInstance.setView([location.lat, location.lng], 16);
+    if (userMarker) {
+      userMarker.setLatLng([location.lat, location.lng]);
+    } else {
+      userMarker = window.L.circleMarker([location.lat, location.lng], {
+        radius: 7,
+        color: '#ffffff',
+        weight: 2,
+        fillColor: '#2563eb',
+        fillOpacity: 1
+      }).addTo(mapInstance);
+      userMarker.bindPopup('現在地');
+    }
+  }
+
   async function render() {
     const section = document.getElementById('section-stopmap');
     if (!section) return;
@@ -124,6 +157,7 @@
     if (typeof window.setPageTitle === 'function') window.setPageTitle('バス停マップ', 'Stop Map');
     if (!initializeMap()) return;
     await loadStops();
+    centerOnUserLocation();
   }
 
   window.StopMapView = { render, isStopMapPath };

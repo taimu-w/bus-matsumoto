@@ -32,7 +32,6 @@
           <option value="11">横田信大循環線</option>
         </select>
       </label>
-      <a href="/admin.html" class="bg-white text-blue-800 px-3 py-2 rounded-lg hover:bg-blue-50 transition shadow-md text-xs font-bold">管理画面</a>
       <button id="refresh-btn" class="bg-white text-blue-800 p-2 rounded-lg hover:bg-blue-50 transition shadow-md flex items-center gap-1">
         <svg id="refresh-icon" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -171,7 +170,7 @@
   <section id="section-stopmap" class="mb-8" style="display:none;">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-xl font-bold text-blue-900">バス停マップ</h2>
-      <a href="/" data-spa class="text-sm font-bold text-blue-700">← メニューへ戻る</a>
+      <a href="/#/map" data-spa class="text-sm font-bold text-blue-700">← マップメニューへ戻る</a>
     </div>
     <div class="bg-white rounded-2xl shadow-sm border-2 border-blue-100 overflow-hidden">
       <p id="stopmap-status" class="px-4 py-2 text-xs font-bold text-blue-900 bg-blue-50 border-b border-blue-100">バス停を読み込み中...</p>
@@ -250,9 +249,9 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="5.5" cy="6" r="2.15"/><circle cx="18.5" cy="18" r="2.15"/><path d="M7.2 7.3 16.8 16.7" stroke-dasharray="2.4 2.6"/></svg>
       <span>経路検索</span>
     </a>
-    <a href="/timetable" data-spa data-nav-page="timetable" class="bn-item">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.25"/><path d="M12 7.5V12l3 2"/></svg>
-      <span>時刻表</span>
+    <a href="/#/map" data-spa data-nav-page="map" class="bn-item">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M9 4.5 4 6.5v13l5-2 6 2 5-2v-13l-5 2-6-2Z"/><path d="M9 4.5v13M15 6.5v13"/></svg>
+      <span>マップ</span>
     </a>
     <a href="/busstop" data-spa data-nav-page="busstop" class="bn-item">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s6.5-6.02 6.5-10.5A6.5 6.5 0 0 0 5.5 10.5C5.5 14.98 12 21 12 21z"/><circle cx="12" cy="10.4" r="2.15"/></svg>
@@ -270,25 +269,6 @@
     <div id="important-body" class="p-6 text-lg text-gray-900 whitespace-pre-wrap leading-relaxed font-bold"></div>
     <div class="p-4 border-t bg-gray-50">
       <button data-close="important-modal" class="w-full bg-gray-900 text-white py-4 rounded-xl text-lg font-bold">閉じる</button>
-    </div>
-  </div>
-</div>
-
-<!-- バス停詳細モーダル -->
-<div id="stop-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4" style="display:none;">
-  <div class="bg-white rounded-t-3xl sm:rounded-2xl w-full max-w-md shadow-2xl p-6">
-    <div class="flex justify-between items-start mb-4">
-      <div>
-        <p class="text-xs text-blue-600 font-bold">バス停</p>
-        <h3 id="stop-name" class="text-2xl font-bold text-blue-900"></h3>
-      </div>
-      <button data-close="stop-modal" class="text-gray-400">
-        <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-      </button>
-    </div>
-    <div id="stop-notice" class="mb-6 p-4 bg-blue-50 rounded-xl text-md font-bold text-blue-900" style="display:none;"></div>
-    <div class="flex flex-col gap-3">
-      <a id="stop-map-btn" href="#" target="_blank" class="bg-green-700 text-white p-4 rounded-xl font-bold text-lg text-center shadow-lg">場所を確認</a>
     </div>
   </div>
 </div>

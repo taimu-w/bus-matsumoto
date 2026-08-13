@@ -8,6 +8,8 @@ let currentBuses = [];
 let currentTimetable = [];
 let selectedRouteId = '11';
 let routeOptions = [];
+// smartBack()が「アプリ内で実際に画面遷移したか」を判定するためのカウンタ（renderCurrentRouteで加算）
+let spaRenderCount = 0;
 
 function $(id) { return document.getElementById(id); }
 
@@ -42,6 +44,28 @@ function navigateToPath(url) {
   window.history.pushState({}, '', url);
   if (typeof window.renderCurrentRoute === 'function') window.renderCurrentRoute();
 }
+
+/**
+ * 「戻る」ボタン共通ヘルパー（補完仕様書対応：本アプリは単純な階層構造ではなく、
+ * バス停詳細・便詳細などは検索画面以外（経路検索・バス停マップ・お気に入り等）からも
+ * 直接たどり着けるため、「検索画面へ戻る」のような固定リンクは行き先を誤ることがある）。
+ *
+ * このSPA内で実際に画面遷移した回数（renderCount、renderCurrentRoute側でカウント）が
+ * 2回以上あれば、ブラウザの戻る操作で本当に直前にいた画面へ戻れる。
+ * 直リンク・リロードなど遷移履歴がない場合だけ fallbackUrl（その画面の既定の親）へ移動する。
+ */
+function smartBack(fallbackUrl) {
+  if (spaRenderCount > 1 && window.history.length > 1) {
+    window.history.back();
+    return;
+  }
+  if (String(fallbackUrl).startsWith('#')) {
+    window.location.hash = fallbackUrl;
+  } else {
+    navigateToPath(fallbackUrl);
+  }
+}
+window.smartBack = smartBack;
 
 /**
  * DBのバス停名（GTFSのstop_nameをそのまま保持。CLAUDE.md記載のとおりGTFS stop_idは持たない）から
@@ -87,19 +111,6 @@ document.addEventListener('click', (e) => {
   const detailBtn = e.target.closest('[data-role="tt-bus-detail-btn"]');
   if (detailBtn && detailBtn.dataset.url) navigateToPath(detailBtn.dataset.url);
 });
-
-function openStopModal(stop) {
-  $('stop-name').textContent = stop.name;
-  const noticeEl = $('stop-notice');
-  if (stop.notice) {
-    noticeEl.textContent = stop.notice;
-    noticeEl.style.display = 'block';
-  } else {
-    noticeEl.style.display = 'none';
-  }
-  $('stop-map-btn').href = `https://www.google.com/maps?q=${stop.lat},${stop.lng}`;
-  openModal('stop-modal');
-}
 
 /* ---------- 汎用アコーディオン開閉ヘルパー ---------- */
 function setupAccordionToggle(card, openSet, key, getScrollTarget) {
@@ -329,7 +340,6 @@ async function loadAll() {
     $('loading').style.display = 'none';
     $('app-content').style.display = 'block';
 
-    $('page-title').textContent = settings.routeName || $('page-title').textContent;
     renderNotices(settings);
     renderFavorites(); // お気に入りコンテナの表示
     renderBuses(currentBuses);
@@ -607,8 +617,10 @@ function createScheduleCard(trip, firstTime, directionLabel = '') {
 }
 
 /* ---------- タブ切り替え機能 ---------- */
+// 画面左上のタイトルは常に「バスタイム」固定（ページごとのタイトルには変更しない）。
+// サブタイトルだけを画面ごとに切り替える。
 function setPageTitle(title, subtitle) {
-  $('page-title').textContent = title;
+  $('page-title').textContent = 'バスタイム';
   $('page-subtitle').textContent = subtitle;
 }
 
@@ -661,14 +673,17 @@ function parseHashRoute() {
 // 経路検索・バス停マップ）が混在しているため、現在地の判定は各画面が公開している
 // isXxxPath() をそのまま使う（判定ロジックを二重に持たない）。
 function currentNavPage() {
-  if (window.TimetableView && window.TimetableView.isTimetablePath()) return 'timetable';
+  if (window.StopMapView && window.StopMapView.isStopMapPath()) return 'map';
   if (window.BusStopView && window.BusStopView.isBusStopPath()) return 'busstop';
   if (window.RouteSearchView && window.RouteSearchView.isRouteSearchPath()) return 'routesearch';
-  if (window.StopMapView && window.StopMapView.isStopMapPath()) return null; // バス停マップは主要5タブの対象外
+  // 時刻表検索は下部タブから外した（タブは「マップ」に置き換え済み）ので、ここでは点灯対象にしない。
+  // ホーム画面等からの導線経由でこの画面へ来ても、下部タブはどれも点灯しない。
+  if (window.TimetableView && window.TimetableView.isTimetablePath()) return null;
   const state = parseHashRoute();
   if (state.page === 'home') return 'home';
   if (state.page === 'realtime-list' || state.page === 'realtime-detail') return 'realtime';
-  return null; // マップ・バスマップ等、下部タブに対応がない画面ではどれも点灯させない
+  if (state.page === 'map' || state.page === 'busmap') return 'map';
+  return null;
 }
 
 function updateBottomNav() {
@@ -906,6 +921,7 @@ function stopBusMapPolling() {
 }
 
 async function renderCurrentRoute() {
+  spaRenderCount += 1;
   // 関数のどの return 経路を通っても下部ナビの点灯状態を最新化するため、
   // 本体全体を try/finally で包む（更新処理そのものが失敗しても表示は継続させる）。
   try {

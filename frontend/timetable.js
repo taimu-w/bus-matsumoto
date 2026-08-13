@@ -220,6 +220,14 @@
     return `/timetable/stops/${encodeURIComponent(stopKey)}${qs ? `?${qs}` : ''}`;
   }
 
+  /** バス停ページ（/busstop/...）のURLを組み立てる。platformKeyがあればその乗り場単独のページへ。 */
+  function busStopUrl(stopKey, platformKey = null) {
+    const query = new URLSearchParams();
+    if (platformKey) query.set('platform', platformKey);
+    const qs = query.toString();
+    return `/busstop/${encodeURIComponent(stopKey)}${qs ? `?${qs}` : ''}`;
+  }
+
   /* ---------- 画面: 検索 ---------- */
   function renderSearchView() {
     setTitle('時刻表検索', 'Timetable Search');
@@ -287,10 +295,9 @@
           })
           .join('');
         const more = (stop.routes || []).length > 6 ? `<span class="text-[10px] font-bold text-gray-500">ほか${stop.routes.length - 6}路線</span>` : '';
-        // 検索結果のタップ先は /busstop/{stop_id}（バス停情報の総合ポータル）。
-        // そこから「時刻表へ」ボタンで改めてこの画面の /timetable/stops/{stop_id} に来られる（補完仕様書 3.6.1）。
+        // 検索結果のタップ先は直接 /timetable/stops/{stop_id}（この画面の時刻表詳細）。
         return `
-          <a href="/busstop/${encodeURIComponent(stop.stopKey)}" data-spa
+          <a href="${stopUrl(stop.stopKey)}" data-spa
              class="block bg-white border-2 border-gray-200 rounded-xl p-3 hover:border-sky-500 active:scale-[0.99] transition-all">
             <div class="flex items-center justify-between gap-2">
               <div class="min-w-0">
@@ -331,8 +338,12 @@
       root().innerHTML = `
         <div class="bg-white rounded-2xl border-2 border-red-200 p-5">
           <p class="font-bold text-red-700">${esc(err.status === 404 ? 'バス停が見つかりませんでした。' : err.message)}</p>
-          <a href="/timetable" data-spa class="inline-block mt-4 text-sm font-bold text-sky-700">検索画面へ戻る</a>
+          <button data-role="tt-back" class="inline-block mt-4 text-sm font-bold text-sky-700">← 戻る</button>
         </div>`;
+      // このページはバス停検索（busstop.js）の「時刻表へ」ボタン経由でも来るため、
+      // 「検索画面へ」固定ではなく直前の画面へ戻る（履歴が無ければ検索画面にフォールバック）。
+      const errBackBtn = root().querySelector('[data-role="tt-back"]');
+      if (errBackBtn) errBackBtn.addEventListener('click', () => window.smartBack('/timetable'));
       return;
     }
 
@@ -346,7 +357,7 @@
     const reading = [data.stop.nameHiragana, data.stop.nameRomaji].filter(Boolean).join(' / ');
     root().innerHTML = `
       <div class="flex items-center justify-between mb-3">
-        <a href="/timetable" data-spa class="text-sm font-bold text-sky-700">← 検索へ戻る</a>
+        <button data-role="tt-back" class="text-sm font-bold text-sky-700">← 戻る</button>
         <a href="/" data-spa class="text-sm font-bold text-gray-500">メニュー</a>
       </div>
 
@@ -355,6 +366,8 @@
         <h2 class="text-2xl font-bold text-sky-900 leading-tight">${esc(data.stop.stopName)}</h2>
         ${reading ? `<p class="text-[11px] text-gray-500 font-bold mt-1">${esc(reading)}</p>` : ''}
         ${renderModeSwitch(data, date)}
+        <a href="${esc(busStopUrl(data.stop.stopKey, data.selectedPlatform ? data.selectedPlatform.platformKey : null))}" data-spa
+           class="mt-4 block text-center bg-indigo-600 text-white py-3 rounded-xl font-bold text-sm shadow hover:bg-indigo-700">このバス停のページへ</a>
       </div>
 
       ${renderChooser(data, date)}
@@ -572,6 +585,11 @@
       navigate(stopUrl(data.stop.stopKey, { platform: nextPlatform || null, date: nextDate || date }));
     };
 
+    // このページはバス停検索（busstop.js）の「時刻表へ」ボタン経由でも来るため、
+    // 「検索画面へ」固定ではなく直前の画面へ戻る。
+    const backBtn = container.querySelector('[data-role="tt-back"]');
+    if (backBtn) backBtn.addEventListener('click', () => window.smartBack('/timetable'));
+
     const modeAll = container.querySelector('[data-role="mode-all"]');
     if (modeAll) {
       modeAll.addEventListener('click', () => {
@@ -703,9 +721,14 @@
     }
   }
 
-  /** OpenStreetMapのポップアップ地図を表示する（外部サイトへは遷移しない）。 */
-  function showLocationPopup(lat, lng, label) {
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+  /**
+   * OpenStreetMapのポップアップ地図を表示する（外部サイトへは遷移しない）。
+   * 車両の最新位置をバスアイコンで、この便が停車するバス停をバス停アイコンで表示する。
+   */
+  function showLocationPopup(bus, label) {
+    const vLat = Number(bus && bus.lat);
+    const vLng = Number(bus && bus.lng);
+    if (!Number.isFinite(vLat) || !Number.isFinite(vLng)) return;
     if (typeof window.openModal !== 'function' || typeof window.L === 'undefined') return;
 
     const titleEl = document.getElementById('tt-map-popup-title');
@@ -718,12 +741,39 @@
     setTimeout(() => {
       const el = document.getElementById('tt-map-popup-canvas');
       if (!el) return;
-      tripMapPopupInstance = window.L.map(el).setView([lat, lng], 17);
+      tripMapPopupInstance = window.L.map(el).setView([vLat, vLng], 16);
       window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '© OpenStreetMap contributors',
         maxZoom: 19
       }).addTo(tripMapPopupInstance);
-      window.L.marker([lat, lng]).addTo(tripMapPopupInstance);
+
+      const bounds = [[vLat, vLng]];
+
+      (bus.stops || []).forEach((stop) => {
+        const lat = Number(stop.lat);
+        const lng = Number(stop.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+        window.L.marker([lat, lng], {
+          icon: window.L.divIcon({
+            html: `<div style="background:#0284c7;color:#fff;border:2px solid #fff;border-radius:9999px;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:13px;box-shadow:0 1px 4px rgba(0,0,0,.4)">🚏</div>`,
+            className: 'tt-map-popup-stop-pin',
+            iconSize: [26, 26]
+          })
+        }).addTo(tripMapPopupInstance).bindPopup(`<div style="font-weight:700">${esc(stop.name)}</div>`);
+        bounds.push([lat, lng]);
+      });
+
+      // 車両アイコンはバス停アイコンより上に重なるよう最後に追加する
+      window.L.marker([vLat, vLng], {
+        icon: window.L.divIcon({
+          html: `<div style="background:#ef4444;color:#fff;border:2px solid #fff;border-radius:9999px;width:34px;height:34px;display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 1px 4px rgba(0,0,0,.5)">🚌</div>`,
+          className: 'tt-map-popup-bus-pin',
+          iconSize: [34, 34]
+        }),
+        zIndexOffset: 1000
+      }).addTo(tripMapPopupInstance);
+
+      if (bounds.length > 1) tripMapPopupInstance.fitBounds(bounds, { padding: [40, 40] });
       tripMapPopupInstance.invalidateSize();
     }, 50);
   }
@@ -761,8 +811,12 @@
       root().innerHTML = `
         <div class="bg-white rounded-2xl border-2 border-red-200 p-5">
           <p class="font-bold text-red-700">${esc(err.status === 404 ? 'この便の情報が見つかりませんでした。時刻表が改訂された可能性があります。' : err.message)}</p>
-          <a href="${esc(backUrl)}" data-spa class="inline-block mt-4 text-sm font-bold text-sky-700">← 戻る</a>
+          <button data-role="tt-trip-back" class="inline-block mt-4 text-sm font-bold text-sky-700">← 戻る</button>
         </div>`;
+      // 便詳細は時刻表・バス停ページ・経路検索・リアルタイム表示など様々な画面から来るため、
+      // 直前の画面へ戻る（履歴が無ければ from パラメータ、それも無ければ時刻表検索へ）。
+      const errBackBtn = root().querySelector('[data-role="tt-trip-back"]');
+      if (errBackBtn) errBackBtn.addEventListener('click', () => window.smartBack(backUrl));
       return;
     }
 
@@ -806,8 +860,10 @@
             !passed && stop.noDropOff && index !== 0 ? '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">乗車のみ</span>' : ''
           ].filter(Boolean).join(' ');
 
+          // バス停名タップ先は「その乗り場のバス停ページ」（/busstop/...）。すべての乗り場ではなく
+          // この便が実際に通る乗り場単独のページへ遷移させる（補完仕様書 3.6.2 に準じた措置）。
           const nameCell = stop.stopKey
-            ? `<a href="${esc(stopUrl(stop.stopKey))}" data-spa class="font-bold text-gray-900 hover:text-sky-700 underline decoration-dotted">${esc(stop.stopName)}</a>`
+            ? `<a href="${esc(busStopUrl(stop.stopKey, stop.platformKey))}" data-spa class="font-bold text-gray-900 hover:text-sky-700 underline decoration-dotted">${esc(stop.stopName)}</a>`
             : `<span class="font-bold text-gray-900">${esc(stop.stopName)}</span>`;
 
           return `
@@ -860,9 +916,12 @@
             isThrough ? '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">通過</span>' : ''
           ].filter(Boolean).join(' ');
 
+          // リアルタイム表示の停車行は便詳細の静的データ（data.stops）と同じ並び・件数になる
+          // （どちらも同じ便のGTFS stop_times由来のため）。これを使ってバス停ページのURLを組み立てる。
+          const staticStop = data.stops[index] || null;
           return `
             <div class="flex items-center gap-3 border rounded-xl px-3 py-2.5 cursor-pointer active:opacity-70 ${base}"
-                 data-role="tt-rt-stop" data-stop-name="${esc(stop.name)}" data-stop-lat="${stop.lat ?? ''}" data-stop-lng="${stop.lng ?? ''}" data-stop-notice="${esc(stop.notice || '')}">
+                 data-role="tt-rt-stop" data-stop-key="${esc(staticStop ? staticStop.stopKey : '')}" data-platform-key="${esc(staticStop ? staticStop.platformKey : '')}">
               <span class="w-7 h-7 shrink-0 rounded-full bg-gray-100 text-gray-600 text-xs font-bold flex items-center justify-center">${index + 1}</span>
               <div class="min-w-0 flex-1">
                 <span class="font-bold text-gray-900">${esc(stop.name)}</span>
@@ -881,9 +940,8 @@
     function paint() {
       if (seq !== renderSeq) return;
       const bus = mode === 'realtime' ? realtime.bus : null;
-      const lastIdx = bus ? findLastArrivedIndex(bus.stops || []) : -1;
-      const currentStop = bus ? (lastIdx >= 0 ? bus.stops[lastIdx] : (bus.stops || [])[0]) : null;
-      const showMapBtn = currentStop && Number.isFinite(Number(currentStop.lat)) && Number.isFinite(Number(currentStop.lng));
+      // 「地図で表示」は車両の最新位置（バスアイコン）とこの便が停車するバス停（バス停アイコン）を表示する。
+      const showMapBtn = bus && Number.isFinite(Number(bus.lat)) && Number.isFinite(Number(bus.lng));
 
       const delayBadge = bus
         ? `<span class="text-lg font-bold shrink-0 ${((bus.delayMinutes || 0) >= 5) ? 'bg-red-600 text-white' : 'bg-blue-100 text-blue-800'} px-3 py-1 rounded-full">${esc(formatDelayLabel(bus.delayMinutes) || '定刻通り')}</span>`
@@ -893,12 +951,12 @@
         ? `<button data-role="tt-mode-toggle" class="text-xs font-bold text-white bg-sky-600 hover:bg-sky-700 rounded-full px-3 py-1.5 shrink-0">${mode === 'realtime' ? '<span class="inline-block w-2 h-2 bg-white rounded-full mr-1 animate-pulse"></span>' : ''}${esc(mode === 'realtime' ? '定刻表示に戻す' : 'リアルタイム表示に切替')}</button>`
         : '';
       const mapBtnHtml = showMapBtn
-        ? `<button data-role="tt-map-btn" data-lat="${currentStop.lat}" data-lng="${currentStop.lng}" data-label="${esc(currentStop.name)}" class="text-xs font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded-full px-3 py-1.5 shrink-0">地図で表示</button>`
+        ? `<button data-role="tt-map-btn" class="text-xs font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded-full px-3 py-1.5 shrink-0">地図で表示</button>`
         : '';
 
       root().innerHTML = `
         <div class="flex items-center justify-between mb-3">
-          <a href="${esc(backUrl)}" data-spa class="text-sm font-bold text-sky-700">← 時刻表へ戻る</a>
+          <button data-role="tt-trip-back" class="text-sm font-bold text-sky-700">← 戻る</button>
           <a href="/timetable" data-spa class="text-sm font-bold text-gray-500">検索</a>
         </div>
 
@@ -934,6 +992,11 @@
         if (currentEl) setTimeout(() => currentEl.scrollIntoView({ behavior: 'smooth', block: 'center' }), 200);
       }
 
+      // 便詳細は時刻表・バス停ページ・経路検索・リアルタイム表示など様々な画面から来るため、
+      // 直前の画面へ戻る（履歴が無ければ from パラメータ、それも無ければ時刻表検索へ）。
+      const tripBackBtn = root().querySelector('[data-role="tt-trip-back"]');
+      if (tripBackBtn) tripBackBtn.addEventListener('click', () => window.smartBack(backUrl));
+
       const toggleBtn = root().querySelector('[data-role="tt-mode-toggle"]');
       if (toggleBtn) {
         toggleBtn.addEventListener('click', () => {
@@ -945,19 +1008,15 @@
       const mapBtn = root().querySelector('[data-role="tt-map-btn"]');
       if (mapBtn) {
         mapBtn.addEventListener('click', () => {
-          showLocationPopup(Number(mapBtn.dataset.lat), Number(mapBtn.dataset.lng), mapBtn.dataset.label);
+          showLocationPopup(bus, data.headsign ? `${data.headsign} 行` : data.routeName);
         });
       }
       if (mode === 'realtime') {
+        // バス停名タップで、通常表示（renderScheduleRows）と同様にそのバス停の乗り場ページへ遷移する。
         root().querySelectorAll('[data-role="tt-rt-stop"]').forEach((row) => {
+          if (!row.dataset.stopKey) return;
           row.addEventListener('click', () => {
-            if (typeof window.openStopModal !== 'function') return;
-            window.openStopModal({
-              name: row.dataset.stopName,
-              notice: row.dataset.stopNotice,
-              lat: row.dataset.stopLat,
-              lng: row.dataset.stopLng
-            });
+            navigate(busStopUrl(row.dataset.stopKey, row.dataset.platformKey || null));
           });
         });
       }

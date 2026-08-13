@@ -10,6 +10,7 @@ const { getCachedServiceStatus } = require('../services/serviceStatusScraper');
 const {
   searchStops: searchTimetableStops,
   listStopsForMap,
+  searchNearbyStops,
   getStopTimetable,
   getTripDetail
 } = require('../services/gtfsTimetable');
@@ -853,6 +854,7 @@ router.get('/timetable/trips/:feedId/:routeId/:tripId/:departureTime/realtime', 
 // バス停検索機能（補完仕様書）。内部実装は時刻表検索と統一し、
 // エンドポイント名のみ /api/busstop/... に分ける（補完仕様書 10.2）。
 //   /api/busstop/search                  バス停名検索（/timetable/stops/search の別名）
+//   /api/busstop/nearby                  現在地から近いバス停（新規。検索画面・経路検索画面の入力補助）
 //   /api/busstop/{stopKey}/approaching   接近中のバス情報（新規）
 // バス停詳細そのものは新規エンドポイントを作らず、既存の
 // /api/timetable/stops/{stopKey} をフロントから直接利用する。
@@ -869,6 +871,24 @@ router.get('/busstop/search', async (req, res) => {
   } catch (err) {
     console.error('[api] /busstop/search エラー:', err);
     res.status(500).json({ error: 'バス停検索に失敗しました。' });
+  }
+});
+
+// GET /api/busstop/nearby?lat=...&lon=...&limit=... -> 現在地から近い順のバス停（既定5件）。
+// バス停検索・経路検索画面で、入力欄への自動フォーカスの代わりに提示する候補として使う。
+router.get('/busstop/nearby', async (req, res) => {
+  try {
+    const lat = Number.parseFloat(req.query.lat);
+    const lon = Number.parseFloat(req.query.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return res.status(400).json({ error: '緯度・経度を指定してください。' });
+    }
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '5', 10) || 5, 1), 20);
+    const stops = await searchNearbyStops(lat, lon, limit);
+    res.json({ stops });
+  } catch (err) {
+    console.error('[api] /busstop/nearby エラー:', err);
+    res.status(500).json({ error: '近くのバス停の取得に失敗しました。' });
   }
 });
 
