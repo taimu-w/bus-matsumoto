@@ -191,6 +191,35 @@ async function migrate() {
       ALTER TABLE daily_trip_stop_times ADD COLUMN IF NOT EXISTS stop_headsign TEXT
     `);
 
+    // ==========================================================
+    // 15. 祝日カレンダー対応（ETA統計の曜日区分を祝日対応させる）
+    // ==========================================================
+
+    // 15.1 holidays テーブルの作成（既にスキーマで作成済み。既存DB向けに保証）
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS holidays (
+        holiday_date  DATE PRIMARY KEY,
+        name          TEXT
+      )
+    `);
+
+    // 15.2 completed_trips に day_type を追加。
+    //      segment_travel_stats の集計キーを、従来の day_of_week（日曜=祝日固定）
+    //      から祝日カレンダー反映済みの区分へ切り替えるための列。
+    await client.query(`
+      ALTER TABLE completed_trips ADD COLUMN IF NOT EXISTS day_type TEXT
+    `);
+
+    // 15.3 既存行のバックフィル。祝日カレンダー導入前のアーカイブ分は holidays
+    //      テーブルと突き合わせできないため、旧ロジック（日曜のみholiday扱い）を
+    //      そのまま踏襲する。以後のアーカイブは finishService.js が祝日カレンダー
+    //      反映済みの day_type を直接書き込む。
+    await client.query(`
+      UPDATE completed_trips
+      SET day_type = CASE day_of_week WHEN 0 THEN 'holiday' WHEN 6 THEN 'saturday' ELSE 'weekday' END
+      WHERE day_type IS NULL
+    `);
+
     await client.query('COMMIT');
     console.log('[migrate] 複数事業者対応・便起点割り当てマイグレーション完了');
   } catch (err) {

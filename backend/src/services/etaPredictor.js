@@ -9,10 +9,24 @@
 // 段階的にフォールバックし、常に何らかの予測値を返せるようにしている。
 const pool = require('../config/db');
 const { timeStrToMinutes, minutesToTimeStr, getDayType, computeDelayMinutes } = require('../utils/time');
+const { loadHolidaySet } = require('./holidayCalendar');
 
 const MIN_SAMPLES_FOR_TRUST = 3;
 const BLEND_WEIGHT = parseFloat(process.env.ETA_BLEND_WEIGHT || '0.55'); // 過去統計への信頼度(0-1)
 const LIVE_SEGMENTS_FOR_PACE = 3; // 直近何区間の実績からペースを算出するか
+
+// 遅延予測の暴走防止（仕様③、docs参照なし・口頭仕様）: 統計・ペース補正だけに
+// 任せると、データが薄い区間で誤差が連鎖的に積み上がり、起点ではわずか1分の
+// 遅れだったものが終点では1時間超という非現実的な予測に育ってしまうことが
+// あった。これを防ぐため、現在の遅れ(currentDelay。起点＝直近到着済みバス停
+// での実績遅延)を基準に、以降の各バス停で許容する予測遅延の上限を段階的に
+// 定める。上限は「現在の遅れが小さいほど、その後の伸び幅を厳しく制限する」
+// 設計にしてあり、結果として遅れが解消される方向の予測が相対的に選ばれ
+// やすくなる。DELAY_RECOVERY_BOOSTは、生の予測(rawDelay)がcurrentDelayを
+// 下回る場合（＝アルゴリズム自体が既に遅れ解消を見込んでいる場合）に、その
+// 解消幅を上乗せして現行仕様よりやや多めに遅れが解消されるようにするための
+// 係数。極端にならない範囲で1.15倍にとどめている。
+const DELAY_RECOVERY_BOOST = 1.15;
 
 /**
  * scheduled_time が実際の時刻情報として使える値かどうかを判定する。
@@ -24,6 +38,35 @@ function isValidTime(t) {
 }
 
 /**
+ * 現在の遅れ(currentDelay)に応じて、以降のバス停で許容する予測遅延の上限(分)を返す。
+ * 30分を超える場合は、これ以上遅れが増えるとは見込まず currentDelay 自体を上限にする
+ * （＝単純加算方式と同じ結果になる。短縮方向の予測は capPredictedDelay 側で別途扱う）。
+ */
+function resolveDelayCeiling(currentDelay) {
+  if (currentDelay <= 0) return 2;
+  if (currentDelay <= 1) return 5;
+  if (currentDelay <= 2) return 7;
+  if (currentDelay <= 3) return 9;
+  if (currentDelay <= 15) return currentDelay * 2;
+  if (currentDelay <= 30) return 40;
+  return currentDelay;
+}
+
+/**
+ * 区間計算で得た生の予測遅延(rawDelay)を、現在の遅れ(currentDelay)を基準に補正する。
+ * - rawDelay が currentDelay を下回る（＝遅れ解消方向の予測）場合は、その解消幅を
+ *   DELAY_RECOVERY_BOOST倍だけ多めに見込む（0分未満にはならないよう下限0でクランプ）。
+ * - それ以外（横ばい・悪化方向）は resolveDelayCeiling() の上限でクランプする。
+ */
+function capPredictedDelay(rawDelay, currentDelay) {
+  if (rawDelay < currentDelay) {
+    const recovered = (currentDelay - rawDelay) * DELAY_RECOVERY_BOOST;
+    return Math.max(0, Math.round(currentDelay - recovered));
+  }
+  return Math.round(Math.min(rawDelay, resolveDelayCeiling(currentDelay)));
+}
+
+/**
  * completed_trips のうち未集計のものを segment_travel_stats へインクリメンタル反映する。
  */
 async function updateSegmentStats(client) {
@@ -31,7 +74,7 @@ async function updateSegmentStats(client) {
   // 集計する。候補車両止まりの記録を混ぜると、別経路をたまたま走っていた車両の所要時間で
   // 区間統計が汚染される。また担当が切り替わった便で同じ区間を二重計上することも防げる。
   const pending = await client.query(
-    `SELECT id, day_of_week FROM completed_trips
+    `SELECT id, day_of_week, day_type FROM completed_trips
      WHERE aggregated = FALSE AND is_official = TRUE
      ORDER BY id ASC LIMIT 200`
   );
@@ -45,7 +88,10 @@ async function updateSegmentStats(client) {
       [trip.id]
     );
     const rows = stopTimes.rows;
-    const dayType = trip.day_of_week === 0 ? 'holiday' : trip.day_of_week === 6 ? 'saturday' : 'weekday';
+    // day_type は祝日カレンダー反映済み（finishService.jsのarchiveAssignment()参照）。
+    // 祝日カレンダー導入前にアーカイブされ day_type が未設定の行のみ、
+    // 従来ロジック（日曜のみholiday扱い）にフォールバックする。
+    const dayType = trip.day_type || (trip.day_of_week === 0 ? 'holiday' : trip.day_of_week === 6 ? 'saturday' : 'weekday');
 
     for (let i = 0; i < rows.length - 1; i++) {
       const from = rows[i];
@@ -117,6 +163,11 @@ async function getSegmentStat(client, fromStopId, toStopId, dayType, hourBucket)
  *     基準に、有効な定刻同士の差分のみで絶対時刻を算出する。
  *   ②通常停車バス停（有効な時刻表を持つ駅）で予測が定刻を下回る場合は、
  *     早発防止のため定刻まで床打ちする。通過駅は対象外。
+ *   ③現在の遅れ(currentDelay)を基準に、以降の予測遅延に上限を設ける
+ *     （resolveDelayCeiling）。統計・ペース補正だけでは誤差が連鎖的に積み
+ *     上がり、起点はわずかな遅れでも終点では非現実的な大遅延になってしまう
+ *     ことがあったための対策。遅れ解消方向の予測はさらにやや強調する
+ *     （capPredictedDelay／DELAY_RECOVERY_BOOST）。通過駅は対象外。
  */
 async function predictArrivals(client, assignmentId) {
   const rows = await client.query(
@@ -130,7 +181,8 @@ async function predictArrivals(client, assignmentId) {
   const stops = rows.rows;
   if (stops.length === 0) return [];
 
-  const dayType = getDayType();
+  const holidaySet = await loadHolidaySet(client);
+  const dayType = getDayType(new Date(), holidaySet);
 
   // 直近の実績区間からペース係数(liveFactor)を算出する
   const arrived = stops.filter((s) => s.status === '到着済' && s.actual_time);
@@ -294,17 +346,26 @@ async function predictArrivals(client, assignmentId) {
     // 存在しないため対象外とする。補正後の時刻は次区間の出発基準時刻として
     // そのまま引き継がれる。
     const sHasValidScheduledTime = isValidTime(s.scheduled_time);
-    if (sHasValidScheduledTime) {
-      const schedMin = timeStrToMinutes(s.scheduled_time);
-      if (cursorMinutes < schedMin) {
-        cursorMinutes = schedMin;
-      }
+    const schedMin = sHasValidScheduledTime ? timeStrToMinutes(s.scheduled_time) : null;
+    if (sHasValidScheduledTime && cursorMinutes < schedMin) {
+      cursorMinutes = schedMin;
     }
 
-    const predictedTime = minutesToTimeStr(Math.round(cursorMinutes));
-    const predictedDelay = sHasValidScheduledTime
+    let predictedTime = minutesToTimeStr(Math.round(cursorMinutes));
+    let predictedDelay = sHasValidScheduledTime
       ? (computeDelayMinutes(s.scheduled_time, predictedTime) ?? currentDelay)
       : currentDelay;
+
+    // 【仕様③】遅延予測の上限キャップ／短縮強調。通過駅(scheduled_timeが無効)は
+    // currentDelayをそのまま使っているだけなので対象外（上限を跨ぐことはない）。
+    if (sHasValidScheduledTime) {
+      const cappedDelay = capPredictedDelay(predictedDelay, currentDelay);
+      if (cappedDelay !== predictedDelay) {
+        predictedDelay = cappedDelay;
+        cursorMinutes = ((schedMin + predictedDelay) % (24 * 60) + 24 * 60) % (24 * 60);
+        predictedTime = minutesToTimeStr(Math.round(cursorMinutes));
+      }
+    }
 
     results.push({
       stopId: s.stop_id,

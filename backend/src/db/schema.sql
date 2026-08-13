@@ -93,6 +93,14 @@ CREATE TABLE IF NOT EXISTS system_settings (
   value         TEXT
 );
 
+-- 祝日カレンダー（ETA統計の曜日区分 day_type を祝日対応させるためのマスタ）。
+-- seed.js が国民の祝日の算出値（utils/japaneseHolidays.js）を初期投入するが、
+-- 実際に参照されるのはこのテーブルの内容であり、管理画面から追加・削除できる。
+CREATE TABLE IF NOT EXISTS holidays (
+  holiday_date  DATE PRIMARY KEY,
+  name          TEXT
+);
+
 -- 観測されている物理車両。便との紐付けは trip_vehicle_assignments が持つ。
 -- 運行終了しても行は削除せず status='inactive' にする（1台が複数便に関与するため）。
 CREATE TABLE IF NOT EXISTS vehicles (
@@ -267,6 +275,9 @@ CREATE TABLE IF NOT EXISTS completed_trips (
   is_official         BOOLEAN NOT NULL DEFAULT TRUE,
   trip_type           TEXT,
   day_of_week         INTEGER NOT NULL,
+  -- 祝日カレンダーを反映した曜日区分('weekday'|'saturday'|'holiday')。
+  -- segment_travel_stats の集計キーはこちらを使う（day_of_weekは単なる記録用）。
+  day_type            TEXT,
   business_start_time TEXT,
   departure_time      TEXT,
   finished_at         TIMESTAMPTZ NOT NULL DEFAULT now(),

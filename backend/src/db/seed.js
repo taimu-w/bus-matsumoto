@@ -5,6 +5,7 @@ const { getGtfsDir, qualifyRouteId, unqualifyRouteId, ensureGtfsFilesPresent } =
 const { readFrequenciesByTripId } = require('../services/gtfsFrequencies');
 const { getEnabledGtfsFeeds, getAllFeedsForDb, validateFeedConfig } = require('../config/feeds');
 const { validateRouteExternalIdMap } = require('../config/routeExternalIdMapping');
+const { getNationalHolidays } = require('../utils/japaneseHolidays');
 
 const GTFS_DIR = getGtfsDir(null);
 
@@ -386,6 +387,32 @@ async function seedSettings(client) {
   console.log('[seed] システム設定の初期値を登録しました。');
 }
 
+/**
+ * 祝日カレンダーの初期値を投入する。年ごとに「既にその年のデータが1件でもあれば
+ * 何もしない」判定にしてあるのは、seed()はGTFS再取得のたびに毎時走るため、
+ * 管理画面での追加・削除（自動生成分の削除も含む）を上書きしないようにするため。
+ * 年が変わって新しい年のデータがまだ無い場合にだけ、自動的に補充される。
+ */
+async function seedHolidays(client) {
+  const currentYear = new Date().getFullYear();
+  for (const year of [currentYear, currentYear + 1]) {
+    const { rows } = await client.query(
+      `SELECT COUNT(*)::int AS c FROM holidays WHERE holiday_date >= $1 AND holiday_date < $2`,
+      [`${year}-01-01`, `${year + 1}-01-01`]
+    );
+    if (rows[0].c > 0) continue;
+
+    const holidays = getNationalHolidays(year);
+    for (const [date, name] of holidays) {
+      await client.query(
+        `INSERT INTO holidays (holiday_date, name) VALUES ($1, $2) ON CONFLICT (holiday_date) DO NOTHING`,
+        [date, name]
+      );
+    }
+    console.log(`[seed] ${year}年の祝日カレンダー初期値を登録しました。`);
+  }
+}
+
 async function seed() {
   const client = await pool.connect();
   try {
@@ -420,6 +447,7 @@ async function seed() {
     }
 
     await seedSettings(client);
+    await seedHolidays(client);
 
     // コード上の設定と、いま投入したGTFSデータの整合を検証する（警告のみ・起動は止めない）
     await validateCodeConfig(client);

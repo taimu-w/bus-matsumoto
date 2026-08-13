@@ -724,8 +724,15 @@
   /**
    * OpenStreetMapのポップアップ地図を表示する（外部サイトへは遷移しない）。
    * 車両の最新位置をバスアイコンで、この便が停車するバス停をバス停アイコンで表示する。
+   * バス停全件が収まるようにズームアウトはせず、バスの現在地にある程度拡大した状態で開く。
+   * バス停アイコンは1回タップするとバス停名を表示し、同じアイコンをもう一度タップすると
+   * そのバス停（乗り場）のページへ遷移する。
+   *
+   * staticStopsは便詳細の静的停車リスト（data.stops）。bus.stopsと同じGTFS stop_times由来で
+   * 並び・件数が一致するため、同じindexのstopKey/platformKeyをそのまま遷移先に使える
+   * （renderRealtimeRowsのtt-rt-stopと同じ橋渡し方法）。
    */
-  function showLocationPopup(bus, label) {
+  function showLocationPopup(bus, label, staticStops) {
     const vLat = Number(bus && bus.lat);
     const vLng = Number(bus && bus.lng);
     if (!Number.isFinite(vLat) || !Number.isFinite(vLng)) return;
@@ -747,20 +754,37 @@
         maxZoom: 19
       }).addTo(tripMapPopupInstance);
 
-      const bounds = [[vLat, vLng]];
+      // タップ中（名前表示中）のバス停マーカー。同じマーカーを連続タップしたときだけ遷移させる。
+      let openStopMarker = null;
 
-      (bus.stops || []).forEach((stop) => {
+      (bus.stops || []).forEach((stop, index) => {
         const lat = Number(stop.lat);
         const lng = Number(stop.lng);
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-        window.L.marker([lat, lng], {
+        const marker = window.L.marker([lat, lng], {
           icon: window.L.divIcon({
             html: `<div style="background:#0284c7;color:#fff;border:2px solid #fff;border-radius:9999px;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:13px;box-shadow:0 1px 4px rgba(0,0,0,.4)">🚏</div>`,
             className: 'tt-map-popup-stop-pin',
             iconSize: [26, 26]
           })
-        }).addTo(tripMapPopupInstance).bindPopup(`<div style="font-weight:700">${esc(stop.name)}</div>`);
-        bounds.push([lat, lng]);
+        }).addTo(tripMapPopupInstance);
+        marker.bindTooltip(esc(stop.name), { direction: 'top', offset: [0, -14] });
+
+        const staticStop = (staticStops || [])[index] || null;
+        const targetUrl = staticStop && staticStop.stopKey ? busStopUrl(staticStop.stopKey, staticStop.platformKey) : null;
+
+        marker.on('click', () => {
+          if (openStopMarker === marker) {
+            if (targetUrl) {
+              if (typeof window.closeModal === 'function') window.closeModal('tt-map-popup-modal');
+              navigate(targetUrl);
+            }
+            return;
+          }
+          if (openStopMarker) openStopMarker.closeTooltip();
+          openStopMarker = marker;
+          marker.openTooltip();
+        });
       });
 
       // 車両アイコンはバス停アイコンより上に重なるよう最後に追加する
@@ -773,7 +797,6 @@
         zIndexOffset: 1000
       }).addTo(tripMapPopupInstance);
 
-      if (bounds.length > 1) tripMapPopupInstance.fitBounds(bounds, { padding: [40, 40] });
       tripMapPopupInstance.invalidateSize();
     }, 50);
   }
@@ -1008,7 +1031,7 @@
       const mapBtn = root().querySelector('[data-role="tt-map-btn"]');
       if (mapBtn) {
         mapBtn.addEventListener('click', () => {
-          showLocationPopup(bus, data.headsign ? `${data.headsign} 行` : data.routeName);
+          showLocationPopup(bus, data.headsign ? `${data.headsign} 行` : data.routeName, data.stops);
         });
       }
       if (mode === 'realtime') {

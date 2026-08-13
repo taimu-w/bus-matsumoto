@@ -38,9 +38,23 @@ async function getApproachingBuses(stopKey, { date, platform } = {}) {
       .filter((d) => d.seconds >= nowSeconds && d.seconds <= nowSeconds + APPROACH_WINDOW_SECONDS)
       .sort((a, b) => a.seconds - b.seconds);
 
+    const built = [];
     for (const departure of departures) {
-      approachingBuses.push(await buildApproachingEntry(departure, timetable.stop.stopName));
+      const entry = await buildApproachingEntry(departure, timetable.stop.stopName);
+      built.push({ entry, departureSeconds: departure.seconds });
     }
+
+    // 一覧は「接近時間が速い順」に並べる。リアルタイム情報がある便は定刻+遅延分（delayMinutesは
+    // computeDelayMinutes()により0以上のみ）を実質の到着予測とみなし、無い便は定刻のまま比較する。
+    // predictedArrivalTimeの文字列同士を比較しないのは、minutesToTimeStr()が24時で巻き戻るため
+    // 日付跨ぎの便で誤った順序になり得るため（定刻ベースのdepartureSecondsは巻き戻らない）。
+    built.sort((a, b) => {
+      const etaA = a.departureSeconds + (a.entry.hasRealtime ? (a.entry.delayMinutes || 0) * 60 : 0);
+      const etaB = b.departureSeconds + (b.entry.hasRealtime ? (b.entry.delayMinutes || 0) * 60 : 0);
+      return etaA - etaB;
+    });
+
+    approachingBuses.push(...built.map((b) => b.entry));
   }
 
   return {

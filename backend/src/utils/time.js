@@ -130,13 +130,18 @@ function serviceDateTimeToDate(serviceDateStr, minutes) {
 
 /**
  * 曜日区分（平日/土曜/休日）を判定する。ETA統計のバケット分けに使用。
- * 日本の祝日カレンダーは持たないため、日曜日のみ「holiday」扱いとし、
- * 祝日運用が必要な場合は system_settings に祝日リストを追加して拡張すること。
- * 
+ * 日曜日は常に「holiday」扱い。加えて holidaySet（'YYYY-MM-DD'のSet。
+ * services/holidayCalendar.js の loadHolidaySet() が holidays テーブルから
+ * 読み込む）に該当日が含まれる場合も「holiday」扱いとする。
+ * holidaySet を渡さない場合は従来どおり日曜日のみholiday扱いになる
+ * （このファイル自体はDBアクセスを持たない純粋関数のままにするため、
+ * 祝日データの読み込みは呼び出し側の責務とする）。
+ *
  * ※注意: GTFSのservice_id（平日/土休日）とは独立した、ETA統計専用の区分です。
  *   GTFSの曜日別ダイヤ適用は getActiveServiceIds()（gtfsCalendar.js）で行います。
  */
-function getDayType(date = new Date()) {
+function getDayType(date = new Date(), holidaySet = null) {
+  if (holidaySet && holidaySet.has(getServiceDateString(date))) return 'holiday';
   const wd = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' }).format(date);
   if (wd === 'Sun') return 'holiday';
   if (wd === 'Sat') return 'saturday';

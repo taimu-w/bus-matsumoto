@@ -57,6 +57,24 @@
           <a href="/" class="bg-slate-200 text-slate-900 font-bold rounded-lg px-4 py-3">公開画面へ戻る</a>
         </div>
 
+        <!-- 祝日カレンダー -->
+        <div class="border-t pt-5 space-y-4">
+          <div>
+            <h3 class="text-lg font-bold">📅 祝日カレンダー</h3>
+            <p class="text-sm text-slate-500">ETAの区間走行時間統計（曜日区分）で「休日」として扱う日付を管理します。国民の祝日は自動投入済みです。</p>
+          </div>
+          <div class="flex gap-2 flex-wrap items-end">
+            <label class="text-sm font-bold">日付
+              <input id="holiday-date" type="date" class="mt-1 border rounded-lg px-3 py-2" />
+            </label>
+            <label class="text-sm font-bold">名称（任意）
+              <input id="holiday-name" type="text" class="mt-1 border rounded-lg px-3 py-2" placeholder="臨時休業日 など" />
+            </label>
+            <button id="add-holiday-btn" class="bg-slate-800 text-white font-bold rounded-lg px-4 py-2">追加</button>
+          </div>
+          <div id="holidays-list" class="text-sm divide-y border rounded-lg overflow-hidden"></div>
+        </div>
+
         <!-- バス位置情報モニター -->
         <div class="border-t pt-5 space-y-4">
           <div class="flex items-center justify-between gap-3">
@@ -319,6 +337,61 @@
       document.getElementById('importantNotice').value = settings.importantNotice || '';
     }
 
+    async function loadHolidays() {
+      const data = await api('/api/admin/holidays');
+      renderHolidays(data.holidays || []);
+    }
+
+    function renderHolidays(holidays) {
+      const container = document.getElementById('holidays-list');
+      container.innerHTML = '';
+      if (holidays.length === 0) {
+        container.innerHTML = '<div class="px-3 py-2 text-slate-400">登録されている祝日はありません。</div>';
+        return;
+      }
+      holidays.forEach((h) => {
+        const row = document.createElement('div');
+        row.className = 'flex items-center justify-between px-3 py-2';
+        row.innerHTML = `
+          <span>${escapeHtml(h.date)}<span class="text-slate-500 ml-2">${escapeHtml(h.name || '')}</span></span>
+          <button data-date="${escapeHtml(h.date)}" class="delete-holiday-btn text-red-600 font-bold text-xs">削除</button>
+        `;
+        container.appendChild(row);
+      });
+      container.querySelectorAll('.delete-holiday-btn').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          try {
+            await api(`/api/admin/holidays/${encodeURIComponent(btn.dataset.date)}`, { method: 'DELETE' });
+            await loadHolidays();
+            showStatus('祝日を削除しました。');
+          } catch (err) {
+            showStatus(err.message, 'error');
+          }
+        });
+      });
+    }
+
+    document.getElementById('add-holiday-btn').addEventListener('click', async () => {
+      const date = document.getElementById('holiday-date').value;
+      const name = document.getElementById('holiday-name').value.trim();
+      if (!date) {
+        showStatus('日付を選択してください。', 'error');
+        return;
+      }
+      try {
+        await api('/api/admin/holidays', {
+          method: 'POST',
+          body: JSON.stringify({ date, name })
+        });
+        document.getElementById('holiday-date').value = '';
+        document.getElementById('holiday-name').value = '';
+        await loadHolidays();
+        showStatus('祝日を追加しました。');
+      } catch (err) {
+        showStatus(err.message, 'error');
+      }
+    });
+
     async function loadRoutes() {
       const routes = await api('/api/routes');
       state.routes = routes.routes || [];
@@ -383,6 +456,7 @@
         await Promise.all([
           loadSettings(),
           loadRoutes(),
+          loadHolidays(),
         ]);
         localStorage.setItem('adminToken', state.token);
         applyEditorState();
@@ -434,6 +508,7 @@
       Promise.all([
         loadSettings(),
         loadRoutes(),
+        loadHolidays(),
       ])
         .then(() => {
           applyEditorState();

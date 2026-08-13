@@ -149,7 +149,7 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 - **`etaPredictor.js`の`updateSegmentStats()`が`is_official = TRUE`だけを集計するのは意図的です。** 候補車両止まりの記録を混ぜると、別経路をたまたま走っていた車両の所要時間で区間統計が汚染され、担当が切り替わった便では同じ区間を二重計上してしまいます。
 - **バスマップ（`#/busmap`）で`/api/buses-for-map`に特定の`routeId`を決め打ちしないでください。** 全路線を俯瞰する画面なので、1路線に固定するとその路線が運行していない時間帯に0台になります（実際にそれで「バスが表示されない」不具合になっていました）。同じ画面で、地図を作り直すときに`busMarkers`/`userMarker`を捨て忘れると2回目以降に描画されなくなる点、現在地取得を`await`してからバスを取得すると許可ダイアログの間バスが出ない点にも注意してください（README §12）。
 - **`routes/api.js`**：`PUT /api/admin/route-data`は、`router`が既に`/api`配下にマウントされているため、実際には`/api/api/admin/route-data`になります。フロントエンド側の呼び出しはこれに合わせてあるので動作はしますが、パスが二重になっている点に惑わされないこと。また、破壊的変更になるため黙ってリネームしないこと。
-- 上記の3つの曜日区分ロジックについて補足：`getDayType()`は平日/土曜/休日の3区分で、日曜のみholiday扱い（祝日カレンダー非対応）。`getActiveServiceIds()`はGTFSの正式な`calendar.txt`/`calendar_dates.txt`に基づく当日便生成用の運行日判定です。
+- 上記の3つの曜日区分ロジックについて補足：`getDayType()`は平日/土曜/休日の3区分で、日曜に加えて`holidays`テーブル（`services/holidayCalendar.js`がキャッシュ、`utils/japaneseHolidays.js`が国民の祝日を算出してseed.jsが初期投入、管理画面`/admin`から追加・削除可）に登録された日もholiday扱いになります。`getActiveServiceIds()`はGTFSの正式な`calendar.txt`/`calendar_dates.txt`に基づく当日便生成用の運行日判定です。`getDayType()`自体はDBアクセスを持たない純粋関数のままとし、祝日集合(`holidaySet`)は呼び出し側（`etaPredictor.js`/`finishService.js`）が渡す設計です。
 - **`dailyTripBuilder.js`が「既に車両を割り当て済みの便は書き換えない」ガードを持つのは意図的です。** GTFSは1時間ごとに再取得され、成功すると`seed()`が走ってマスタが入れ替わります。このとき走行中の便の定刻まで書き換えると、遅延計算と実績が破綻します。
 - **`vehicles`テーブルの`business_start_time` / `departure_time` / `trip_id` / `trip_type` / `last_arrived_seq` / `delay_minutes`は、旧・車両起点方式の名残で未使用です。** 移行のロールバック余地のために列だけ残してあります。新しいコードから参照しないでください。
 - GTFSカレンダーの読み込み（`gtfsCalendar.js`）は、`config/feeds.js`で有効な各GTFSフィードのディレクトリから読みます。フィード由来のカレンダーは`feedId:service_id`というプレフィックス規約によって機能しており、別のコードパスがあるわけではありません。

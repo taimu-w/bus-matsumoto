@@ -9,8 +9,9 @@
 // 再割り当てできる候補が居なくなった時点、または終点まで走り切った時点で呼ばれる。
 const pool = require('../config/db');
 const { haversineDistanceMeters } = require('../utils/geo');
-const { getDayOfWeek, timeStrToMinutes } = require('../utils/time');
+const { getDayOfWeek, getDayType, timeStrToMinutes } = require('../utils/time');
 const { updateSegmentStats } = require('./etaPredictor');
+const { loadHolidaySet } = require('./holidayCalendar');
 
 /**
  * 車両ごとの直近GPSを一括で読み込む。
@@ -65,12 +66,13 @@ async function archiveAssignment(client, assignment, reason, isOfficial) {
   );
 
   const serviceDateRef = new Date(`${assignment.service_date_str}T12:00:00+09:00`);
+  const holidaySet = await loadHolidaySet(client);
 
   const tripRes = await client.query(
     `INSERT INTO completed_trips
        (route_id, car_id, trip_id, daily_trip_id, assignment_id, start_time, is_official,
-        trip_type, day_of_week, business_start_time, departure_time, finish_reason)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, NULL, NULL, $9)
+        trip_type, day_of_week, day_type, business_start_time, departure_time, finish_reason)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, NULL, $10)
      RETURNING id`,
     [
       assignment.route_id,
@@ -81,6 +83,7 @@ async function archiveAssignment(client, assignment, reason, isOfficial) {
       assignment.start_time,
       isOfficial,
       getDayOfWeek(serviceDateRef),
+      getDayType(serviceDateRef, holidaySet),
       reason
     ]
   );

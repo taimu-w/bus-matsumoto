@@ -305,7 +305,7 @@ GTFSの`frequencies.txt`（頻度ベース運行）を読み込み、当日分�
 3. **隣接する2つのバス停**（`seq_order`の差が1）だけを対象に、実績時刻の差分（分）を計算する。
    - 差分が負になる場合（日を跨いだ場合）は24時間分を足して補正。
    - 差分が0以下、または60分を超える場合は「計測誤り」とみなして統計から除外する。
-4. 到着時刻（分）を1時間単位の`hourBucket`に丸め、`day_of_week`から`day_type`（平日/土曜/休日）を決定する。
+4. 到着時刻（分）を1時間単位の`hourBucket`に丸める。`day_type`（平日/土曜/休日）は`completed_trips.day_type`列（`finishService.js`のアーカイブ時点で`getDayType()`＋祝日カレンダーを使って確定済み）をそのまま使う。祝日カレンダー導入前にアーカイブされ`day_type`が未設定の古い行だけ、`day_of_week`（0=日曜のみholiday扱い）からのフォールバック導出になる。
 5. `segment_travel_stats`に該当する行が無ければ新規作成（サンプル数1）、あれば**移動平均**で更新する：
    `newAvg = (既存平均 × 既存件数 + 今回の秒数) / (既存件数 + 1)`
 6. 処理した便は`completed_trips.aggregated = TRUE`にして、二重集計を防ぐ。
@@ -383,6 +383,26 @@ GTFSの`frequencies.txt`（頻度ベース運行）を読み込み、当日分�
 #### ステップ5: 遅延分数の算出と次区間への引き継ぎ
 
 計算した予測時刻から`computeDelayMinutes()`で予測遅延分数を出し、結果配列に追加します。計算後の時刻は次の区間の起点（`prevStop`）として引き継がれ、有効な定刻を持つバス停であれば`lastValidStop`（通過区間計算の基準駅）としても更新されます。
+
+#### ステップ6: 遅延予測の上限キャップ（`resolveDelayCeiling` / `capPredictedDelay`）
+
+統計・ペース補正だけに任せると、データが薄い区間で誤差が連鎖的に積み上がり、起点ではわずか1分の遅れだったものが終点では1時間超という非現実的な予測に育ってしまうことがあった（実際に発生していた不具合）。これを防ぐため、**現在の遅れ（`currentDelay`＝起点＝直近到着済みバス停での実績遅延）を基準に、以降の各バス停で許容する予測遅延の上限**を段階的に定めている（通常停車バス停のみが対象。通過駅は対象外）。
+
+上限テーブル（`resolveDelayCeiling(currentDelay)`）：
+
+| 現在の遅れ（`currentDelay`） | 以降の予測遅延の上限 |
+|---|---|
+| 0分 | 2分 |
+| 〜1分 | 5分 |
+| 〜2分 | 7分 |
+| 〜3分 | 9分 |
+| 〜15分 | `currentDelay`の2倍 |
+| 〜30分 | 40分 |
+| それ超 | `currentDelay`自体（＝単純加算。これ以上は増やさない） |
+
+さらに、区間計算で得た生の予測遅延（`rawDelay`）が`currentDelay`を下回る場合（＝アルゴリズム自体が既に遅れ解消を見込んでいる場合）は、`capPredictedDelay()`がその解消幅を`DELAY_RECOVERY_BOOST`（既定1.15倍）だけ上乗せし、現行仕様よりやや多めに遅れが解消されるようにする（0分未満にはならないよう下限0でクランプ）。上限テーブルは「現在の遅れが小さいほど以降の伸び幅を厳しく制限する」設計になっており、結果として遅れが解消される方向の予測が相対的に選ばれやすい。
+
+キャップによって`predictedDelayMinutes`が書き換わった場合は、`predictedTime`（定刻＋補正後の遅延分）と`cursorMinutes`（次区間の起点）も同時に再計算し、両者が食い違わないようにしている。
 
 ### 5.3 まとめ：過去実績の有無によるロジックの切り替え表
 
@@ -575,7 +595,7 @@ scheduler.js上、独立したタイマー（1分間隔）で実行されます�
 | `timeStrToMinutes()` | `"H:mm"`文字列を分単位の数値に変換。`↓`・`通過`・空文字・不正値は`NaN`を返す（＝これが「有効な時刻データかどうか」の判定基盤になっている） |
 | `minutesToTimeStr()` | 分を`"H:mm"`形式に戻す |
 | `timeStrToDateToday()` | `"H:mm"`文字列を今日の日付のJST Dateオブジェクトに変換 |
-| `getDayType()` | 曜日区分（`weekday`/`saturday`/`holiday`）を判定。**ETA統計専用の区分**で、日曜のみholiday扱い（祝日カレンダーは未対応）。GTFSの`service_id`とは別物であることに注意（GTFS側は`gtfsCalendar.js`が担当） |
+| `getDayType(date, holidaySet?)` | 曜日区分（`weekday`/`saturday`/`holiday`）を判定。**ETA統計専用の区分**。日曜は常にholiday扱い、加えて第2引数の`holidaySet`（`'YYYY-MM-DD'`のSet）に該当日が含まれる場合もholiday扱いになる。この関数自体はDBアクセスを持たない純粋関数のままで、祝日集合は`services/holidayCalendar.js`の`loadHolidaySet(client)`（`holidays`テーブルをTTL付きでキャッシュ）を呼び出し側（`etaPredictor.js`/`finishService.js`）が読み込んで渡す。GTFSの`service_id`とは別物であることに注意（GTFS側は`gtfsCalendar.js`が担当） |
 | `getDayOfWeek()` | 0(日)〜6(土)の曜日番号を返す |
 | `computeDelayMinutes()` | 定刻と実績/予測の差分から遅延分数を算出。720分（半日）を超える差分のみ日跨ぎ補正し、それ以外の早着・早発は「遅れなし(0分)」に丸める |
 
@@ -601,6 +621,7 @@ scheduler.js上、独立したタイマー（1分間隔）で実行されます�
 | `trip_stop_progress` | ★**便×車両ごとのバス停進捗**（定刻・実績・遅延・通過/到着ステータス） |
 | `trip_gps_matches` | 通過判定で消費したGPSログ（割り当て単位。1台が複数便の候補になるため車両側の列では管理できない） |
 | `system_settings` | お知らせ文言など管理画面から編集する設定値 |
+| `holidays` | 祝日カレンダー（`holiday_date`が主キー）。`getDayType()`の休日判定に使う。`seed.js`が国民の祝日を初期投入、以降は管理画面から追加・削除可能 |
 | `vehicles` | 観測されている物理車両（便との紐付けは持たない。運行終了でも削除せず`status='inactive'`にする） |
 | `vehicle_positions_raw` | GPSフィードから取得した直後の生ログ（未処理分の一時置き場、取得元`feed_id`付き） |
 | `vehicle_gps_log` | 車両ごとに整理された走行ログ |
@@ -635,6 +656,9 @@ scheduler.js上、独立したタイマー（1分間隔）で実行されます�
 | PUT | `/api/admin/settings` | （要Basic認証）お知らせ設定の更新 |
 | GET | `/api/admin/route-data` | （要Basic認証）バス停座標・時刻表の編集用データ取得 |
 | PUT | `/api/api/admin/route-data` | （要Basic認証）バス停座標・時刻表の更新　※パスに`/api`が二重になっている点は既存コードのまま |
+| GET | `/api/admin/holidays` | （要Basic認証）祝日カレンダー一覧の取得 |
+| POST | `/api/admin/holidays` | （要Basic認証）祝日の追加・上書き（`{date, name}`）。キャッシュを`invalidateHolidayCache()`で破棄する |
+| DELETE | `/api/admin/holidays/:date` | （要Basic認証）祝日の削除。キャッシュを`invalidateHolidayCache()`で破棄する |
 | GET | `/api/admin/bus-positions` | （要Basic認証）直近3分のバス位置情報＋Yahoo!リバースジオコーダによる住所表示 |
 
 管理系APIは`requireAdminAuth`（Basic認証、既定ユーザー名/パスワードは`ADMIN_USERNAME`/`ADMIN_PASSWORD`環境変数）で保護されています。
@@ -655,7 +679,7 @@ scheduler.js上、独立したタイマー（1分間隔）で実行されます�
     - **`#map`の高さはCSSで確定させ、表示直後に`invalidateSize()`を呼ぶ。** 高さ0や非表示状態のコンテナではLeafletが何も描画しない。
 - `frontend/timetable.js`: 時刻表検索機能（16章）。**ハッシュではなくHistory API（パス`/timetable...`）でルーティングする**画面のひとつ。`app.js`の`renderCurrentRoute()`から`window.TimetableView.render()`が呼ばれる。`a[data-spa]`のクリック委任リスナーは**この`timetable.js`だけがdocument全体へ登録**しており、`busstop.js`・`routesearch.js`はそれに相乗りする（重複登録しない）。
 - `frontend/routesearch.js`: 経路検索画面（8章）。同じくパス（`/routesearch`）でルーティングし、**検索条件をURLのクエリに持たせる**（`?from=…&fromKey=…&to=…&toKey=…&date=…&time=…`）。結果から`/busstop`へ移動して戻っても検索結果が復元されるようにするため。表示は路線カラー基調で、区間の縦帯・路線チップ・所要時間バーに`route_color`を使い、コントラストが足りない色は`chipTextColor()`/`routeColorStyle()`で文字色を反転させる（`timetable.js`・`busstop.js`と同一ロジック）。本日の検索のときだけ20秒間隔でリアルタイム更新する。旧ハッシュ`#/search`は`/routesearch`へリダイレクトされる。
-- `frontend/admin.html`: 管理画面（お知らせ編集、バス停座標・時刻表編集、直近バス位置の住所付き一覧）。Basic認証情報をブラウザに保持してAPIを呼び出す。外部IDマッピングの編集セクションは、対応を`config/routeExternalIdMapping.js`へコード化したため削除済み。
+- `frontend/admin.html`: 管理画面（お知らせ編集、祝日カレンダー編集、バス停座標・時刻表編集、直近バス位置の住所付き一覧）。Basic認証情報をブラウザに保持してAPIを呼び出す。外部IDマッピングの編集セクションは、対応を`config/routeExternalIdMapping.js`へコード化したため削除済み。
 - `frontend/style.css`: 共通スタイル（時刻表の「縦=時 / 横=分」レイアウトもここ）。
 
 > **`index.html`の静的ファイル参照は必ず絶対パス（`/app.js`など）にすること。**
@@ -728,7 +752,8 @@ PostgreSQLは別途起動しておき、`.env`（または環境変数）で接�
 - **`services/gtfsCalendar.js`**: `config/feeds.js`で有効な各GTFSフィードのディレクトリから`calendar.txt`・`calendar_dates.txt`を読み込み、`feedId:serviceId`形式で当日有効な`service_id`を返す。フィード未設定時は`data gtfs`直下の静的GTFSへフォールバックする。
 - **24時以降の便**: `daily_trips.start_at`（TIMESTAMPTZ）では正しく扱えるが、`"H:mm"`表示と`computeDelayMinutes()`は従来どおりの制約を引きずる。深夜帯停止（23:00〜05:00）と併せ、実質的に対象外である点は変わらない。
 - **`routes/api.js`のPUT `/api/admin/route-data`**: エンドポイントのパスに`/api`が二重になっている（`router`が既に`/api`配下にマウントされているため、実際のパスは`/api/api/admin/route-data`になる）。フロントエンド側の呼び出しと整合していれば実害はないが、命名の一貫性という観点では要注意。
-- **`getDayType()`（`utils/time.js`）と`getActiveServiceIds()`（`gtfsCalendar.js`）は別の曜日区分ロジック**であり、意図的に分離されています。前者はETA統計のバケット分け専用（祝日カレンダー非対応、日曜のみholiday扱い）、後者はGTFSの正式なcalendar.txt/calendar_dates.txtに基づくダイヤ選択用です。混同しないよう注意してください。
+- **`getDayType()`（`utils/time.js`）と`getActiveServiceIds()`（`gtfsCalendar.js`）は別の曜日区分ロジック**であり、意図的に分離されています。前者はETA統計のバケット分け専用（日曜固定＋`holidays`テーブルによる祝日カレンダー対応。`services/holidayCalendar.js`参照）、後者はGTFSの正式なcalendar.txt/calendar_dates.txtに基づくダイヤ選択用です。混同しないよう注意してください。
+- **祝日カレンダー（`holidays`テーブル）**: `utils/japaneseHolidays.js`が国民の祝日（振替休日・国民の休日を含む）を年単位で算出する。`seed.js`の`seedHolidays()`は「その年のデータが1件も無い場合だけ」自動投入する設計で、管理画面（`/admin`）からの追加・削除を、毎時のGTFS再取得に伴う`seed()`実行で上書きしないようにしている。祝日データを更新した際は`services/holidayCalendar.js`の`invalidateHolidayCache()`でキャッシュ（TTL1時間）を破棄する必要があり、`routes/api.js`の`POST`/`DELETE /api/admin/holidays`はこれを呼んでいる。`completed_trips.day_type`は便アーカイブ時点（`finishService.js`）の祝日カレンダーで確定した値をそのまま保存するため、後から祝日を追加・削除しても**過去にアーカイブ済みの統計は遡って再集計されない**点に注意。
 
 ---
 

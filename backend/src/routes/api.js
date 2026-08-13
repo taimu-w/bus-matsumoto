@@ -21,6 +21,7 @@ const {
   startTimeToUrlHhmm
 } = require('../services/realtimeTripLookup');
 const { getApproachingBuses } = require('../services/busStopApproaching');
+const { invalidateHolidayCache } = require('../services/holidayCalendar');
 
 const router = express.Router();
 
@@ -292,6 +293,58 @@ router.put('/admin/settings', requireAdminAuth, async (req, res) => {
     await pool.query('ROLLBACK').catch(() => undefined);
     console.error('[api] /admin/settings 更新エラー:', err);
     res.status(500).json({ error: '管理設定の更新に失敗しました。' });
+  }
+});
+
+// GET /api/admin/holidays -> 祝日カレンダー一覧（ETA統計の曜日区分に使用）
+router.get('/admin/holidays', requireAdminAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT to_char(holiday_date, 'YYYY-MM-DD') AS date, name
+       FROM holidays ORDER BY holiday_date ASC`
+    );
+    res.json({ holidays: result.rows });
+  } catch (err) {
+    console.error('[api] /admin/holidays 取得エラー:', err);
+    res.status(500).json({ error: '祝日カレンダーの取得に失敗しました。' });
+  }
+});
+
+// POST /api/admin/holidays -> 祝日を追加（既存日は名称を上書き）
+router.post('/admin/holidays', requireAdminAuth, async (req, res) => {
+  const { date, name } = req.body || {};
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: '日付はYYYY-MM-DD形式で指定してください。' });
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO holidays (holiday_date, name) VALUES ($1, $2)
+       ON CONFLICT (holiday_date) DO UPDATE SET name = EXCLUDED.name`,
+      [date, name || null]
+    );
+    invalidateHolidayCache();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/holidays 追加エラー:', err);
+    res.status(500).json({ error: '祝日の追加に失敗しました。' });
+  }
+});
+
+// DELETE /api/admin/holidays/:date -> 祝日を削除
+router.delete('/admin/holidays/:date', requireAdminAuth, async (req, res) => {
+  const { date } = req.params;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: '日付はYYYY-MM-DD形式で指定してください。' });
+  }
+
+  try {
+    await pool.query('DELETE FROM holidays WHERE holiday_date = $1', [date]);
+    invalidateHolidayCache();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/holidays 削除エラー:', err);
+    res.status(500).json({ error: '祝日の削除に失敗しました。' });
   }
 });
 
