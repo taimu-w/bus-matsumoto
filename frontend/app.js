@@ -648,10 +648,29 @@ function renderRouteList() {
   const container = $('route-list');
   container.innerHTML = '';
   routeOptions.forEach((route) => {
+    // 表示名は必ずGTFSのroute名/略称から取る。両方欠けている内部ID
+    // （"guruttomatsumoto1"等の処理用コード）をそのまま利用者に見せないこと。
+    const displayName = route.name || route.short_name || '路線';
+    const badgeLabel = route.short_name || (route.name ? route.name.slice(0, 4) : '路線');
+    const accent = parseHexColor(route.color) ? `#${String(route.color).replace('#', '')}` : '#93c5fd';
+    const badgeFg = chipTextColor(route.color, route.text_color);
+
     const link = document.createElement('a');
     link.href = routeHref(route.id);
-    link.className = 'block bg-white rounded-xl border-2 border-blue-100 p-4 shadow-sm hover:border-blue-500 transition-colors';
-    link.innerHTML = `<p class="font-bold text-lg text-blue-900">${escapeHtml(route.name || route.short_name || route.id)}</p><p class="text-xs text-gray-500 mt-1">${escapeHtml(route.short_name || route.id)}</p>`;
+    link.className = 'flex items-center gap-3 bg-white rounded-xl border-2 border-gray-100 p-4 pl-3 shadow-sm hover:border-blue-400 active:scale-[0.99] transition-all';
+    // 帯（accent bar）は路線カラーそのもの、バッジは路線カラー背景＋自動コントラスト文字色。
+    // 淡色路線カラーが白背景に埋もれないよう、バッジには常に薄い枠線を重ねて輪郭を保つ。
+    link.style.borderLeft = `6px solid ${accent}`;
+    link.innerHTML = `
+      <span class="shrink-0 min-w-[3rem] text-center text-xs font-bold px-2 py-1.5 rounded-lg"
+            style="background:${accent};color:${badgeFg};box-shadow:inset 0 0 0 1px rgba(0,0,0,0.12);">
+        ${escapeHtml(badgeLabel)}
+      </span>
+      <span class="min-w-0">
+        <p class="font-bold text-lg text-blue-900 truncate">${escapeHtml(displayName)}</p>
+      </span>
+      <svg class="w-5 h-5 text-gray-300 shrink-0 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>
+    `;
     container.appendChild(link);
   });
 }
@@ -736,6 +755,34 @@ function initializeMap() {
 function normalizeRouteColor(color, fallback) {
   const raw = String(color || '').replace(/^#/, '');
   return /^[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(raw) ? `#${raw}` : fallback;
+}
+
+/* ---------- 路線カラーとコントラスト（busstop.js/timetable.js/routesearch.jsと同一ロジック） ---------- */
+function parseHexColor(color) {
+  if (!color) return null;
+  const hex = String(color).replace('#', '').trim();
+  if (!/^[0-9a-fA-F]{6}$/.test(hex)) return null;
+  return {
+    r: parseInt(hex.slice(0, 2), 16),
+    g: parseInt(hex.slice(2, 4), 16),
+    b: parseInt(hex.slice(4, 6), 16)
+  };
+}
+
+function relativeLuminance(rgb) {
+  const channel = (value) => {
+    const v = value / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * channel(rgb.r) + 0.7152 * channel(rgb.g) + 0.0722 * channel(rgb.b);
+}
+
+function chipTextColor(color, textColor) {
+  const rgb = parseHexColor(color);
+  if (!rgb) return '#1f2937';
+  const declared = parseHexColor(textColor);
+  if (declared) return `#${String(textColor).replace('#', '')}`;
+  return relativeLuminance(rgb) > 0.5 ? '#111827' : '#ffffff';
 }
 
 function createBusIcon(bus) {
