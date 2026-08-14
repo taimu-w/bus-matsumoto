@@ -16,6 +16,8 @@
  * ========================================================== */
 (function () {
   const API_BASE = '/api';
+  // このズームレベル以上に拡大したら、常時バス停名を表示する（要望対応）。
+  const STOP_NAME_ZOOM_THRESHOLD = 17;
 
   let mapInstance = null;
   let stopMarkers = [];
@@ -74,6 +76,7 @@
       attribution: '© OpenStreetMap contributors',
       maxZoom: 19
     }).addTo(mapInstance);
+    mapInstance.on('zoomend', updateStopLabelVisibility);
 
     // display:none から表示に切り替えた直後はコンテナのサイズが未確定なことがあり、
     // タイルもマーカーも描画されないことがある。レイアウト確定後にサイズを再計算させる。
@@ -100,7 +103,11 @@
         fillColor: '#14b8a6',
         fillOpacity: 0.9
       }).addTo(mapInstance);
-      marker.bindTooltip(stop.stopName || '', { direction: 'top', offset: [0, -4] });
+      marker.bindTooltip(stop.stopName || '', {
+        direction: 'top',
+        offset: [0, -4],
+        permanent: mapInstance.getZoom() >= STOP_NAME_ZOOM_THRESHOLD
+      });
       marker.on('click', () => navigate(stopUrl(stop.stopKey)));
       stopMarkers.push(marker);
     });
@@ -110,6 +117,25 @@
     if (latLngs.length > 0 && !userLocated) {
       mapInstance.fitBounds(window.L.latLngBounds(latLngs).pad(0.1), { maxZoom: 16 });
     }
+    updateStopLabelVisibility();
+  }
+
+  /**
+   * ある程度拡大された（STOP_NAME_ZOOM_THRESHOLD以上）ときだけ、バス停名を常時表示する。
+   * tooltipのpermanentオプションは動的に変更できないため、必要なときだけ付け替える
+   * （permanent:falseのままopenTooltip()するだけだと、ホバー解除時にLeaflet内部の
+   * mouseoutハンドラでcloseTooltip()されてしまい、常時表示を維持できない）。
+   */
+  function updateStopLabelVisibility() {
+    if (!mapInstance) return;
+    const showLabels = mapInstance.getZoom() >= STOP_NAME_ZOOM_THRESHOLD;
+    stopMarkers.forEach((marker) => {
+      const tooltip = marker.getTooltip();
+      if (!tooltip || tooltip.options.permanent === showLabels) return;
+      const content = tooltip.getContent();
+      marker.unbindTooltip();
+      marker.bindTooltip(content, { direction: 'top', offset: [0, -4], permanent: showLabels });
+    });
   }
 
   async function loadStops() {

@@ -463,14 +463,23 @@ function lowerBound(boardings, seconds) {
  * ========================================================== */
 
 /**
- * 循環路線などで同じ物理停留所を1便の中で複数回通る場合、この便の中で
- * stopTimeが何回目の通過か（0始まり）を求める。DB側は標柱・通過回数を持たず
- * バス停名でしか突き合わせられないため（busStopApproaching.jsと同じ制約）、
- * リアルタイム重ね合わせ時に「同名バス停の何回目の通過に対応する定刻か」を
- * 一致させるために使う（attachRealtime参照）。
+ * 循環路線などで同じ「バス停グループ」（＝表示名。実体は複数標柱の統合）を
+ * 1便の中で複数回通る場合、この便の中でstopTimeが何回目の通過か（0始まり）を
+ * 求める。DB側は標柱・通過回数を持たずバス停名でしか突き合わせられないため
+ * （busStopApproaching.jsと同じ制約）、リアルタイム重ね合わせ時に
+ * 「同名バス停の何回目の通過に対応する定刻か」を一致させるために使う（attachRealtime参照）。
+ *
+ * ⚠️ groupKey（統合後のバス停）単位で数えること。生のGTFS stop_id単位で数えると、
+ * 往路・復路で道路の反対側など別の標柱（＝別stop_id、同名で統合されグループは同じ）を
+ * 1回ずつ通る一般的なケースを「どちらも0回目」と誤判定し、DB側の名前一致と噛み合わなくなる
+ * （実データで確認済みの不具合。gtfsTimetable.jsのgetStopTimetable()と同じロジックにすること）。
  */
-function computeStopVisitIndex(stopTimes, stopTime) {
-  return stopTimes.filter((st) => st.stopId === stopTime.stopId && st.sequence <= stopTime.sequence).length - 1;
+function computeStopVisitIndex(index, stopTimes, stopTime) {
+  const targetGroupKey = index.stops.get(stopTime.stopKey)?.groupKey;
+  return stopTimes.filter((st) => {
+    const stStop = index.stops.get(st.stopKey);
+    return stStop && stStop.groupKey === targetGroupKey && st.sequence <= stopTime.sequence;
+  }).length - 1;
 }
 
 function serializeStopRef(index, stop, groupKey) {
@@ -536,7 +545,7 @@ function buildJourney(index, labels) {
       stops.push({
         ...serializeStopRef(index, stop, stop ? stop.groupKey : null),
         sequence: stopTime.sequence,
-        stopVisitIndex: computeStopVisitIndex(stopTimes, stopTime),
+        stopVisitIndex: computeStopVisitIndex(index, stopTimes, stopTime),
         arrivalSeconds,
         departureSeconds,
         arrivalTime: formatTime(arrivalSeconds),
@@ -573,11 +582,11 @@ function buildJourney(index, labels) {
       directionId: trip.directionId,
       fromStop: {
         ...serializeStopRef(index, boardStop, boardStop ? boardStop.groupKey : null),
-        stopVisitIndex: computeStopVisitIndex(stopTimes, boardStopTime)
+        stopVisitIndex: computeStopVisitIndex(index, stopTimes, boardStopTime)
       },
       toStop: {
         ...serializeStopRef(index, alightStop, alightStop ? alightStop.groupKey : null),
-        stopVisitIndex: computeStopVisitIndex(stopTimes, alightStopTime)
+        stopVisitIndex: computeStopVisitIndex(index, stopTimes, alightStopTime)
       },
       departureSeconds: label.departureSeconds,
       arrivalSeconds: label.arrivalSeconds,

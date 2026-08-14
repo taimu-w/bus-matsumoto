@@ -44,7 +44,7 @@
   }
 
   async function fetchJson(url) {
-    const res = await fetch(url);
+    const res = await fetch(url, { headers: { 'X-Client-Id': window.BUS_TIME_CLIENT_ID || '' } });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       const error = new Error(body.error || `HTTP ${res.status}`);
@@ -52,6 +52,11 @@
       throw error;
     }
     return res.json();
+  }
+
+  // app.jsで管理している「自動更新ON/OFF」（手動設定・サーバー高負荷時の一時停止の両方を反映）
+  function autoRefreshEnabled() {
+    return typeof window.isBusTimeAutoRefreshEnabled !== 'function' || window.isBusTimeAutoRefreshEnabled();
   }
 
   function root() {
@@ -228,6 +233,31 @@
     return `/busstop/${encodeURIComponent(stopKey)}${qs ? `?${qs}` : ''}`;
   }
 
+  /** お気に入り対象（時刻表・バス停詳細）。urlは日付を含めず、開いた時点の「今日」で常に表示する。 */
+  function timetableFavorite(data, platform) {
+    const platformId = platform || '';
+    let subtitle = '時刻表';
+    if (data.hasMultiplePlatforms) subtitle = data.selectedPlatform ? `時刻表・${platformLabel(data.selectedPlatform)}` : '時刻表・すべての乗り場';
+    return {
+      id: `timetable|${data.stop.stopKey}|${platformId}`,
+      type: 'timetable',
+      title: data.stop.stopName,
+      subtitle,
+      url: stopUrl(data.stop.stopKey, { platform: platformId || null })
+    };
+  }
+
+  /** お気に入り対象（便詳細）。 */
+  function tripFavorite(data, state) {
+    return {
+      id: `trip|${state.feedId}|${state.routeId}|${state.tripId}|${state.departureTime}`,
+      type: 'trip',
+      title: data.headsign ? `${data.headsign} 行` : data.routeName,
+      subtitle: `${data.routeName}・${state.departureTime}発`,
+      url: `/timetable/trips/${encodeURIComponent(state.feedId)}/${encodeURIComponent(state.routeId)}/${encodeURIComponent(state.tripId)}/${encodeURIComponent(state.departureTime)}`
+    };
+  }
+
   /* ---------- 画面: 検索 ---------- */
   function renderSearchView() {
     setTitle('時刻表検索', 'Timetable Search');
@@ -362,9 +392,14 @@
       </div>
 
       <div class="bg-white rounded-2xl shadow-sm border-2 border-sky-200 p-5 mb-4">
-        <p class="text-xs text-sky-600 font-bold">バス停</p>
-        <h2 class="text-2xl font-bold text-sky-900 leading-tight">${esc(data.stop.stopName)}</h2>
-        ${reading ? `<p class="text-[11px] text-gray-500 font-bold mt-1">${esc(reading)}</p>` : ''}
+        <div class="flex items-start justify-between gap-2">
+          <div class="min-w-0">
+            <p class="text-xs text-sky-600 font-bold">バス停</p>
+            <h2 class="text-2xl font-bold text-sky-900 leading-tight">${esc(data.stop.stopName)}</h2>
+            ${reading ? `<p class="text-[11px] text-gray-500 font-bold mt-1">${esc(reading)}</p>` : ''}
+          </div>
+          ${window.Favorites ? window.Favorites.starButtonHtml(timetableFavorite(data, platform)) : ''}
+        </div>
         ${renderModeSwitch(data, date)}
         <a href="${esc(busStopUrl(data.stop.stopKey, data.selectedPlatform ? data.selectedPlatform.platformKey : null))}" data-spa
            class="mt-4 block text-center bg-indigo-600 text-white py-3 rounded-xl font-bold text-sm shadow hover:bg-indigo-700">このバス停のページへ</a>
@@ -991,7 +1026,10 @@
                 <h2 class="text-xl font-bold leading-tight">${esc(data.routeName)}</h2>
                 <p class="text-sm font-bold mt-0.5">${esc(data.headsign ? `${data.headsign} 行` : '行先表示なし')}</p>
               </div>
-              ${delayBadge}
+              <div class="flex items-center gap-2 shrink-0">
+                ${delayBadge}
+                ${window.Favorites ? window.Favorites.starButtonHtml(tripFavorite(data, state), { size: 'w-9 h-9' }) : ''}
+              </div>
             </div>
           </div>
           <div class="bg-white px-5 py-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs font-bold text-gray-600">
@@ -1047,6 +1085,7 @@
 
     async function refreshRealtime() {
       if (seq !== renderSeq || mode !== 'realtime') { stopTripRealtimePolling(); return; }
+      if (!autoRefreshEnabled()) return;
       try {
         const fresh = await fetchJson(`${tripApiPath}/realtime`);
         if (seq !== renderSeq || mode !== 'realtime') return;

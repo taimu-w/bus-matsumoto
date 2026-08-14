@@ -150,10 +150,13 @@ async function getSegmentStat(client, fromStopId, toStopId, dayType, hourBucket)
  * 指定した便への割り当て（assignment）の、残り各バス停に対する予測到着時刻を算出する。
  * 便起点方式では進捗が (便 × 車両) 単位になったため、車両IDではなく割り当てIDを受け取る。
  * 予測アルゴリズムそのものは従来から一切変更していない。
- * 戻り値: [{ stopId, seqOrder, predictedTime, predictedDelayMinutes, source }]
+ * 戻り値: [{ stopId, seqOrder, predictedTime, predictedDelayMinutes, source, stopsBefore }]
  *   source: 'historical'（統計採用） | 'schedule_paced'（時刻表所要時間×ペース補正）
  *         | 'naive_anchored'（通過区間を基準駅からの定刻差分で算出） | 'through_skip'（通過駅本体・時間を進めない）
  *         | 'naive'（統計・基準駅とも不明な異常系の最終フォールバック）
+ *   stopsBefore: 予測時点で対象停留所の何停留所手前に居たか（cursorSeqとの差。
+ *     予測精度監視で「何停留所前に出した予測か」の軸に使う。算出アルゴリズムの
+ *     判定には一切使わない、付随メタデータ）
  *
  * 仕様書 第9項 追加修正:
  *   ①通過バス停を跨ぐ区間は、データ汚染防止のため統計/ペース補正を使わない。
@@ -240,7 +243,8 @@ async function predictArrivals(client, assignmentId) {
       seqOrder: s.seq_order,
       predictedTime: s.scheduled_time,
       predictedDelayMinutes: 0,
-      source: 'schedule'
+      source: 'schedule',
+      stopsBefore: s.seq_order - cursorSeq // cursorSeq=-1（まだどこにも到着していない）
     }));
   }
 
@@ -260,7 +264,8 @@ async function predictArrivals(client, assignmentId) {
         predictedDelayMinutes: s.status === '到着済' && s.scheduled_time
           ? (computeDelayMinutes(s.scheduled_time, s.actual_time) || 0)
           : 0,
-        source: 'actual'
+        source: 'actual',
+        stopsBefore: s.seq_order - cursorSeq // 実績確定行（0以下）。予測精度分析では参照しない
       });
       continue;
     }
@@ -372,7 +377,10 @@ async function predictArrivals(client, assignmentId) {
       seqOrder: s.seq_order,
       predictedTime,
       predictedDelayMinutes: predictedDelay,
-      source
+      source,
+      // 予測時点で、対象の停留所の何停留所手前に居たか（cursorSeqは実績到着済みの最後尾で
+      // ループ中は変化しない）。予測精度監視で「何停留所前に出した予測か」の軸に使う。
+      stopsBefore: s.seq_order - cursorSeq
     });
 
     prevStop = { ...s, actual_time: predictedTime };
@@ -385,6 +393,54 @@ async function predictArrivals(client, assignmentId) {
   }
 
   return results;
+}
+
+/**
+ * 予測値の履歴ログ(trip_arrival_prediction_log)への追記。
+ * 「予測はいつの時点のものかで常に変動する」ため、予測精度の監視には最新値の
+ * UPSERTだけでは足りず、時系列の履歴が要る。直前に記録した値（predicted_time・
+ * source）から変化があった停留所だけを1行追記することで書き込み量を抑える。
+ * 到着済み区間は source='actual'・predicted_time=実績時刻として記録されるため、
+ * 「その停留所への予測がどう変遷し、実際いつ着いたか」がこのテーブル単体で揃う。
+ * 呼び出し側(computeAndStoreAllArrivals)で個別にtry/catchし、失敗してもETA本体の
+ * 計算・保存には一切影響させない。
+ */
+async function logPredictionChanges(client, assignmentId, dailyTripId, routeId, arrivals) {
+  if (arrivals.length === 0) return;
+
+  const lastRes = await client.query(
+    `SELECT DISTINCT ON (stop_id) stop_id, predicted_time, source, stops_before
+     FROM trip_arrival_prediction_log
+     WHERE assignment_id = $1
+     ORDER BY stop_id, computed_at DESC`,
+    [assignmentId]
+  );
+  const lastByStop = new Map(lastRes.rows.map((r) => [r.stop_id, r]));
+
+  const toInsert = arrivals.filter((a) => {
+    const prev = lastByStop.get(a.stopId);
+    return !prev || prev.predicted_time !== a.predictedTime || prev.source !== a.source || prev.stops_before !== a.stopsBefore;
+  });
+  if (toInsert.length === 0) return;
+
+  await client.query(
+    `INSERT INTO trip_arrival_prediction_log
+       (assignment_id, daily_trip_id, route_id, stop_id, seq_order, predicted_time, predicted_delay_minutes, source, stops_before, computed_at)
+     SELECT $1, $2, $3, t.stop_id, t.seq_order, t.predicted_time, t.predicted_delay_minutes, t.source, t.stops_before, now()
+     FROM unnest($4::int[], $5::int[], $6::text[], $7::int[], $8::text[], $9::int[])
+       AS t(stop_id, seq_order, predicted_time, predicted_delay_minutes, source, stops_before)`,
+    [
+      assignmentId,
+      dailyTripId,
+      routeId,
+      toInsert.map((a) => a.stopId),
+      toInsert.map((a) => a.seqOrder),
+      toInsert.map((a) => a.predictedTime),
+      toInsert.map((a) => a.predictedDelayMinutes),
+      toInsert.map((a) => a.source),
+      toInsert.map((a) => a.stopsBefore)
+    ]
+  );
 }
 
 /**
@@ -402,7 +458,10 @@ async function computeAndStoreAllArrivals() {
   let stored = 0;
   try {
     const assignments = await client.query(
-      `SELECT id FROM trip_vehicle_assignments WHERE state = 'active' ORDER BY id ASC`
+      `SELECT a.id, a.daily_trip_id, d.route_id
+       FROM trip_vehicle_assignments a
+       JOIN daily_trips d ON d.id = a.daily_trip_id
+       WHERE a.state = 'active' ORDER BY a.id ASC`
     );
 
     for (const assignment of assignments.rows) {
@@ -437,6 +496,14 @@ async function computeAndStoreAllArrivals() {
         );
         stored += arrivals.length;
         computed++;
+
+        // 予測精度監視用の履歴ログ追記。失敗してもプリコンピュート本体は成功済みなので、
+        // ここだけ個別にcatchして握りつぶす（ETA配信を止めない）。
+        try {
+          await logPredictionChanges(client, assignment.id, assignment.daily_trip_id, assignment.route_id, arrivals);
+        } catch (logErr) {
+          console.error(`[etaPredictor] assignment=${assignment.id} の予測履歴ログ書き込みエラー（本体には影響なし）:`, logErr.message);
+        }
       } catch (err) {
         console.error(`[etaPredictor] assignment=${assignment.id} の ETA 計算エラー:`, err.message);
       }
@@ -484,4 +551,28 @@ async function getArrivalsForAssignment(client, assignmentId) {
   }));
 }
 
-module.exports = { updateSegmentStats, predictArrivals, computeAndStoreAllArrivals, getArrivalsForAssignment };
+// 予測根拠(source)の管理画面向け日本語説明。値の一覧はpredictArrivals()のJSDoc参照。
+// category は「時刻表 / 過去統計 / 直近走行ペース」のどれを根拠にしたかの大分類
+// （管理画面の根拠表示で使う。仕様: ETA予測の根拠表示）。
+const SOURCE_INFO = {
+  schedule: { category: 'schedule', label: '時刻表（始発前・実績なし）' },
+  historical: { category: 'historical', label: '過去統計＋直近走行ペース補正' },
+  schedule_paced: { category: 'pace', label: '時刻表所要時間×直近走行ペース補正' },
+  naive_anchored: { category: 'schedule', label: '時刻表（通過区間・基準駅からの差分）' },
+  through_skip: { category: 'schedule', label: '通過駅（時刻表上非停車）' },
+  naive: { category: 'fallback', label: 'フォールバック（統計・時刻表とも参照不可）' },
+  actual: { category: 'actual', label: '実績到着' }
+};
+
+function describeSource(source) {
+  return SOURCE_INFO[source] || { category: 'unknown', label: source || '不明' };
+}
+
+module.exports = {
+  updateSegmentStats,
+  predictArrivals,
+  computeAndStoreAllArrivals,
+  getArrivalsForAssignment,
+  describeSource,
+  SOURCE_INFO
+};

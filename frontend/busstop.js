@@ -49,7 +49,7 @@
   }
 
   async function fetchJson(url) {
-    const res = await fetch(url);
+    const res = await fetch(url, { headers: { 'X-Client-Id': window.BUS_TIME_CLIENT_ID || '' } });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       const error = new Error(body.error || `HTTP ${res.status}`);
@@ -57,6 +57,11 @@
       throw error;
     }
     return res.json();
+  }
+
+  // app.jsで管理している「自動更新ON/OFF」（手動設定・サーバー高負荷時の一時停止の両方を反映）
+  function autoRefreshEnabled() {
+    return typeof window.isBusTimeAutoRefreshEnabled !== 'function' || window.isBusTimeAutoRefreshEnabled();
   }
 
   function root() {
@@ -194,6 +199,20 @@
     }
     if (!data.hasMultiplePlatforms) return data.platforms[0] || null;
     return null;
+  }
+
+  /** お気に入り対象。標柱を選択中ならその乗り場単独、未選択（すべての乗り場）ならその状態で登録する。 */
+  function busStopFavorite(data, platform) {
+    const platformId = platform ? platform.stopId : '';
+    let subtitle = 'バス停';
+    if (data.hasMultiplePlatforms) subtitle = platform ? `バス停・${platformLabel(platform)}` : 'バス停・すべての乗り場';
+    return {
+      id: `busstop|${data.stop.stopKey}|${platformId}`,
+      type: 'busstop',
+      title: data.stop.stopName,
+      subtitle,
+      url: busStopUrl(data.stop.stopKey, { platform: platformId || null })
+    };
   }
 
   /* ---------- 画面: 検索 ---------- */
@@ -376,9 +395,14 @@
       </div>
 
       <div class="bg-white rounded-2xl shadow-sm border-2 border-indigo-200 p-5 mb-4">
-        <p class="text-xs text-indigo-600 font-bold">バス停</p>
-        <h2 class="text-2xl font-bold text-indigo-900 leading-tight">${esc(data.stop.stopName)}</h2>
-        ${reading ? `<p class="text-[11px] text-gray-500 font-bold mt-1">${esc(reading)}</p>` : ''}
+        <div class="flex items-start justify-between gap-2">
+          <div class="min-w-0">
+            <p class="text-xs text-indigo-600 font-bold">バス停</p>
+            <h2 class="text-2xl font-bold text-indigo-900 leading-tight">${esc(data.stop.stopName)}</h2>
+            ${reading ? `<p class="text-[11px] text-gray-500 font-bold mt-1">${esc(reading)}</p>` : ''}
+          </div>
+          ${window.Favorites ? window.Favorites.starButtonHtml(busStopFavorite(data, platform_)) : ''}
+        </div>
         ${renderModeSwitch(data)}
       </div>
 
@@ -734,6 +758,7 @@
     stopApproachingPolling();
     approachingTimer = setInterval(() => {
       if (seq !== renderSeq) { stopApproachingPolling(); return; }
+      if (!autoRefreshEnabled()) return;
       loadApproaching(data, seq, platform);
     }, APPROACHING_POLL_MS);
   }

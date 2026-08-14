@@ -7,17 +7,25 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%231e3a8a'/%3E%3Cpath fill='%23fff' d='M18,11H6V6h12M16.5,17A1.5,1.5 0 0,1 15,15.5A1.5,1.5 0 0,1 16.5,14A1.5,1.5 0 0,1 18,15.5A1.5,1.5 0 0,1 16.5,17M7.5,17A1.5,1.5 0 0,1 6,15.5A1.5,1.5 0 0,1 7.5,14A1.5,1.5 0 0,1 9,15.5A1.5,1.5 0 0,1 7.5,17M4,16c0,0.88 0.39,1.67 1,2.22V20a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1h8v1a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1.78c0.61-0.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8,0.5-8,4V16Z'/%3E%3C/svg%3E">
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Noto Sans JP', sans-serif; }
+    .nav-btn.active { background-color: rgba(255,255,255,0.16); color: #fff; }
+    .nav-btn { color: #bfdbfe; }
+    .nav-btn:hover { background-color: rgba(255,255,255,0.08); }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 6px; }
+  </style>
 </head>
-<body class="bg-slate-100 text-slate-900" style="font-family:'Noto Sans JP',sans-serif;">
-  <div class="min-h-screen flex items-center justify-center p-4">
-    <div class="w-full max-w-5xl bg-white rounded-2xl shadow-xl overflow-hidden">
+<body class="bg-slate-100 text-slate-900">
+  <!-- ログイン画面 -->
+  <div id="login-card-wrap" class="min-h-screen flex items-center justify-center p-4">
+    <div id="login-card" class="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden">
       <div class="bg-blue-900 text-white px-6 py-4">
         <p class="text-[10px] font-black tracking-wider text-blue-300">バスタイム</p>
-        <h1 class="text-2xl font-bold">管理画面</h1>
-        <p class="text-sm text-blue-100 mt-1">バス停座標・時刻表・バス位置情報を確認できます</p>
+        <h1 class="text-2xl font-bold">運行管理コンソール</h1>
+        <p class="text-sm text-blue-100 mt-1">運行監視・お知らせ・マスタ管理</p>
       </div>
-
-      <div id="login-card" class="p-6">
+      <div class="p-6">
         <h2 class="text-lg font-bold mb-4">ログイン</h2>
         <div class="space-y-3">
           <label class="block text-sm font-bold">ユーザー名
@@ -28,39 +36,406 @@
           </label>
           <button id="login-btn" class="w-full bg-blue-700 text-white font-bold rounded-lg px-4 py-3">ログイン</button>
         </div>
+        <div id="login-status" class="hidden mt-4 rounded-lg px-4 py-3 text-sm font-bold"></div>
       </div>
+    </div>
+  </div>
 
-      <div id="editor-card" class="hidden p-6 space-y-6">
-        <div class="flex items-center justify-between gap-3">
-          <div>
-            <h2 class="text-lg font-bold">配信内容編集</h2>
-            <p class="text-sm text-slate-500">公開画面の表示用テキストを更新できます。</p>
+  <!-- ログイン後のアプリシェル -->
+  <div id="app-shell" class="hidden h-screen flex overflow-hidden">
+    <aside class="w-64 shrink-0 bg-blue-900 text-white flex flex-col h-screen">
+      <div class="px-5 py-4 border-b border-blue-800">
+        <p class="text-[10px] font-black tracking-wider text-blue-300">バスタイム</p>
+        <h1 class="text-lg font-bold leading-tight">運行管理コンソール</h1>
+      </div>
+      <nav class="flex-1 overflow-y-auto px-3 py-4 space-y-5">
+        <div>
+          <p class="px-2 text-[11px] font-black tracking-wider text-blue-300 mb-1">モニタリング</p>
+          <div class="space-y-0.5">
+            <button data-section="dashboard" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">運行ダッシュボード</button>
+            <button data-section="assignment" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">便の割当監視</button>
+            <button data-section="pass" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">通過判定</button>
+            <button data-section="eta-basis" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">ETA予測根拠</button>
+            <button data-section="prediction-accuracy" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">予測精度の監視</button>
+            <button data-section="alerts" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold flex items-center justify-between">
+              <span>異常アラート</span>
+              <span id="alerts-nav-badge" class="hidden ml-2 inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded-full bg-red-500 text-white text-[11px] font-black">0</span>
+            </button>
+            <button data-section="gtfs-feeds" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">GTFSフィード監視</button>
+            <button data-section="location-feeds" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">位置情報フィード監視</button>
+            <button data-section="api-stats" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">API稼働監視</button>
+            <button data-section="job-monitor" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">ジョブ監視</button>
           </div>
-          <button id="logout-btn" class="border rounded-lg px-3 py-2 text-sm font-bold">ログアウト</button>
         </div>
-
-        <div class="grid gap-4 md:grid-cols-2">
-          <label class="block text-sm font-bold">お知らせ1
-            <textarea id="notice1" rows="3" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
-          </label>
-          <label class="block text-sm font-bold">お知らせ2
-            <textarea id="notice2" rows="3" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
-          </label>
+        <div>
+          <p class="px-2 text-[11px] font-black tracking-wider text-blue-300 mb-1">設定・配信</p>
+          <div class="space-y-0.5">
+            <button data-section="notices" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">お知らせ編集</button>
+            <button data-section="holidays" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">祝日カレンダー</button>
+            <button data-section="positions" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">バス位置情報モニター</button>
+            <button data-section="viewers" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">サイト閲覧数</button>
+            <button data-section="operation-records" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">運行実績ダウンロード</button>
+          </div>
         </div>
+      </nav>
+      <div class="px-3 py-4 border-t border-blue-800 space-y-2">
+        <a href="/" class="block text-center bg-blue-800 hover:bg-blue-700 text-white font-bold rounded-lg px-3 py-2 text-sm">公開画面へ戻る</a>
+        <button id="logout-btn" class="w-full bg-white/10 hover:bg-white/20 text-white font-bold rounded-lg px-3 py-2 text-sm">ログアウト</button>
+      </div>
+    </aside>
 
-        <label class="block text-sm font-bold">重要なお知らせ
-          <textarea id="importantNotice" rows="4" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
-        </label>
+    <main class="flex-1 h-screen overflow-y-auto">
+      <div class="max-w-6xl mx-auto p-6 space-y-4">
+        <div id="status" class="hidden rounded-lg px-4 py-3 text-sm font-bold"></div>
 
-        <div class="flex gap-3 flex-wrap">
+        <!-- 運行ダッシュボード -->
+        <section id="section-dashboard" class="section hidden space-y-4">
+          <h2 class="text-xl font-bold">運行ダッシュボード</h2>
+          <div id="dashboard-tiles" class="grid gap-3 md:grid-cols-3 xl:grid-cols-5"></div>
+          <div class="bg-white rounded-xl border p-4">
+            <h3 class="font-bold text-slate-700 mb-2">GTFS更新状態</h3>
+            <div id="dashboard-gtfs" class="text-sm"></div>
+          </div>
+        </section>
+
+        <!-- 便の割当監視 -->
+        <section id="section-assignment" class="section hidden space-y-3">
+          <div class="flex items-center justify-between">
+            <h2 class="text-xl font-bold">便の割当監視</h2>
+            <span id="assignment-updated" class="text-xs text-slate-400"></span>
+          </div>
+          <div class="bg-white rounded-xl border overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500 text-xs">
+                <tr>
+                  <th class="text-left px-3 py-2">便</th>
+                  <th class="text-left px-3 py-2">状態</th>
+                  <th class="text-left px-3 py-2">担当車両</th>
+                  <th class="text-left px-3 py-2">距離</th>
+                  <th class="text-left px-3 py-2">割当時刻</th>
+                  <th class="text-left px-3 py-2">候補車両</th>
+                  <th class="text-left px-3 py-2">理由</th>
+                </tr>
+              </thead>
+              <tbody id="assignment-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 通過判定 -->
+        <section id="section-pass" class="section hidden space-y-3">
+          <div class="flex items-center justify-between">
+            <h2 class="text-xl font-bold">通過判定</h2>
+            <span class="text-xs text-slate-400">現在の判定状態（スナップショット）</span>
+          </div>
+          <div id="pass-container" class="space-y-3"></div>
+        </section>
+
+        <!-- ETA予測根拠 -->
+        <section id="section-eta-basis" class="section hidden space-y-3">
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="text-xl font-bold">ETA予測根拠</h2>
+              <p class="text-sm text-slate-500">稼働中の便・停留所ごとに、到着予測が何を根拠に算出されたか（時刻表／過去統計／直近走行ペース）を表示します。</p>
+            </div>
+            <span id="eta-basis-updated" class="text-xs text-slate-400"></span>
+          </div>
+          <div class="bg-white rounded-xl border p-3 flex flex-wrap gap-2 text-xs" id="eta-basis-legend"></div>
+          <div id="eta-basis-container" class="space-y-3"></div>
+        </section>
+
+        <!-- 予測精度の監視 -->
+        <section id="section-prediction-accuracy" class="section hidden space-y-4">
+          <div>
+            <h2 class="text-xl font-bold">予測精度の監視</h2>
+            <p class="text-sm text-slate-500">各停留所に到着した実績をもとに、予測はいつ・何停留所手前で出されたものかによって常に変動します。下の条件で絞り込んで誤差を確認できます。</p>
+          </div>
+
+          <div class="bg-white rounded-xl border p-4 flex flex-wrap gap-3 items-end">
+            <label class="text-xs font-bold text-slate-500">集計期間
+              <select id="accuracy-days" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block">
+                <option value="1">当日</option>
+                <option value="3">直近3日</option>
+                <option value="7" selected>直近7日</option>
+                <option value="14">直近14日</option>
+                <option value="31">直近31日</option>
+              </select>
+            </label>
+            <label class="text-xs font-bold text-slate-500">路線
+              <select id="accuracy-route" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block min-w-[9rem]">
+                <option value="">すべて</option>
+              </select>
+            </label>
+            <label class="text-xs font-bold text-slate-500">誤差許容（この分数以内を「的中」とみなす）
+              <select id="accuracy-threshold" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block">
+                <option value="1">±1分</option>
+                <option value="2">±2分</option>
+                <option value="3" selected>±3分</option>
+                <option value="5">±5分</option>
+                <option value="10">±10分</option>
+              </select>
+            </label>
+            <label class="text-xs font-bold text-slate-500">予測タイミング（何分前）
+              <select id="accuracy-lead" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block">
+                <option value="">すべて</option>
+                <option value="5分未満">5分未満</option>
+                <option value="5〜15分前">5〜15分前</option>
+                <option value="15〜30分前">15〜30分前</option>
+                <option value="30分以上前">30分以上前</option>
+              </select>
+            </label>
+            <label class="text-xs font-bold text-slate-500">予測タイミング（何停留所前）
+              <select id="accuracy-stops-before" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block">
+                <option value="">すべて</option>
+                <option value="1停留所前">1停留所前</option>
+                <option value="2停留所前">2停留所前</option>
+                <option value="3停留所前">3停留所前</option>
+                <option value="4〜6停留所前">4〜6停留所前</option>
+                <option value="7停留所以上前">7停留所以上前</option>
+              </select>
+            </label>
+            <button id="refresh-accuracy-btn" class="bg-blue-700 text-white font-bold rounded-lg px-3 py-2 text-sm">更新</button>
+            <button id="clear-accuracy-filter-btn" class="bg-slate-100 text-slate-600 font-bold rounded-lg px-3 py-2 text-sm">絞り込み解除</button>
+          </div>
+
+          <div id="accuracy-summary" class="grid gap-3 md:grid-cols-4"></div>
+
+          <div class="grid gap-4 lg:grid-cols-2">
+            <div class="bg-white rounded-xl border overflow-x-auto">
+              <div class="px-4 py-2 bg-slate-50 font-bold text-sm flex items-center justify-between">
+                <span>予測タイミング（何分前の予測か）別の誤差</span>
+                <span class="text-xs font-normal text-slate-400">行のボタンで絞り込み</span>
+              </div>
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50 text-slate-500 text-xs">
+                  <tr>
+                    <th class="text-left px-3 py-2">リードタイム</th>
+                    <th class="text-left px-3 py-2">件数</th>
+                    <th class="text-left px-3 py-2">平均誤差(絶対値)</th>
+                    <th class="text-left px-3 py-2 accuracy-threshold-header">的中率</th>
+                  </tr>
+                </thead>
+                <tbody id="accuracy-lead-tbody"></tbody>
+              </table>
+            </div>
+            <div class="bg-white rounded-xl border overflow-x-auto">
+              <div class="px-4 py-2 bg-slate-50 font-bold text-sm flex items-center justify-between">
+                <span>予測タイミング（何停留所前の予測か）別の誤差</span>
+                <span class="text-xs font-normal text-slate-400">行のボタンで絞り込み</span>
+              </div>
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50 text-slate-500 text-xs">
+                  <tr>
+                    <th class="text-left px-3 py-2">停留所数</th>
+                    <th class="text-left px-3 py-2">件数</th>
+                    <th class="text-left px-3 py-2">平均誤差(絶対値)</th>
+                    <th class="text-left px-3 py-2 accuracy-threshold-header">的中率</th>
+                  </tr>
+                </thead>
+                <tbody id="accuracy-stops-before-tbody"></tbody>
+              </table>
+            </div>
+            <div class="bg-white rounded-xl border overflow-x-auto">
+              <div class="px-4 py-2 bg-slate-50 font-bold text-sm">曜日区分別の誤差</div>
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50 text-slate-500 text-xs">
+                  <tr>
+                    <th class="text-left px-3 py-2">曜日区分</th>
+                    <th class="text-left px-3 py-2">件数</th>
+                    <th class="text-left px-3 py-2">平均誤差(絶対値)</th>
+                    <th class="text-left px-3 py-2 accuracy-threshold-header">的中率</th>
+                  </tr>
+                </thead>
+                <tbody id="accuracy-daytype-tbody"></tbody>
+              </table>
+            </div>
+            <div class="bg-white rounded-xl border overflow-x-auto">
+              <div class="px-4 py-2 bg-slate-50 font-bold text-sm">時間帯別の誤差</div>
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50 text-slate-500 text-xs">
+                  <tr>
+                    <th class="text-left px-3 py-2">時間帯</th>
+                    <th class="text-left px-3 py-2">件数</th>
+                    <th class="text-left px-3 py-2">平均誤差(絶対値)</th>
+                    <th class="text-left px-3 py-2 accuracy-threshold-header">的中率</th>
+                  </tr>
+                </thead>
+                <tbody id="accuracy-hour-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-xl border overflow-x-auto">
+            <div class="px-4 py-2 bg-slate-50 font-bold text-sm">路線別の誤差</div>
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500 text-xs">
+                <tr>
+                  <th class="text-left px-3 py-2">路線</th>
+                  <th class="text-left px-3 py-2">件数</th>
+                  <th class="text-left px-3 py-2">平均誤差(絶対値)</th>
+                  <th class="text-left px-3 py-2 accuracy-threshold-header">的中率</th>
+                </tr>
+              </thead>
+              <tbody id="accuracy-route-tbody"></tbody>
+            </table>
+          </div>
+
+          <div class="bg-white rounded-xl border overflow-x-auto">
+            <div class="px-4 py-2 bg-slate-50 font-bold text-sm">誤差の大きい停留所（上位30件）</div>
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500 text-xs">
+                <tr>
+                  <th class="text-left px-3 py-2">路線</th>
+                  <th class="text-left px-3 py-2">停留所</th>
+                  <th class="text-left px-3 py-2">件数</th>
+                  <th class="text-left px-3 py-2">平均誤差(絶対値)</th>
+                  <th class="text-left px-3 py-2">平均誤差(符号あり)</th>
+                  <th class="text-left px-3 py-2 accuracy-threshold-header">的中率</th>
+                </tr>
+              </thead>
+              <tbody id="accuracy-worst-tbody"></tbody>
+            </table>
+          </div>
+
+          <div class="bg-white rounded-xl border overflow-x-auto">
+            <div class="px-4 py-2 bg-slate-50 font-bold text-sm">到着停留所ごとの予測と実績の誤差明細（直近100件）</div>
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500 text-xs">
+                <tr>
+                  <th class="text-left px-3 py-2">路線</th>
+                  <th class="text-left px-3 py-2">停留所</th>
+                  <th class="text-left px-3 py-2">便</th>
+                  <th class="text-left px-3 py-2">根拠</th>
+                  <th class="text-left px-3 py-2">予測時刻</th>
+                  <th class="text-left px-3 py-2">実績時刻</th>
+                  <th class="text-left px-3 py-2">誤差</th>
+                  <th class="text-left px-3 py-2">リードタイム</th>
+                  <th class="text-left px-3 py-2">何停留所前</th>
+                </tr>
+              </thead>
+              <tbody id="accuracy-samples-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 異常アラート -->
+        <section id="section-alerts" class="section hidden space-y-3">
+          <h2 class="text-xl font-bold">異常アラート</h2>
+          <div id="alerts-container" class="space-y-2"></div>
+        </section>
+
+        <!-- GTFSフィード監視 -->
+        <section id="section-gtfs-feeds" class="section hidden space-y-3">
+          <div class="flex items-center justify-between gap-3">
+            <h2 class="text-xl font-bold">GTFSフィード監視</h2>
+            <button id="refresh-gtfs-feeds-btn" class="bg-blue-700 text-white font-bold rounded-lg px-3 py-2 text-sm">更新</button>
+          </div>
+          <div class="bg-white rounded-xl border overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500 text-xs">
+                <tr>
+                  <th class="text-left px-3 py-2">フィード</th>
+                  <th class="text-left px-3 py-2">最終取得時刻</th>
+                  <th class="text-left px-3 py-2">ファイル数</th>
+                  <th class="text-left px-3 py-2">状態</th>
+                  <th class="text-left px-3 py-2">エラー内容</th>
+                  <th class="text-left px-3 py-2"></th>
+                </tr>
+              </thead>
+              <tbody id="gtfs-feeds-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 位置情報フィード監視 -->
+        <section id="section-location-feeds" class="section hidden space-y-3">
+          <div class="flex items-center justify-between gap-3">
+            <h2 class="text-xl font-bold">位置情報フィード監視</h2>
+            <button id="refresh-location-feeds-btn" class="bg-blue-700 text-white font-bold rounded-lg px-3 py-2 text-sm">更新</button>
+          </div>
+          <div class="bg-white rounded-xl border overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500 text-xs">
+                <tr>
+                  <th class="text-left px-3 py-2">フィード</th>
+                  <th class="text-left px-3 py-2">最終取得時刻</th>
+                  <th class="text-left px-3 py-2">状態</th>
+                  <th class="text-left px-3 py-2">直近取得件数</th>
+                  <th class="text-left px-3 py-2">スキップ内訳</th>
+                </tr>
+              </thead>
+              <tbody id="location-feeds-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- API稼働監視 -->
+        <section id="section-api-stats" class="section hidden space-y-3">
+          <div class="flex items-center justify-between gap-3">
+            <h2 class="text-xl font-bold">API稼働監視</h2>
+            <button id="refresh-api-stats-btn" class="bg-blue-700 text-white font-bold rounded-lg px-3 py-2 text-sm">更新</button>
+          </div>
+          <div class="bg-white rounded-xl border overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500 text-xs">
+                <tr>
+                  <th class="text-left px-3 py-2">エンドポイント</th>
+                  <th class="text-left px-3 py-2">アクセス数</th>
+                  <th class="text-left px-3 py-2">エラー率</th>
+                  <th class="text-left px-3 py-2">平均応答時間</th>
+                  <th class="text-left px-3 py-2">最終アクセス</th>
+                </tr>
+              </thead>
+              <tbody id="api-stats-tbody"></tbody>
+            </table>
+          </div>
+          <div class="bg-white rounded-xl border p-4">
+            <h3 class="font-bold text-slate-700 mb-2">直近の失敗（5xx）</h3>
+            <div id="api-stats-errors" class="text-sm"></div>
+          </div>
+        </section>
+
+        <!-- ジョブ監視 -->
+        <section id="section-job-monitor" class="section hidden space-y-3">
+          <h2 class="text-xl font-bold">ジョブ監視</h2>
+          <div class="bg-white rounded-xl border overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500 text-xs">
+                <tr>
+                  <th class="text-left px-3 py-2">ジョブ</th>
+                  <th class="text-left px-3 py-2">最終成功時刻</th>
+                  <th class="text-left px-3 py-2">所要時間</th>
+                  <th class="text-left px-3 py-2">直近の成否</th>
+                  <th class="text-left px-3 py-2">直近エラー</th>
+                </tr>
+              </thead>
+              <tbody id="job-monitor-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- お知らせ編集 -->
+        <section id="section-notices" class="section hidden space-y-4">
+          <h2 class="text-xl font-bold">お知らせ編集</h2>
+          <p class="text-sm text-slate-500">公開画面の表示用テキストを更新できます。</p>
+          <div class="grid gap-4 md:grid-cols-2">
+            <label class="block text-sm font-bold">お知らせ1
+              <textarea id="notice1" rows="3" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
+            </label>
+            <label class="block text-sm font-bold">お知らせ2
+              <textarea id="notice2" rows="3" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
+            </label>
+          </div>
+          <label class="block text-sm font-bold">重要なお知らせ
+            <textarea id="importantNotice" rows="4" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
+          </label>
           <button id="save-btn" class="bg-green-700 text-white font-bold rounded-lg px-4 py-3">保存</button>
-          <a href="/" class="bg-slate-200 text-slate-900 font-bold rounded-lg px-4 py-3">公開画面へ戻る</a>
-        </div>
+        </section>
 
         <!-- 祝日カレンダー -->
-        <div class="border-t pt-5 space-y-4">
+        <section id="section-holidays" class="section hidden space-y-4">
           <div>
-            <h3 class="text-lg font-bold">📅 祝日カレンダー</h3>
+            <h2 class="text-xl font-bold">祝日カレンダー</h2>
             <p class="text-sm text-slate-500">ETAの区間走行時間統計（曜日区分）で「休日」として扱う日付を管理します。国民の祝日は自動投入済みです。</p>
           </div>
           <div class="flex gap-2 flex-wrap items-end">
@@ -72,14 +447,14 @@
             </label>
             <button id="add-holiday-btn" class="bg-slate-800 text-white font-bold rounded-lg px-4 py-2">追加</button>
           </div>
-          <div id="holidays-list" class="text-sm divide-y border rounded-lg overflow-hidden"></div>
-        </div>
+          <div id="holidays-list" class="text-sm divide-y border rounded-lg overflow-hidden bg-white"></div>
+        </section>
 
         <!-- バス位置情報モニター -->
-        <div class="border-t pt-5 space-y-4">
+        <section id="section-positions" class="section hidden space-y-4">
           <div class="flex items-center justify-between gap-3">
             <div>
-              <h3 class="text-lg font-bold">🚌 バス位置情報モニター</h3>
+              <h2 class="text-xl font-bold">バス位置情報モニター</h2>
               <p class="text-sm text-slate-500">直近3分以内にGPSデータを受信したバスの位置を表示します。</p>
             </div>
             <button id="refresh-positions-btn" class="bg-blue-700 text-white font-bold rounded-lg px-4 py-2 flex items-center gap-2">
@@ -91,47 +466,89 @@
           </div>
           <div id="positions-status" class="text-sm font-bold text-slate-500">「更新」ボタンを押して情報を取得してください</div>
           <div id="positions-container" class="space-y-3"></div>
-        </div>
+        </section>
 
-        <!--
-          「外部ID ↔ GTFS路線ID 対応表」の編集セクションは削除した。
-          対応は backend/src/config/routeExternalIdMapping.js（コード）で管理する。
-        -->
-
-        <div class="border-t pt-5 space-y-4">
-          <div class="flex items-center gap-3 flex-wrap">
-            <h3 class="text-lg font-bold">路線データ編集</h3>
-            <select id="route-edit-select" class="border rounded-lg px-3 py-2"></select>
-            <button id="load-route-data-btn" class="bg-slate-800 text-white font-bold rounded-lg px-3 py-2">読み込み</button>
+        <!-- サイト閲覧数 -->
+        <section id="section-viewers" class="section hidden space-y-4">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h2 class="text-xl font-bold">サイト閲覧数</h2>
+              <p class="text-sm text-slate-500">直近90秒以内にアクセスがあった利用者数の目安です。しきい値以上になると利用者側の自動更新が一時的にOFFになります。</p>
+            </div>
+            <button id="refresh-viewers-btn" class="bg-blue-700 text-white font-bold rounded-lg px-4 py-2">更新</button>
           </div>
-          <div id="route-data-editor" class="space-y-4"></div>
-          <button id="save-route-data-btn" class="bg-emerald-700 text-white font-bold rounded-lg px-4 py-3">停留所座標・時刻表を保存</button>
-        </div>
+          <div id="viewers-status" class="text-sm font-bold text-slate-500">読み込み中...</div>
+        </section>
 
-        <div id="status" class="hidden rounded-lg px-4 py-3 text-sm font-bold"></div>
+        <!-- 運行実績ダウンロード -->
+        <section id="section-operation-records" class="section hidden space-y-4">
+          <div>
+            <h2 class="text-xl font-bold">運行実績ダウンロード</h2>
+            <p class="text-sm text-slate-500">確定済みの運行実績（便・停留所ごとの定刻/実績時刻・遅延分）をCSV形式でダウンロードします。</p>
+          </div>
+          <div class="bg-white rounded-xl border p-4 flex flex-wrap gap-3 items-end">
+            <label class="text-sm font-bold">開始日
+              <input id="records-from" type="date" class="mt-1 border rounded-lg px-3 py-2 block" />
+            </label>
+            <label class="text-sm font-bold">終了日
+              <input id="records-to" type="date" class="mt-1 border rounded-lg px-3 py-2 block" />
+            </label>
+            <label class="text-sm font-bold">路線（任意）
+              <select id="records-route" class="mt-1 border rounded-lg px-3 py-2 block min-w-[10rem]">
+                <option value="">すべて</option>
+              </select>
+            </label>
+            <button id="download-records-btn" class="bg-green-700 text-white font-bold rounded-lg px-4 py-2">CSVダウンロード</button>
+          </div>
+          <div id="records-status" class="text-sm text-slate-500"></div>
+        </section>
       </div>
-    </div>
+    </main>
   </div>
 
   <script>
-    const state = {
-      token: null,
-      routes: [],
-      routeData: null,
-    };
+    const state = { token: null };
 
-    const loginCard = document.getElementById('login-card');
-    const editorCard = document.getElementById('editor-card');
+    const loginCardWrap = document.getElementById('login-card-wrap');
+    const appShell = document.getElementById('app-shell');
     const statusBox = document.getElementById('status');
-    const routeEditSelect = document.getElementById('route-edit-select');
-    const routeDataEditor = document.getElementById('route-data-editor');
+    const loginStatusBox = document.getElementById('login-status');
     const positionsContainer = document.getElementById('positions-container');
     const positionsStatus = document.getElementById('positions-status');
+    const viewersStatus = document.getElementById('viewers-status');
+
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function fmtDateTime(value) {
+      if (!value) return '—';
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return '—';
+      return d.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+    }
+
+    function fmtDuration(ms) {
+      if (ms === null || ms === undefined) return '—';
+      if (ms < 1000) return `${ms}ms`;
+      return `${(ms / 1000).toFixed(1)}秒`;
+    }
 
     function showStatus(message, tone = 'info') {
       statusBox.textContent = message;
       statusBox.className = `rounded-lg px-4 py-3 text-sm font-bold ${tone === 'error' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`;
       statusBox.classList.remove('hidden');
+    }
+
+    function showLoginStatus(message, tone = 'info') {
+      loginStatusBox.textContent = message;
+      loginStatusBox.className = `mt-4 rounded-lg px-4 py-3 text-sm font-bold ${tone === 'error' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`;
+      loginStatusBox.classList.remove('hidden');
     }
 
     function setAuthToken(username, password) {
@@ -141,13 +558,15 @@
     function clearAuthToken() {
       state.token = null;
       localStorage.removeItem('adminToken');
-      loginCard.classList.remove('hidden');
-      editorCard.classList.add('hidden');
+      stopAllPollers();
+      appShell.classList.add('hidden');
+      loginCardWrap.classList.remove('hidden');
     }
 
     function applyEditorState() {
-      loginCard.classList.add('hidden');
-      editorCard.classList.remove('hidden');
+      loginCardWrap.classList.add('hidden');
+      appShell.classList.remove('hidden');
+      showSection('dashboard');
     }
 
     async function api(path, options = {}) {
@@ -155,16 +574,9 @@
         'Content-Type': 'application/json',
         ...(options.headers || {}),
       };
+      if (state.token) headers['Authorization'] = `Basic ${state.token}`;
 
-      if (state.token) {
-        headers['Authorization'] = `Basic ${state.token}`;
-      }
-
-      const response = await fetch(path, {
-        ...options,
-        headers,
-      });
-
+      const response = await fetch(path, { ...options, headers });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(data.error || '処理に失敗しました');
@@ -172,164 +584,674 @@
       return data;
     }
 
-    function renderRouteOptions() {
-      routeEditSelect.innerHTML = '';
-      state.routes.forEach((route) => {
-        const option = document.createElement('option');
-        option.value = route.id;
-        option.textContent = `${route.id} ${route.name}`;
-        routeEditSelect.appendChild(option);
-      });
-    }
-
-    function renderRouteDataEditor(data) {
-      state.routeData = data;
-      routeDataEditor.innerHTML = '';
-
-      const stopBox = document.createElement('div');
-      stopBox.className = 'space-y-2';
-      stopBox.innerHTML = '<h4 class="font-bold text-slate-700">バス停座標</h4>';
-
-      data.stops.forEach((stop) => {
-        const row = document.createElement('div');
-        row.className = 'grid gap-2 md:grid-cols-5 p-3 rounded-xl border bg-slate-50';
-        row.innerHTML = `
-          <div class="md:col-span-2">
-            <div class="text-xs font-bold text-slate-500">停留所名</div>
-            <div class="font-bold">${stop.name}</div>
-          </div>
-          <label class="block text-sm font-bold">緯度
-            <input type="number" step="0.000001" data-stop-id="${stop.id}" data-stop-field="lat" value="${stop.lat}" class="mt-1 w-full border rounded-lg px-2 py-1" />
-          </label>
-          <label class="block text-sm font-bold">経度
-            <input type="number" step="0.000001" data-stop-id="${stop.id}" data-stop-field="lon" value="${stop.lon}" class="mt-1 w-full border rounded-lg px-2 py-1" />
-          </label>
-          <div class="flex items-end">
-            <span class="text-xs text-slate-500">順序 ${stop.seqOrder}</span>
-          </div>
-        `;
-        stopBox.appendChild(row);
-      });
-
-      const timetableBox = document.createElement('div');
-      timetableBox.className = 'space-y-3';
-      timetableBox.innerHTML = '<h4 class="font-bold text-slate-700">時刻表</h4>';
-
-      data.timetable.forEach((trip) => {
-        const card = document.createElement('div');
-        card.className = 'border rounded-xl p-3 bg-white';
-        card.innerHTML = `<div class="font-bold text-blue-800 mb-2">便 ${trip.tripIndex + 1}</div>`;
-
-        trip.stops.forEach((stop) => {
-          const row = document.createElement('div');
-          row.className = 'grid gap-2 md:grid-cols-3 items-center py-2 border-b last:border-b-0';
-          row.innerHTML = `
-            <div class="font-bold">${stop.stopName}</div>
-            <div class="text-xs text-slate-500">seq ${stop.seqOrder}</div>
-            <label class="block text-sm font-bold">時刻
-              <input type="time" data-trip-id="${trip.tripId}" data-stop-id="${stop.stopId}" data-scheduled-time="${stop.scheduledTime || ''}" value="${stop.scheduledTime || ''}" class="mt-1 w-full border rounded-lg px-2 py-1" />
-            </label>
-          `;
-          card.appendChild(row);
+    // 路線一覧（id -> 日本語名）。複数タブ（予測精度の監視・運行実績ダウンロード）で
+    // 共有するため1回だけ取得してキャッシュする。
+    let cachedRoutesPromise = null;
+    function getRoutesList() {
+      if (!cachedRoutesPromise) {
+        cachedRoutesPromise = api('/api/routes').then((data) => data.routes || []).catch((err) => {
+          cachedRoutesPromise = null; // 失敗時は次回呼び出しで再取得できるようキャッシュを空にする
+          throw err;
         });
-
-        timetableBox.appendChild(card);
-      });
-
-      routeDataEditor.appendChild(stopBox);
-      routeDataEditor.appendChild(timetableBox);
+      }
+      return cachedRoutesPromise;
     }
 
-    // バス位置情報の表示
-    function renderBusPositions(data) {
-      positionsContainer.innerHTML = '';
-      
-      if (!data || !data.positions || data.positions.length === 0) {
-        positionsContainer.innerHTML = `
-          <div class="bg-yellow-50 border-2 border-yellow-200 rounded-xl p-4 text-center">
-            <p class="font-bold text-yellow-800">直近3分以内のバス位置情報はありません。</p>
-            <p class="text-sm text-yellow-600 mt-1">位置情報の取得間隔やフィルタ設定を確認してください。</p>
-          </div>
-        `;
+    // ==========================================================
+    // セクション切替・ポーリング管理
+    // ==========================================================
+    const POLL_INTERVALS_MS = {
+      dashboard: 15000,
+      alerts: 15000,
+      viewers: 15000,
+      assignment: 30000,
+      pass: 30000,
+      'eta-basis': 30000,
+      'job-monitor': 30000
+    };
+
+    const SECTION_LOADERS = {
+      dashboard: loadDashboard,
+      assignment: loadAssignmentMonitor,
+      pass: loadPassStatus,
+      'eta-basis': loadEtaBasis,
+      'prediction-accuracy': loadPredictionAccuracy,
+      alerts: loadAlerts,
+      'gtfs-feeds': loadGtfsFeeds,
+      'location-feeds': loadLocationFeeds,
+      'api-stats': loadApiStats,
+      'job-monitor': loadJobMonitor,
+      notices: loadSettings,
+      holidays: loadHolidays,
+      positions: () => {}, // 手動更新のみ（初期状態のまま）
+      viewers: loadViewerStats,
+      'operation-records': initOperationRecords
+    };
+
+    let activePollTimer = null;
+
+    function stopAllPollers() {
+      if (activePollTimer) {
+        clearInterval(activePollTimer);
+        activePollTimer = null;
+      }
+    }
+
+    function startPollerFor(id) {
+      const intervalMs = POLL_INTERVALS_MS[id];
+      if (!intervalMs) return;
+      activePollTimer = setInterval(() => {
+        const loader = SECTION_LOADERS[id];
+        if (loader) loader().catch((err) => console.error(`[admin] ${id} 自動更新エラー:`, err.message));
+      }, intervalMs);
+    }
+
+    function showSection(id) {
+      document.querySelectorAll('.section').forEach((el) => el.classList.add('hidden'));
+      const target = document.getElementById(`section-${id}`);
+      if (target) target.classList.remove('hidden');
+
+      document.querySelectorAll('[data-section]').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.section === id);
+      });
+
+      stopAllPollers();
+      const loader = SECTION_LOADERS[id];
+      if (loader) loader().catch((err) => showStatus(err.message, 'error'));
+      startPollerFor(id);
+    }
+
+    document.querySelectorAll('[data-section]').forEach((btn) => {
+      btn.addEventListener('click', () => showSection(btn.dataset.section));
+    });
+
+    // 異常アラートの件数をサイドバーのバッジに反映（どのセクションを見ていても更新されるよう軽量ポーリング）
+    async function refreshAlertsBadge() {
+      try {
+        const data = await api('/api/admin/alerts');
+        const badge = document.getElementById('alerts-nav-badge');
+        const total = data.alerts.length;
+        if (total > 0) {
+          badge.textContent = total > 99 ? '99+' : String(total);
+          badge.classList.remove('hidden');
+        } else {
+          badge.classList.add('hidden');
+        }
+      } catch (err) {
+        // バッジ更新の失敗はサイレントに無視（メイン機能ではないため）
+      }
+    }
+    let badgeTimer = null;
+
+    // ==========================================================
+    // 運行ダッシュボード
+    // ==========================================================
+    async function loadDashboard() {
+      const data = await api('/api/admin/dashboard-summary');
+      const tiles = [
+        { label: '稼働車両数', value: data.activeVehicles, tone: 'blue' },
+        { label: '担当未確定便数', value: data.unassignedTripsCount, tone: data.unassignedTripsCount > 0 ? 'amber' : 'blue' },
+        { label: '遅延便数', value: data.delayedTripsCount, tone: data.delayedTripsCount > 0 ? 'amber' : 'blue' },
+        { label: 'GPS未受信車両数', value: data.staleGpsVehicleCount, tone: data.staleGpsVehicleCount > 0 ? 'red' : 'blue' },
+        { label: 'GTFSフィード数', value: data.gtfsFeeds.length, tone: 'blue' }
+      ];
+      const toneClass = {
+        blue: 'bg-blue-50 text-blue-800 border-blue-200',
+        amber: 'bg-amber-50 text-amber-800 border-amber-200',
+        red: 'bg-red-50 text-red-800 border-red-200'
+      };
+      document.getElementById('dashboard-tiles').innerHTML = tiles.map((t) => `
+        <div class="rounded-xl border-2 p-4 ${toneClass[t.tone]}">
+          <p class="text-xs font-bold opacity-70">${escapeHtml(t.label)}</p>
+          <p class="text-3xl font-black mt-1">${t.value}</p>
+        </div>
+      `).join('');
+
+      document.getElementById('dashboard-gtfs').innerHTML = data.gtfsFeeds.map((f) => `
+        <div class="flex items-center justify-between py-2 border-b last:border-b-0">
+          <span class="font-bold">${escapeHtml(f.name)}</span>
+          <span class="flex items-center gap-3 text-xs">
+            <span class="text-slate-400">最終取得: ${fmtDateTime(f.lastFetchedAt)}</span>
+            <span class="px-2 py-0.5 rounded-full font-bold ${f.lastStatus === 'error' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}">${f.lastStatus === 'error' ? 'エラー' : '正常'}</span>
+          </span>
+        </div>
+      `).join('') || '<p class="text-slate-400">GTFSフィードが設定されていません。</p>';
+    }
+
+    // ==========================================================
+    // 便の割当監視
+    // ==========================================================
+    const OUTCOME_BADGE = {
+      pending: '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-500">未評価</span>',
+      assigned: '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">担当あり</span>',
+      success: '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">正常終了</span>',
+      unassigned: '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">未割当</span>'
+    };
+
+    async function loadAssignmentMonitor() {
+      const data = await api('/api/admin/assignment-monitor');
+      const tbody = document.getElementById('assignment-tbody');
+      if (data.trips.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="px-3 py-6 text-center text-slate-400">本日の便がありません。</td></tr>';
+      } else {
+        tbody.innerHTML = data.trips.map((t) => `
+          <tr class="border-t">
+            <td class="px-3 py-2 whitespace-nowrap">
+              <div class="font-bold">${escapeHtml(t.startTime || '')}発</div>
+              <div class="text-xs text-slate-400">${escapeHtml(t.headsign || '')}</div>
+            </td>
+            <td class="px-3 py-2">${OUTCOME_BADGE[t.outcome] || ''}</td>
+            <td class="px-3 py-2">${t.assigned ? `車両 ${escapeHtml(t.assigned.carId)}` : '<span class="text-slate-300">—</span>'}</td>
+            <td class="px-3 py-2">${t.assigned ? `${Math.round(t.assigned.distanceMeters)}m` : '<span class="text-slate-300">—</span>'}</td>
+            <td class="px-3 py-2 text-xs">${t.assigned ? fmtDateTime(t.assigned.becameAssignedAt) : '<span class="text-slate-300">—</span>'}</td>
+            <td class="px-3 py-2">${
+              t.candidates.length > 0
+                ? t.candidates.map((c) => `<span class="inline-block mr-1 mb-1 px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-600">車両${escapeHtml(c.carId)}(${Math.round(c.distanceMeters)}m)</span>`).join('')
+                : '<span class="text-slate-300">—</span>'
+            }</td>
+            <td class="px-3 py-2 text-xs text-slate-500">${escapeHtml(t.reason || '')}</td>
+          </tr>
+        `).join('');
+      }
+      document.getElementById('assignment-updated').textContent = `更新: ${fmtDateTime(new Date().toISOString())}`;
+    }
+
+    // ==========================================================
+    // 通過判定
+    // ==========================================================
+    const PASS_STATUS_BADGE = {
+      '到着済': '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">到着済</span>',
+      '通過': '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700">通過</span>',
+      '': '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-500">未定</span>'
+    };
+
+    async function loadPassStatus() {
+      const data = await api('/api/admin/pass-status');
+      const container = document.getElementById('pass-container');
+      if (data.rows.length === 0) {
+        container.innerHTML = '<div class="bg-white rounded-xl border p-4 text-center text-slate-400">現在アクティブな割り当てがありません。</div>';
         return;
       }
 
-      const now = new Date(data.fetchedAt);
-      const fetchedAtStr = now.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+      const byTrip = new Map();
+      for (const row of data.rows) {
+        const key = `${row.tripId}:${row.assignmentId}`;
+        if (!byTrip.has(key)) byTrip.set(key, { ...row, stops: [] });
+        byTrip.get(key).stops.push(row);
+      }
 
-      data.positions.forEach((pos) => {
-        const gpsDate = new Date(pos.gpsTimeTs);
-        const diffSec = Math.floor((now.getTime() - gpsDate.getTime()) / 1000);
-        const freshnessLabel = diffSec < 60 ? `${diffSec}秒前` : Math.floor(diffSec / 60) + '分前';
-        const freshnessColor = diffSec < 60 ? 'text-green-600 bg-green-50 border-green-200' : 'text-yellow-700 bg-yellow-50 border-yellow-200';
-        
-        const card = document.createElement('div');
-        card.className = 'border-2 border-slate-200 rounded-xl p-4 bg-white hover:shadow-md transition-shadow';
-        card.innerHTML = `
-          <div class="flex justify-between items-start mb-3">
-            <div class="flex items-center gap-2">
-              <span class="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center text-blue-700 font-bold">${escapeHtml(pos.carId.slice(-2))}</span>
-              <div>
-                <span class="font-bold text-lg text-slate-900">車両 ${escapeHtml(pos.carId)}</span>
-                <span class="text-xs px-2 py-0.5 rounded-full border ${freshnessColor} font-bold ml-2">${freshnessLabel}</span>
-              </div>
-            </div>
-            <a href="https://www.google.com/maps?q=${pos.lat},${pos.lon}" target="_blank" 
-               class="text-blue-600 hover:text-blue-800 text-sm font-bold flex items-center gap-1">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path>
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path>
-              </svg>
-              地図
-            </a>
+      container.innerHTML = Array.from(byTrip.values()).map((trip) => `
+        <div class="bg-white rounded-xl border overflow-hidden">
+          <div class="px-4 py-2 bg-slate-50 flex items-center justify-between">
+            <span class="font-bold">${escapeHtml(trip.startTime || '')}発 ${escapeHtml(trip.headsign || '')}</span>
+            <span class="text-xs px-2 py-0.5 rounded-full font-bold ${trip.role === 'assigned' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'}">
+              車両${escapeHtml(trip.carId)}（${trip.role === 'assigned' ? '担当' : '候補'}）
+            </span>
           </div>
-          <div class="grid grid-cols-2 gap-3 text-sm">
-            <div>
-              <p class="text-slate-400 text-xs font-bold">路線</p>
-              <p class="font-bold">${escapeHtml(pos.routeName)}${pos.directionId === 0 ? '（下り）' : '（上り）'}</p>
-            </div>
-            <div>
-              <p class="text-slate-400 text-xs font-bold">GPS時刻</p>
-              <p class="font-bold">${escapeHtml(pos.gpsTime)}</p>
-            </div>
-            <div class="col-span-2">
-              <p class="text-slate-400 text-xs font-bold">位置</p>
-              <p class="font-bold">${pos.address ? escapeHtml(pos.address) : '住所取得中...'}</p>
-              <p class="text-xs text-slate-400 mt-0.5">${pos.lat}, ${pos.lon}</p>
-            </div>
-          </div>
-        `;
-        positionsContainer.appendChild(card);
-      });
+          <table class="w-full text-sm">
+            <tbody>
+              ${trip.stops.map((s) => `
+                <tr class="border-t">
+                  <td class="px-4 py-1.5">${escapeHtml(s.stopName)}</td>
+                  <td class="px-4 py-1.5">${PASS_STATUS_BADGE[s.status] || escapeHtml(s.status)}</td>
+                  <td class="px-4 py-1.5 text-xs text-slate-500">${escapeHtml(s.actualTime || '')}</td>
+                  <td class="px-4 py-1.5 text-xs text-slate-500">${s.delayMinutes !== null && s.delayMinutes !== undefined ? `${s.delayMinutes}分` : ''}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `).join('');
     }
 
-    async function loadBusPositions() {
-      const icon = document.getElementById('pos-refresh-icon');
-      icon.classList.add('animate-spin');
-      positionsStatus.textContent = '位置情報を取得中...';
-      positionsStatus.className = 'text-sm font-bold text-blue-600';
+    // ==========================================================
+    // ETA予測根拠
+    // ==========================================================
+    const BASIS_CATEGORY_STYLE = {
+      schedule: 'bg-slate-100 text-slate-600',
+      historical: 'bg-indigo-100 text-indigo-700',
+      pace: 'bg-purple-100 text-purple-700',
+      fallback: 'bg-amber-100 text-amber-700',
+      actual: 'bg-green-100 text-green-700',
+      unknown: 'bg-slate-100 text-slate-500'
+    };
 
-      try {
-        const data = await api('/api/admin/bus-positions');
-        renderBusPositions(data);
-        const now = new Date(data.fetchedAt);
-        const fetchedAtStr = now.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
-        positionsStatus.textContent = `✓ ${data.count} 台のバスを検出（取得時刻: ${fetchedAtStr}）`;
-        positionsStatus.className = 'text-sm font-bold text-green-700';
-      } catch (err) {
-        positionsContainer.innerHTML = `
-          <div class="bg-red-50 border-2 border-red-200 rounded-xl p-4">
-            <p class="font-bold text-red-800">位置情報の取得に失敗しました。</p>
-            <p class="text-sm text-red-600 mt-1">${escapeHtml(err.message)}</p>
+    async function loadEtaBasis() {
+      const data = await api('/api/admin/eta-basis');
+
+      const legend = document.getElementById('eta-basis-legend');
+      legend.innerHTML = Object.values(data.sourceLegend || {}).map((info) => `
+        <span class="px-2 py-1 rounded-full font-bold ${BASIS_CATEGORY_STYLE[info.category] || BASIS_CATEGORY_STYLE.unknown}">${escapeHtml(info.label)}</span>
+      `).join('');
+
+      const container = document.getElementById('eta-basis-container');
+      if (data.rows.length === 0) {
+        container.innerHTML = '<div class="bg-white rounded-xl border p-4 text-center text-slate-400">現在アクティブな割り当てがありません。</div>';
+        document.getElementById('eta-basis-updated').textContent = `更新: ${fmtDateTime(new Date().toISOString())}`;
+        return;
+      }
+
+      const byTrip = new Map();
+      for (const row of data.rows) {
+        const key = `${row.tripId}:${row.assignmentId}`;
+        if (!byTrip.has(key)) byTrip.set(key, { ...row, stops: [] });
+        byTrip.get(key).stops.push(row);
+      }
+
+      container.innerHTML = Array.from(byTrip.values()).map((trip) => `
+        <div class="bg-white rounded-xl border overflow-hidden">
+          <div class="px-4 py-2 bg-slate-50 flex items-center justify-between">
+            <span class="font-bold">${escapeHtml(trip.startTime || '')}発 ${escapeHtml(trip.headsign || '')}</span>
+            <span class="text-xs px-2 py-0.5 rounded-full font-bold ${trip.role === 'assigned' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'}">
+              車両${escapeHtml(trip.carId)}（${trip.role === 'assigned' ? '担当' : '候補'}）
+            </span>
           </div>
-        `;
-        positionsStatus.textContent = 'エラーが発生しました。もう一度お試しください。';
-        positionsStatus.className = 'text-sm font-bold text-red-600';
-      } finally {
-        setTimeout(() => icon.classList.remove('animate-spin'), 500);
+          <table class="w-full text-sm">
+            <tbody>
+              ${trip.stops.map((s) => `
+                <tr class="border-t">
+                  <td class="px-4 py-1.5">${escapeHtml(s.stopName)}</td>
+                  <td class="px-4 py-1.5 text-xs text-slate-500">定刻 ${escapeHtml(s.scheduledTime || '—')}</td>
+                  <td class="px-4 py-1.5 text-xs text-slate-500">予測 ${escapeHtml(s.predictedTime || '—')}${s.predictedDelayMinutes ? `（${s.predictedDelayMinutes}分遅れ）` : ''}</td>
+                  <td class="px-4 py-1.5">
+                    <span class="px-2 py-0.5 rounded-full text-xs font-bold ${BASIS_CATEGORY_STYLE[s.basisCategory] || BASIS_CATEGORY_STYLE.unknown}">${escapeHtml(s.basisLabel)}</span>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `).join('');
+      document.getElementById('eta-basis-updated').textContent = `更新: ${fmtDateTime(new Date().toISOString())}`;
+    }
+
+    // ==========================================================
+    // 予測精度の監視
+    // ==========================================================
+    const DAY_TYPE_LABEL = { weekday: '平日', saturday: '土曜', holiday: '休日' };
+
+    // 行をクリックすると「予測タイミング（何分前／何停留所前）」の絞り込みセレクトに反映する
+    function accuracyRow(label, row, drilldown) {
+      const drilldownAttr = drilldown ? `data-drill-field="${escapeHtml(drilldown.field)}" data-drill-value="${escapeHtml(drilldown.value)}"` : '';
+      const labelCell = drilldown
+        ? `<button class="font-bold text-blue-700 hover:underline accuracy-drill-btn" ${drilldownAttr}>${escapeHtml(label)}</button>`
+        : `<span class="font-bold">${escapeHtml(label)}</span>`;
+      if (!row || row.sampleCount === 0) {
+        return `<tr class="border-t"><td class="px-3 py-2">${labelCell}</td><td class="px-3 py-2 text-slate-300" colspan="3">データなし</td></tr>`;
+      }
+      return `
+        <tr class="border-t">
+          <td class="px-3 py-2">${labelCell}</td>
+          <td class="px-3 py-2">${row.sampleCount}</td>
+          <td class="px-3 py-2">${row.meanAbsErrorMinutes}分（${row.meanErrorMinutes >= 0 ? '+' : ''}${row.meanErrorMinutes}分）</td>
+          <td class="px-3 py-2">${row.withinThresholdRate}%</td>
+        </tr>
+      `;
+    }
+
+    let accuracyRoutesLoaded = false;
+    async function ensureAccuracyRoutesLoaded() {
+      if (accuracyRoutesLoaded) return;
+      accuracyRoutesLoaded = true;
+      try {
+        const routes = await getRoutesList();
+        const select = document.getElementById('accuracy-route');
+        routes.forEach((r) => {
+          const opt = document.createElement('option');
+          opt.value = r.id;
+          opt.textContent = r.name || r.id;
+          select.appendChild(opt);
+        });
+      } catch (err) {
+        accuracyRoutesLoaded = false; // 失敗時は次回の表示で再試行できるようにする
+        // 路線一覧の取得に失敗しても「すべて」での集計は行えるため握りつぶす
       }
     }
 
+    function currentAccuracyFilters() {
+      return {
+        days: document.getElementById('accuracy-days').value,
+        routeId: document.getElementById('accuracy-route').value,
+        thresholdMinutes: document.getElementById('accuracy-threshold').value,
+        leadBucket: document.getElementById('accuracy-lead').value,
+        stopsBeforeBucket: document.getElementById('accuracy-stops-before').value
+      };
+    }
+
+    async function loadPredictionAccuracy() {
+      await ensureAccuracyRoutesLoaded();
+      const f = currentAccuracyFilters();
+      const params = new URLSearchParams({ days: f.days, thresholdMinutes: f.thresholdMinutes });
+      if (f.routeId) params.set('routeId', f.routeId);
+      if (f.leadBucket) params.set('leadBucket', f.leadBucket);
+      if (f.stopsBeforeBucket) params.set('stopsBeforeBucket', f.stopsBeforeBucket);
+      const data = await api(`/api/admin/prediction-accuracy?${params.toString()}`);
+
+      document.querySelectorAll('.accuracy-threshold-header').forEach((el) => {
+        el.textContent = `的中率(±${data.thresholdMinutes}分)`;
+      });
+
+      const overall = data.overall;
+      const tiles = [
+        { label: 'サンプル数（現在の絞り込み）', value: overall.sampleCount ?? 0 },
+        { label: '平均誤差(絶対値)', value: overall.meanAbsErrorMinutes !== null ? `${overall.meanAbsErrorMinutes}分` : '—' },
+        { label: '平均誤差(符号あり・+は遅め予測)', value: overall.meanErrorMinutes !== null ? `${overall.meanErrorMinutes >= 0 ? '+' : ''}${overall.meanErrorMinutes}分` : '—' },
+        { label: `的中率（±${data.thresholdMinutes}分以内）`, value: overall.withinThresholdRate !== null ? `${overall.withinThresholdRate}%` : '—' }
+      ];
+      document.getElementById('accuracy-summary').innerHTML = tiles.map((t) => `
+        <div class="rounded-xl border-2 p-4 bg-blue-50 text-blue-800 border-blue-200">
+          <p class="text-xs font-bold opacity-70">${escapeHtml(t.label)}</p>
+          <p class="text-2xl font-black mt-1">${t.value}</p>
+        </div>
+      `).join('');
+
+      document.getElementById('accuracy-lead-tbody').innerHTML = data.byLeadTime.length
+        ? data.byLeadTime.map((r) => accuracyRow(r.leadBucket, r, { field: 'lead', value: r.leadBucket })).join('')
+        : '<tr><td colspan="4" class="px-3 py-6 text-center text-slate-400">データがありません。</td></tr>';
+
+      document.getElementById('accuracy-stops-before-tbody').innerHTML = data.byStopsBefore.length
+        ? data.byStopsBefore.map((r) => accuracyRow(r.stopsBeforeBucket, r, { field: 'stopsBefore', value: r.stopsBeforeBucket })).join('')
+        : '<tr><td colspan="4" class="px-3 py-6 text-center text-slate-400">データがありません（対応版で記録された予測がまだありません）。</td></tr>';
+
+      document.getElementById('accuracy-daytype-tbody').innerHTML = data.byDayType.length
+        ? data.byDayType.map((r) => accuracyRow(DAY_TYPE_LABEL[r.dayType] || r.dayType, r)).join('')
+        : '<tr><td colspan="4" class="px-3 py-6 text-center text-slate-400">データがありません。</td></tr>';
+
+      document.getElementById('accuracy-route-tbody').innerHTML = data.byRoute.length
+        ? data.byRoute.map((r) => accuracyRow(r.routeName || r.routeId, r)).join('')
+        : '<tr><td colspan="4" class="px-3 py-6 text-center text-slate-400">データがありません。</td></tr>';
+
+      document.getElementById('accuracy-hour-tbody').innerHTML = data.byHour.length
+        ? data.byHour.map((r) => accuracyRow(`${r.hour}時台`, r)).join('')
+        : '<tr><td colspan="4" class="px-3 py-6 text-center text-slate-400">データがありません。</td></tr>';
+
+      const worstTbody = document.getElementById('accuracy-worst-tbody');
+      worstTbody.innerHTML = data.worstStops.length
+        ? data.worstStops.map((r) => `
+            <tr class="border-t">
+              <td class="px-3 py-2">${escapeHtml(r.routeName || r.routeId)}</td>
+              <td class="px-3 py-2 font-bold">${escapeHtml(r.stopName)}</td>
+              <td class="px-3 py-2">${r.sampleCount}</td>
+              <td class="px-3 py-2">${r.meanAbsErrorMinutes}分</td>
+              <td class="px-3 py-2">${r.meanErrorMinutes >= 0 ? '+' : ''}${r.meanErrorMinutes}分</td>
+              <td class="px-3 py-2">${r.withinThresholdRate}%</td>
+            </tr>
+          `).join('')
+        : '<tr><td colspan="6" class="px-3 py-6 text-center text-slate-400">データがありません（実績が確定した便がまだありません）。</td></tr>';
+
+      const samplesTbody = document.getElementById('accuracy-samples-tbody');
+      samplesTbody.innerHTML = data.samples.length
+        ? data.samples.map((s) => `
+            <tr class="border-t">
+              <td class="px-3 py-2">${escapeHtml(s.routeName || s.routeId)}</td>
+              <td class="px-3 py-2 font-bold">${escapeHtml(s.stopName)}</td>
+              <td class="px-3 py-2 text-xs text-slate-500">${escapeHtml(s.startTime || '')}発</td>
+              <td class="px-3 py-2 text-xs">${escapeHtml(s.basisLabel)}</td>
+              <td class="px-3 py-2 text-xs">${escapeHtml(s.predictedTime || '')}</td>
+              <td class="px-3 py-2 text-xs">${escapeHtml(s.actualTime || '')}</td>
+              <td class="px-3 py-2 ${Math.abs(s.errorMinutes) > data.thresholdMinutes ? 'text-red-600 font-bold' : ''}">${s.errorMinutes >= 0 ? '+' : ''}${s.errorMinutes}分</td>
+              <td class="px-3 py-2 text-xs text-slate-500">${s.leadMinutes}分前</td>
+              <td class="px-3 py-2 text-xs text-slate-500">${s.stopsBefore !== null && s.stopsBefore !== undefined ? `${s.stopsBefore}停留所前` : '—'}</td>
+            </tr>
+          `).join('')
+        : '<tr><td colspan="9" class="px-3 py-6 text-center text-slate-400">データがありません。</td></tr>';
+
+      document.querySelectorAll('.accuracy-drill-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const field = btn.dataset.drillField;
+          const value = btn.dataset.drillValue;
+          const selectId = field === 'lead' ? 'accuracy-lead' : 'accuracy-stops-before';
+          const select = document.getElementById(selectId);
+          select.value = select.value === value ? '' : value; // 同じ行を再クリックしたら解除
+          loadPredictionAccuracy().catch((err) => showStatus(err.message, 'error'));
+        });
+      });
+    }
+
+    ['accuracy-days', 'accuracy-route', 'accuracy-threshold', 'accuracy-lead', 'accuracy-stops-before'].forEach((id) => {
+      document.getElementById(id).addEventListener('change', () => loadPredictionAccuracy().catch((err) => showStatus(err.message, 'error')));
+    });
+    document.getElementById('refresh-accuracy-btn').addEventListener('click', () => loadPredictionAccuracy().catch((err) => showStatus(err.message, 'error')));
+    document.getElementById('clear-accuracy-filter-btn').addEventListener('click', () => {
+      document.getElementById('accuracy-lead').value = '';
+      document.getElementById('accuracy-stops-before').value = '';
+      document.getElementById('accuracy-route').value = '';
+      loadPredictionAccuracy().catch((err) => showStatus(err.message, 'error'));
+    });
+
+    // ==========================================================
+    // 運行実績ダウンロード
+    // ==========================================================
+    let recordsRoutesLoaded = false;
+
+    async function initOperationRecords() {
+      const fromInput = document.getElementById('records-from');
+      const toInput = document.getElementById('records-to');
+      const todayStr = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' }); // "YYYY-MM-DD"
+      if (!fromInput.value) fromInput.value = todayStr;
+      if (!toInput.value) toInput.value = todayStr;
+
+      if (!recordsRoutesLoaded) {
+        recordsRoutesLoaded = true;
+        try {
+          const routes = await getRoutesList();
+          const select = document.getElementById('records-route');
+          routes.forEach((r) => {
+            const opt = document.createElement('option');
+            opt.value = r.id;
+            opt.textContent = r.name || r.id;
+            select.appendChild(opt);
+          });
+        } catch (err) {
+          recordsRoutesLoaded = false; // 失敗時は次回の表示で再試行できるようにする
+          // 路線一覧の取得に失敗してもダウンロード自体（全路線対象）は行えるため握りつぶす
+        }
+      }
+    }
+
+    document.getElementById('download-records-btn').addEventListener('click', async () => {
+      const from = document.getElementById('records-from').value;
+      const to = document.getElementById('records-to').value;
+      const routeId = document.getElementById('records-route').value;
+      const statusEl = document.getElementById('records-status');
+      if (!from || !to) {
+        statusEl.textContent = '開始日と終了日を指定してください。';
+        statusEl.className = 'text-sm text-red-600 font-bold';
+        return;
+      }
+
+      statusEl.textContent = 'ダウンロード準備中...';
+      statusEl.className = 'text-sm text-slate-500';
+      try {
+        const params = new URLSearchParams({ from, to });
+        if (routeId) params.set('routeId', routeId);
+        const headers = {};
+        if (state.token) headers['Authorization'] = `Basic ${state.token}`;
+        const response = await fetch(`/api/admin/operation-records/export?${params.toString()}`, { headers });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || 'ダウンロードに失敗しました');
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `operation-records_${from}_${to}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        statusEl.textContent = 'ダウンロードしました。';
+        statusEl.className = 'text-sm text-green-700 font-bold';
+      } catch (err) {
+        statusEl.textContent = err.message;
+        statusEl.className = 'text-sm text-red-600 font-bold';
+      }
+    });
+
+    // ==========================================================
+    // 異常アラート
+    // ==========================================================
+    const ALERT_LABEL = {
+      staleGps: 'GPS途絶',
+      unassignedTrip: '未割当便',
+      severeDelay: '大幅遅延',
+      etaComputeFailure: '予測計算失敗',
+      gtfsFetchFailure: 'GTFS取得失敗'
+    };
+
+    function alertDetail(a) {
+      switch (a.type) {
+        case 'staleGps':
+          return `車両${escapeHtml(a.carId)}（路線: ${escapeHtml(a.routeId || '')}） 最終GPS: ${fmtDateTime(a.lastGpsAt)}`;
+        case 'unassignedTrip':
+          return `${escapeHtml(a.startTime || '')}発 ${escapeHtml(a.headsign || '')}（${a.minutesOverdue}分経過）`;
+        case 'severeDelay':
+          return `${escapeHtml(a.startTime || '')}発 車両${escapeHtml(a.carId)} 遅延${a.delayMinutes}分`;
+        case 'etaComputeFailure':
+          return `${escapeHtml(a.startTime || '')}発 車両${escapeHtml(a.carId)} 最終計算: ${fmtDateTime(a.lastComputedAt)}`;
+        case 'gtfsFetchFailure':
+          return `${escapeHtml(a.feedName)}: ${escapeHtml(a.lastError || '')}`;
+        default:
+          return '';
+      }
+    }
+
+    async function loadAlerts() {
+      const data = await api('/api/admin/alerts');
+      const container = document.getElementById('alerts-container');
+      if (data.alerts.length === 0) {
+        container.innerHTML = '<div class="bg-green-50 border-2 border-green-200 rounded-xl p-4 text-center font-bold text-green-700">現在、異常は検知されていません。</div>';
+      } else {
+        container.innerHTML = data.alerts.map((a) => `
+          <div class="rounded-xl border-2 p-3 flex items-start gap-3 ${a.severity === 'critical' ? 'bg-red-50 border-red-300' : 'bg-amber-50 border-amber-300'}">
+            <span class="px-2 py-0.5 rounded-full text-xs font-black shrink-0 ${a.severity === 'critical' ? 'bg-red-600 text-white' : 'bg-amber-500 text-white'}">${a.severity === 'critical' ? '緊急' : '警告'}</span>
+            <div>
+              <p class="font-bold ${a.severity === 'critical' ? 'text-red-800' : 'text-amber-800'}">${ALERT_LABEL[a.type] || a.type}</p>
+              <p class="text-sm text-slate-600">${alertDetail(a)}</p>
+            </div>
+          </div>
+        `).join('');
+      }
+      refreshAlertsBadge();
+    }
+
+    // ==========================================================
+    // GTFSフィード監視
+    // ==========================================================
+    async function loadGtfsFeeds() {
+      const data = await api('/api/admin/gtfs-feeds');
+      const tbody = document.getElementById('gtfs-feeds-tbody');
+      tbody.innerHTML = data.feeds.map((f) => `
+        <tr class="border-t">
+          <td class="px-3 py-2 font-bold">${escapeHtml(f.name)}</td>
+          <td class="px-3 py-2 text-xs">${fmtDateTime(f.lastFetchedAt)}</td>
+          <td class="px-3 py-2">${f.fileCount}</td>
+          <td class="px-3 py-2">
+            <span class="px-2 py-0.5 rounded-full text-xs font-bold ${f.lastStatus === 'error' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}">${f.lastStatus === 'error' ? 'エラー' : '正常'}</span>
+          </td>
+          <td class="px-3 py-2 text-xs text-red-600">${escapeHtml(f.lastError || '')}</td>
+          <td class="px-3 py-2">
+            <button data-refetch-feed="${escapeHtml(f.id)}" class="refetch-btn bg-slate-800 text-white font-bold rounded-lg px-3 py-1.5 text-xs">再取得</button>
+          </td>
+        </tr>
+      `).join('');
+
+      tbody.querySelectorAll('.refetch-btn').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const feedId = btn.dataset.refetchFeed;
+          btn.disabled = true;
+          btn.textContent = '取得中...';
+          try {
+            const result = await api(`/api/admin/gtfs-feeds/${encodeURIComponent(feedId)}/refetch`, { method: 'POST' });
+            showStatus(result.success ? `${result.feed.name} を再取得しました。` : `${result.feed.name} の再取得に失敗しました。`, result.success ? 'info' : 'error');
+            await loadGtfsFeeds();
+          } catch (err) {
+            showStatus(err.message, 'error');
+            btn.disabled = false;
+            btn.textContent = '再取得';
+          }
+        });
+      });
+    }
+
+    // ==========================================================
+    // 位置情報フィード監視
+    // ==========================================================
+    function locationSkipSummary(counts) {
+      if (!counts) return '<span class="text-slate-300">実行履歴なし</span>';
+      return `取得${counts.inserted ?? 0} / 走査${counts.scanned ?? 0} / 路線不一致${counts.skippedNoRouteMatch ?? 0} / 時刻異常${counts.skippedStaleOrInvalidTime ?? 0} / 座標異常${counts.skippedInvalidLatLon ?? 0}`;
+    }
+
+    async function loadLocationFeeds() {
+      const data = await api('/api/admin/location-feeds');
+      const tbody = document.getElementById('location-feeds-tbody');
+      tbody.innerHTML = data.feeds.map((f) => `
+        <tr class="border-t">
+          <td class="px-3 py-2 font-bold">${escapeHtml(f.name)}</td>
+          <td class="px-3 py-2 text-xs">${fmtDateTime(f.lastFetchedAt)}</td>
+          <td class="px-3 py-2">
+            <span class="px-2 py-0.5 rounded-full text-xs font-bold ${f.lastStatus === 'error' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}">${f.lastStatus === 'error' ? 'エラー' : '正常'}</span>
+          </td>
+          <td class="px-3 py-2">${f.lastRunCounts ? f.lastRunCounts.inserted : '—'}</td>
+          <td class="px-3 py-2 text-xs text-slate-500">${locationSkipSummary(f.lastRunCounts)}</td>
+        </tr>
+      `).join('');
+    }
+
+    // ==========================================================
+    // API稼働監視
+    // ==========================================================
+    async function loadApiStats() {
+      const data = await api('/api/admin/api-stats');
+      const tbody = document.getElementById('api-stats-tbody');
+      tbody.innerHTML = data.endpoints.map((e) => `
+        <tr class="border-t">
+          <td class="px-3 py-2 font-mono text-xs">${escapeHtml(e.method)} ${escapeHtml(e.pattern)}</td>
+          <td class="px-3 py-2">${e.count}</td>
+          <td class="px-3 py-2 ${e.errorRate > 0 ? 'text-red-600 font-bold' : ''}">${(e.errorRate * 100).toFixed(1)}%</td>
+          <td class="px-3 py-2">${e.avgDurationMs}ms</td>
+          <td class="px-3 py-2 text-xs text-slate-400">${fmtDateTime(e.lastAccessAt)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="5" class="px-3 py-6 text-center text-slate-400">記録がありません。</td></tr>';
+
+      const errorsBox = document.getElementById('api-stats-errors');
+      errorsBox.innerHTML = data.recentErrors.length === 0
+        ? '<p class="text-slate-400">直近の失敗はありません。</p>'
+        : data.recentErrors.map((e) => `
+            <div class="flex items-center justify-between py-1 border-b last:border-b-0">
+              <span class="font-mono text-xs">${escapeHtml(e.method)} ${escapeHtml(e.pattern)}</span>
+              <span class="text-xs text-red-600 font-bold">${e.statusCode}</span>
+              <span class="text-xs text-slate-400">${fmtDateTime(e.ts)}</span>
+            </div>
+          `).join('');
+    }
+
+    // ==========================================================
+    // ジョブ監視
+    // ==========================================================
+    function jobHistoryDots(history) {
+      if (!history || history.length === 0) return '<span class="text-slate-300">—</span>';
+      return history.slice(-10).map((h) => `<span class="inline-block w-2.5 h-2.5 rounded-full mr-0.5 ${h.ok ? 'bg-green-500' : 'bg-red-500'}" title="${escapeHtml(fmtDateTime(h.finishedAt))}"></span>`).join('');
+    }
+
+    async function loadJobMonitor() {
+      const data = await api('/api/admin/job-monitor');
+      const tbody = document.getElementById('job-monitor-tbody');
+      tbody.innerHTML = data.jobs.map((j) => `
+        <tr class="border-t">
+          <td class="px-3 py-2 font-mono text-xs">${escapeHtml(j.name)}</td>
+          <td class="px-3 py-2 text-xs">${j.lastOk === false ? '<span class="text-red-600 font-bold">失敗</span> ' : ''}${fmtDateTime(j.lastFinishedAt)}</td>
+          <td class="px-3 py-2">${fmtDuration(j.lastDurationMs)}</td>
+          <td class="px-3 py-2">${jobHistoryDots(j.history)}</td>
+          <td class="px-3 py-2 text-xs text-red-600">${escapeHtml(j.lastError || '')}</td>
+        </tr>
+      `).join('');
+    }
+
+    // ==========================================================
+    // お知らせ編集
+    // ==========================================================
     async function loadSettings() {
       const settings = await api('/api/admin/settings');
       document.getElementById('notice1').value = settings.notice1 || '';
@@ -337,6 +1259,25 @@
       document.getElementById('importantNotice').value = settings.importantNotice || '';
     }
 
+    document.getElementById('save-btn').addEventListener('click', async () => {
+      try {
+        const payload = {
+          notice1: document.getElementById('notice1').value,
+          notice2: document.getElementById('notice2').value,
+          importantNotice: document.getElementById('importantNotice').value,
+          routeName: '横田信大循環線',
+          operatorName: 'ぐるっと松本バス（アルピコ交通）'
+        };
+        await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(payload) });
+        showStatus('保存しました。公開画面に反映されます。');
+      } catch (err) {
+        showStatus(err.message, 'error');
+      }
+    });
+
+    // ==========================================================
+    // 祝日カレンダー
+    // ==========================================================
     async function loadHolidays() {
       const data = await api('/api/admin/holidays');
       renderHolidays(data.holidays || []);
@@ -379,10 +1320,7 @@
         return;
       }
       try {
-        await api('/api/admin/holidays', {
-          method: 'POST',
-          body: JSON.stringify({ date, name })
-        });
+        await api('/api/admin/holidays', { method: 'POST', body: JSON.stringify({ date, name }) });
         document.getElementById('holiday-date').value = '';
         document.getElementById('holiday-name').value = '';
         await loadHolidays();
@@ -392,131 +1330,171 @@
       }
     });
 
-    async function loadRoutes() {
-      const routes = await api('/api/routes');
-      state.routes = routes.routes || [];
-      renderRouteOptions();
-    }
+    // ==========================================================
+    // バス位置情報モニター（手動更新のみ）
+    // ==========================================================
+    function renderBusPositions(data) {
+      positionsContainer.innerHTML = '';
+      if (!data || !data.positions || data.positions.length === 0) {
+        positionsContainer.innerHTML = `
+          <div class="bg-yellow-50 border-2 border-yellow-200 rounded-xl p-4 text-center">
+            <p class="font-bold text-yellow-800">直近3分以内のバス位置情報はありません。</p>
+            <p class="text-sm text-yellow-600 mt-1">位置情報の取得間隔やフィルタ設定を確認してください。</p>
+          </div>
+        `;
+        return;
+      }
 
-    async function loadRouteData(routeId) {
-      const data = await api(`/api/admin/route-data?routeId=${encodeURIComponent(routeId)}`);
-      renderRouteDataEditor(data);
-    }
+      const now = new Date(data.fetchedAt);
 
-    async function saveRouteData() {
-      const stopMap = {};
-      [...routeDataEditor.querySelectorAll('[data-stop-field]')].forEach((el) => {
-        const stopId = Number(el.dataset.stopId);
-        if (!stopMap[stopId]) {
-          stopMap[stopId] = { id: stopId, lat: null, lon: null };
-        }
-        const field = el.dataset.stopField;
-        stopMap[stopId][field] = field === 'lat' || field === 'lon' ? Number(el.value) : el.value;
+      data.positions.forEach((pos) => {
+        const gpsDate = new Date(pos.gpsTimeTs);
+        const diffSec = Math.floor((now.getTime() - gpsDate.getTime()) / 1000);
+        const freshnessLabel = diffSec < 60 ? `${diffSec}秒前` : Math.floor(diffSec / 60) + '分前';
+        const freshnessColor = diffSec < 60 ? 'text-green-600 bg-green-50 border-green-200' : 'text-yellow-700 bg-yellow-50 border-yellow-200';
+
+        const card = document.createElement('div');
+        card.className = 'border-2 border-slate-200 rounded-xl p-4 bg-white hover:shadow-md transition-shadow';
+        card.innerHTML = `
+          <div class="flex justify-between items-start mb-3">
+            <div class="flex items-center gap-2">
+              <span class="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center text-blue-700 font-bold">${escapeHtml(pos.carId.slice(-2))}</span>
+              <div>
+                <span class="font-bold text-lg text-slate-900">車両 ${escapeHtml(pos.carId)}</span>
+                <span class="text-xs px-2 py-0.5 rounded-full border ${freshnessColor} font-bold ml-2">${freshnessLabel}</span>
+              </div>
+            </div>
+            <a href="https://www.google.com/maps?q=${pos.lat},${pos.lon}" target="_blank"
+               class="text-blue-600 hover:text-blue-800 text-sm font-bold flex items-center gap-1">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path>
+              </svg>
+              地図
+            </a>
+          </div>
+          <div class="grid grid-cols-2 gap-3 text-sm">
+            <div>
+              <p class="text-slate-400 text-xs font-bold">路線</p>
+              <p class="font-bold">${escapeHtml(pos.routeName)}${pos.directionId === 0 ? '（下り）' : '（上り）'}</p>
+            </div>
+            <div>
+              <p class="text-slate-400 text-xs font-bold">GPS時刻</p>
+              <p class="font-bold">${escapeHtml(pos.gpsTime)}</p>
+            </div>
+            <div class="col-span-2">
+              <p class="text-slate-400 text-xs font-bold">位置</p>
+              <p class="font-bold">${pos.address ? escapeHtml(pos.address) : '住所取得中...'}</p>
+              <p class="text-xs text-slate-400 mt-0.5">${pos.lat}, ${pos.lon}</p>
+            </div>
+          </div>
+        `;
+        positionsContainer.appendChild(card);
       });
-
-      const stopEdits = Object.values(stopMap);
-      const timetableEdits = [...routeDataEditor.querySelectorAll('[data-scheduled-time]')].map((el) => ({
-        tripId: Number(el.dataset.tripId),
-        stopId: Number(el.dataset.stopId),
-        scheduledTime: el.value || null
-      }));
-
-      await api('/api/admin/route-data', {
-        method: 'PUT',
-        body: JSON.stringify({
-          routeId: routeEditSelect.value,
-          stopEdits,
-          timetableEdits
-        })
-      });
-
-      showStatus('停留所座標・時刻表を保存しました。');
     }
 
-    function escapeHtml(str) {
-      if (str === null || str === undefined) return '';
-      return String(str)
-        .replace(/&/g, '&')
-        .replace(/</g, '<')
-        .replace(/>/g, '>')
-        .replace(/"/g, '"');
+    async function loadBusPositions() {
+      const icon = document.getElementById('pos-refresh-icon');
+      icon.classList.add('animate-spin');
+      positionsStatus.textContent = '位置情報を取得中...';
+      positionsStatus.className = 'text-sm font-bold text-blue-600';
+
+      try {
+        const data = await api('/api/admin/bus-positions');
+        renderBusPositions(data);
+        const fetchedAtStr = new Date(data.fetchedAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+        positionsStatus.textContent = `✓ ${data.count} 台のバスを検出（取得時刻: ${fetchedAtStr}）`;
+        positionsStatus.className = 'text-sm font-bold text-green-700';
+      } catch (err) {
+        positionsContainer.innerHTML = `
+          <div class="bg-red-50 border-2 border-red-200 rounded-xl p-4">
+            <p class="font-bold text-red-800">位置情報の取得に失敗しました。</p>
+            <p class="text-sm text-red-600 mt-1">${escapeHtml(err.message)}</p>
+          </div>
+        `;
+        positionsStatus.textContent = 'エラーが発生しました。もう一度お試しください。';
+        positionsStatus.className = 'text-sm font-bold text-red-600';
+      } finally {
+        setTimeout(() => icon.classList.remove('animate-spin'), 500);
+      }
     }
 
+    document.getElementById('refresh-positions-btn').addEventListener('click', loadBusPositions);
+    document.getElementById('refresh-gtfs-feeds-btn').addEventListener('click', () => loadGtfsFeeds().catch((err) => showStatus(err.message, 'error')));
+    document.getElementById('refresh-location-feeds-btn').addEventListener('click', () => loadLocationFeeds().catch((err) => showStatus(err.message, 'error')));
+    document.getElementById('refresh-api-stats-btn').addEventListener('click', () => loadApiStats().catch((err) => showStatus(err.message, 'error')));
+
+    // ==========================================================
+    // サイト閲覧数
+    // ==========================================================
+    async function loadViewerStats() {
+      try {
+        const data = await api('/api/server-load');
+        const toneClass = data.highLoad ? 'text-red-700' : 'text-green-700';
+        const statusLabel = data.highLoad ? '⚠ 高負荷（自動更新は自動OFFになります）' : '通常';
+        viewersStatus.innerHTML = `
+          <span class="${toneClass}">現在の閲覧数: ${data.activeViewers} 人</span>
+          <span class="text-slate-400 mx-2">/</span>
+          <span class="text-slate-500">しきい値 ${data.threshold} 人</span>
+          <span class="text-slate-400 mx-2">/</span>
+          <span class="${toneClass}">${statusLabel}</span>
+        `;
+      } catch (err) {
+        viewersStatus.textContent = '閲覧数の取得に失敗しました。';
+        viewersStatus.className = 'text-sm font-bold text-red-600';
+      }
+    }
+
+    document.getElementById('refresh-viewers-btn').addEventListener('click', () => loadViewerStats().catch((err) => showStatus(err.message, 'error')));
+
+    // ==========================================================
+    // ログイン・ログアウト
+    // ==========================================================
     document.getElementById('login-btn').addEventListener('click', async () => {
       const username = document.getElementById('username').value.trim();
       const password = document.getElementById('password').value;
 
       if (!username || !password) {
-        showStatus('ユーザー名とパスワードを入力してください。', 'error');
+        showLoginStatus('ユーザー名とパスワードを入力してください。', 'error');
         return;
       }
 
       setAuthToken(username, password);
       try {
-        await Promise.all([
-          loadSettings(),
-          loadRoutes(),
-          loadHolidays(),
-        ]);
+        await api('/api/admin/settings'); // 認証確認を兼ねる
         localStorage.setItem('adminToken', state.token);
         applyEditorState();
-        showStatus('ログインしました。設定・路線データを編集できます。');
+        if (badgeTimer) clearInterval(badgeTimer);
+        badgeTimer = setInterval(refreshAlertsBadge, 20000);
+        refreshAlertsBadge();
       } catch (err) {
-        clearAuthToken();
-        showStatus(err.message, 'error');
-      }
-    });
-
-    document.getElementById('save-btn').addEventListener('click', async () => {
-      try {
-        const payload = {
-          notice1: document.getElementById('notice1').value,
-          notice2: document.getElementById('notice2').value,
-          importantNotice: document.getElementById('importantNotice').value,
-          routeName: '横田信大循環線',
-          operatorName: 'ぐるっと松本バス（アルピコ交通）'
-        };
-
-        await api('/api/admin/settings', {
-          method: 'PUT',
-          body: JSON.stringify(payload)
-        });
-
-        showStatus('保存しました。公開画面に反映されます。');
-      } catch (err) {
-        showStatus(err.message, 'error');
+        state.token = null;
+        showLoginStatus(err.message, 'error');
       }
     });
 
     document.getElementById('logout-btn').addEventListener('click', () => {
+      if (badgeTimer) {
+        clearInterval(badgeTimer);
+        badgeTimer = null;
+      }
       clearAuthToken();
-      showStatus('ログアウトしました。', 'info');
+      showLoginStatus('ログアウトしました。', 'info');
     });
-
-    document.getElementById('load-route-data-btn').addEventListener('click', () => {
-      loadRouteData(routeEditSelect.value).catch((err) => showStatus(err.message, 'error'));
-    });
-
-    document.getElementById('save-route-data-btn').addEventListener('click', saveRouteData);
-
-    // バス位置情報更新ボタン
-    document.getElementById('refresh-positions-btn').addEventListener('click', loadBusPositions);
 
     const storedToken = localStorage.getItem('adminToken');
     if (storedToken) {
       state.token = storedToken;
-      Promise.all([
-        loadSettings(),
-        loadRoutes(),
-        loadHolidays(),
-      ])
+      api('/api/admin/settings')
         .then(() => {
           applyEditorState();
-          showStatus('保存済みセッションでログイン中です。');
+          badgeTimer = setInterval(refreshAlertsBadge, 20000);
+          refreshAlertsBadge();
         })
         .catch(() => {
-          clearAuthToken();
-          showStatus('保存済みセッションが無効です。再度ログインしてください。', 'error');
+          state.token = null;
+          localStorage.removeItem('adminToken');
+          showLoginStatus('保存済みセッションが無効です。再度ログインしてください。', 'error');
         });
     }
   </script>

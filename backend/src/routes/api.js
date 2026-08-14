@@ -1,7 +1,9 @@
+const fs = require('fs');
 const express = require('express');
 const pool = require('../config/db');
 const { resolveRouteId } = require('../services/gtfsData');
-const { getArrivalsForAssignment } = require('../services/etaPredictor');
+const { getArrivalsForAssignment, describeSource, SOURCE_INFO } = require('../services/etaPredictor');
+const { getAccuracyReport } = require('../services/predictionAccuracy');
 const { searchStops } = require('../services/routeSearch');
 const { searchJourneys, searchRouteSearchStops } = require('../services/gtfsRouteSearch');
 const { getServiceDateString } = require('../utils/time');
@@ -14,7 +16,13 @@ const {
   getStopTimetable,
   getTripDetail
 } = require('../services/gtfsTimetable');
-const { unqualifyRouteId, qualifyRouteId } = require('../services/gtfsFeedManager');
+const {
+  unqualifyRouteId,
+  qualifyRouteId,
+  getGtfsDir,
+  downloadAndExtractGtfsFeed,
+  MANAGED_GTFS_FILES
+} = require('../services/gtfsFeedManager');
 const {
   findLiveAssignment,
   buildBusEntry,
@@ -22,11 +30,44 @@ const {
 } = require('../services/realtimeTripLookup');
 const { getApproachingBuses } = require('../services/busStopApproaching');
 const { invalidateHolidayCache } = require('../services/holidayCalendar');
+const visitorTracker = require('../services/visitorTracker');
+const jobMonitor = require('../services/jobMonitor');
+const apiMetrics = require('../services/apiMetrics');
+const { getEnabledGtfsFeeds, getEnabledLocationFeeds } = require('../config/feeds');
 
 const router = express.Router();
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+
+// 運用監視のしきい値（ASSIGN_RADIUS_METERS等と同じ流儀で環境変数上書き可・既定値付き）
+const STALE_GPS_MIN = parseFloat(process.env.ADMIN_STALE_GPS_MIN || '5');
+const DELAY_ALERT_MIN = parseFloat(process.env.ADMIN_DELAY_ALERT_MIN || '5');
+const SEVERE_DELAY_MIN = parseFloat(process.env.ADMIN_SEVERE_DELAY_MIN || '15');
+const UNASSIGNED_OVERDUE_MIN = parseFloat(process.env.ADMIN_UNASSIGNED_OVERDUE_MIN || '5');
+const ETA_STALE_MIN = parseFloat(process.env.ADMIN_ETA_STALE_MIN || '10');
+
+// フロントエンドがX-Client-Idヘッダーを付けて叩くAPIリクエストを閲覧数としてカウントする
+// （サーバー負荷判定・管理画面の閲覧数表示に使用。ヘッダーが無いリクエストは対象外）。
+router.use((req, res, next) => {
+  const clientId = req.headers['x-client-id'];
+  if (typeof clientId === 'string' && clientId.length > 0 && clientId.length <= 100) {
+    visitorTracker.recordVisit(clientId);
+  }
+  next();
+});
+
+// API稼働監視（管理画面向け）: 応答時間・エラー率・アクセス数・失敗したエンドポイントを記録する。
+// req.route.path はExpressがルートをマッチさせた後でないと入らないが、resの'finish'イベントは
+// レスポンス送出後に発火するため、マウント位置に関わらずこの時点では必ず取得できる。
+router.use((req, res, next) => {
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    const pattern = req.route ? `${req.baseUrl}${req.route.path}` : `${req.method} (unmatched)`;
+    apiMetrics.recordRequest(req.method, pattern, res.statusCode, Date.now() - startedAt);
+  });
+  next();
+});
 
 function serializeSettings(settings) {
   return {
@@ -80,69 +121,6 @@ function requireAdminAuth(req, res, next) {
   return next();
 }
 
-async function readAdminRouteData(routeId) {
-  const normalizedRouteId = resolveRouteId(routeId);
-  const stopsRes = await pool.query(
-    `SELECT id, direction_id, seq_order, name, lat, lon
-     FROM stops
-     WHERE route_id = $1
-     ORDER BY direction_id ASC, seq_order ASC`,
-    [normalizedRouteId]
-  );
-
-  const tripsRes = await pool.query(
-    `SELECT id, trip_index, first_stop_time, direction_id, headsign
-     FROM schedule_trips
-     WHERE route_id = $1
-     ORDER BY direction_id ASC, trip_index ASC`,
-    [normalizedRouteId]
-  );
-
-  const stopTimesRes = await pool.query(
-    `SELECT st.trip_id, s.id AS stop_id, s.name AS stop_name, s.seq_order, st.scheduled_time
-     FROM schedule_stop_times st
-     JOIN stops s ON s.id = st.stop_id
-     JOIN schedule_trips stp ON stp.id = st.trip_id
-     WHERE stp.route_id = $1
-     ORDER BY st.trip_id ASC, s.seq_order ASC`,
-    [normalizedRouteId]
-  );
-
-  const timetable = tripsRes.rows.map((trip) => ({
-    tripId: trip.id,
-    tripIndex: trip.trip_index,
-    directionId: trip.direction_id,
-    firstStopTime: trip.first_stop_time,
-    headsign: trip.headsign || null,
-    stops: []
-  }));
-
-  const timetableByTrip = new Map(timetable.map((trip) => [trip.tripId, trip]));
-  for (const row of stopTimesRes.rows) {
-    const trip = timetableByTrip.get(row.trip_id);
-    if (!trip) continue;
-    trip.stops.push({
-      stopId: row.stop_id,
-      stopName: row.stop_name,
-      seqOrder: row.seq_order,
-      scheduledTime: row.scheduled_time
-    });
-  }
-
-  return {
-    routeId: normalizedRouteId,
-    stops: stopsRes.rows.map((row) => ({
-      id: row.id,
-      directionId: row.direction_id,
-      seqOrder: row.seq_order,
-      name: row.name,
-      lat: row.lat,
-      lon: row.lon
-    })),
-    timetable
-  };
-}
-
 // GET /api/routes -> 利用可能な路線一覧（GTFSのroute.txt由来）
 router.get('/routes', async (req, res) => {
   try {
@@ -170,6 +148,12 @@ router.get('/settings', async (req, res) => {
   }
 });
 
+// GET /api/server-load -> 現在のサイト閲覧数とサーバー負荷状況
+// 公開API（利用者向け画面が自動更新の自動OFF判定に使う）。集計値のみで個人情報は含まない。
+router.get('/server-load', (req, res) => {
+  res.json(visitorTracker.getServerLoadStatus());
+});
+
 // GET /api/admin/settings -> 管理画面用に認証付きで設定を取得
 router.get('/admin/settings', requireAdminAuth, async (req, res) => {
   try {
@@ -185,74 +169,9 @@ router.get('/admin/settings', requireAdminAuth, async (req, res) => {
 // 外部ID ⇔ GTFS route_id の対応表の取得・編集API（GET/PUT /admin/route-mappings）は、
 // 対応を config/routeExternalIdMapping.js へ移したため削除した。
 // 保存できるのに反映されないUIを残さないための措置である（仕様書 3.2.1 / 6）。
-
-// GET /api/admin/route-data -> 路線データを管理画面へ返す
-router.get('/admin/route-data', requireAdminAuth, async (req, res) => {
-  try {
-    const routeId = resolveRouteId(req.query.routeId);
-    const data = await readAdminRouteData(routeId);
-    res.json(data);
-  } catch (err) {
-    console.error('[api] /admin/route-data 取得エラー:', err);
-    res.status(500).json({ error: '路線データの取得に失敗しました。' });
-  }
-});
-
-// PUT /api/admin/route-data -> バス停座標・時刻表を更新
-router.put('/api/admin/route-data', requireAdminAuth, async (req, res) => {
-  const { routeId, stopEdits = [], timetableEdits = [] } = req.body || {};
-  try {
-    await pool.query('BEGIN');
-    const normalizedRouteId = resolveRouteId(routeId);
-
-    for (const edit of stopEdits) {
-      const lat = Number(edit.lat ?? edit.value?.lat ?? NaN);
-      const lon = Number(edit.lon ?? edit.value?.lon ?? NaN);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      await pool.query(
-        `UPDATE stops
-         SET lat = $1, lon = $2
-         WHERE id = $3 AND route_id = $4`,
-        [lat, lon, Number(edit.id), normalizedRouteId]
-      );
-    }
-
-    for (const edit of timetableEdits) {
-      await pool.query(
-        `UPDATE schedule_stop_times st
-         SET scheduled_time = $1
-         FROM schedule_trips stp
-         WHERE st.trip_id = stp.id
-           AND stp.route_id = $2
-           AND st.stop_id = $3
-           AND st.trip_id = $4`,
-        [edit.scheduledTime || null, normalizedRouteId, Number(edit.stopId), Number(edit.tripId)]
-      );
-    }
-
-    await pool.query(
-      `UPDATE schedule_trips stp
-       SET first_stop_time = (
-         SELECT st.scheduled_time
-         FROM schedule_stop_times st
-         JOIN stops s ON s.id = st.stop_id
-         WHERE st.trip_id = stp.id AND st.scheduled_time IS NOT NULL
-         ORDER BY s.seq_order ASC
-         LIMIT 1
-       )
-       WHERE stp.route_id = $1`,
-      [normalizedRouteId]
-    );
-
-    await pool.query('COMMIT');
-    const data = await readAdminRouteData(normalizedRouteId);
-    res.json(data);
-  } catch (err) {
-    await pool.query('ROLLBACK').catch(() => undefined);
-    console.error('[api] /admin/route-data 更新エラー:', err);
-    res.status(500).json({ error: '路線データの更新に失敗しました。' });
-  }
-});
+//
+// 路線データ編集（バス停座標・時刻表の直接編集。GET/PUT /admin/route-data）も削除した。
+// バス停座標・時刻表はGTFSフィード由来のマスタなので、変更はGTFSフィード側の更新で行う。
 
 // PUT /api/admin/settings -> 管理画面から配信お知らせを更新
 router.put('/admin/settings', requireAdminAuth, async (req, res) => {
@@ -777,7 +696,7 @@ router.get('/admin/bus-positions', requireAdminAuth, async (req, res) => {
       });
     }
 
-    res.json({ 
+    res.json({
       positions,
       count: positions.length,
       fetchedAt: now.toISOString()
@@ -785,6 +704,638 @@ router.get('/admin/bus-positions', requireAdminAuth, async (req, res) => {
   } catch (err) {
     console.error('[api] /admin/bus-positions エラー:', err);
     res.status(500).json({ error: 'バス位置情報の取得に失敗しました。' });
+  }
+});
+
+// ==========================================================
+// 運行監視系の管理API（運行ダッシュボード・便の割当監視・通過判定・異常アラート・
+// GTFS/位置情報フィード監視・API稼働監視・ジョブ監視）。
+// いずれもDBスキーマ追加なし。既存テーブルからのライブ読み取りか、
+// jobMonitor/apiMetrics（プロセスメモリ上のトラッカー、visitorTracker.jsと同じ流儀）を使う。
+// ==========================================================
+
+function parseServiceDateParam(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value || '') ? value : getServiceDateString();
+}
+
+// 正常終了とみなす end_reason（緑色表示用。unassignedの赤系と区別するため）
+const SUCCESS_END_REASONS = new Set(['最終バス停到着済', '終了エリア到達']);
+
+// GET /api/admin/dashboard-summary -> 運行ダッシュボード
+router.get('/admin/dashboard-summary', requireAdminAuth, async (req, res) => {
+  try {
+    const serviceDate = getServiceDateString();
+
+    const [activeVehiclesRes, unassignedRes, delayedRes, staleGpsRes] = await Promise.all([
+      pool.query(`SELECT count(*)::int AS count FROM vehicles WHERE status = 'active'`),
+      pool.query(
+        `SELECT count(*)::int AS count
+         FROM daily_trips
+         WHERE service_date = $1 AND assignment_state = 'unassigned' AND closed_at IS NULL`,
+        [serviceDate]
+      ),
+      pool.query(
+        `SELECT count(*)::int AS count
+         FROM trip_vehicle_assignments a
+         JOIN daily_trips d ON d.id = a.daily_trip_id
+         WHERE a.role = 'assigned' AND a.state = 'active'
+           AND a.delay_minutes >= $1
+           AND d.service_date = $2`,
+        [DELAY_ALERT_MIN, serviceDate]
+      ),
+      pool.query(
+        `SELECT count(*)::int AS count
+         FROM vehicles
+         WHERE status = 'active'
+           AND (last_gps_at IS NULL OR last_gps_at < now() - make_interval(secs => $1::double precision * 60))`,
+        [STALE_GPS_MIN]
+      )
+    ]);
+
+    const enabledGtfsFeeds = getEnabledGtfsFeeds();
+    const feedIds = enabledGtfsFeeds.map((f) => f.id);
+    const feedRowsRes = feedIds.length > 0
+      ? await pool.query(
+          `SELECT id, last_fetched_at, last_status, last_error FROM feeds WHERE id = ANY($1::text[])`,
+          [feedIds]
+        )
+      : { rows: [] };
+    const feedRowById = new Map(feedRowsRes.rows.map((r) => [r.id, r]));
+    const gtfsFeeds = enabledGtfsFeeds.map((f) => {
+      const row = feedRowById.get(f.id);
+      return {
+        id: f.id,
+        name: f.name,
+        lastFetchedAt: row ? row.last_fetched_at : null,
+        lastStatus: row ? row.last_status : null,
+        lastError: row ? row.last_error : null
+      };
+    });
+
+    res.json({
+      activeVehicles: activeVehiclesRes.rows[0].count,
+      unassignedTripsCount: unassignedRes.rows[0].count,
+      delayedTripsCount: delayedRes.rows[0].count,
+      staleGpsVehicleCount: staleGpsRes.rows[0].count,
+      gtfsFeeds,
+      generatedAt: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error('[api] /admin/dashboard-summary エラー:', err);
+    res.status(500).json({ error: '運行ダッシュボードの取得に失敗しました。' });
+  }
+});
+
+// GET /api/admin/assignment-monitor?date=YYYY-MM-DD -> 便ごとの担当・候補・割当時刻・距離・未割当理由
+router.get('/admin/assignment-monitor', requireAdminAuth, async (req, res) => {
+  try {
+    const serviceDate = parseServiceDateParam(req.query.date);
+
+    const tripsRes = await pool.query(
+      `SELECT id, route_id, direction_id, start_time, headsign, assignment_state, closed_at
+       FROM daily_trips
+       WHERE service_date = $1
+       ORDER BY start_at ASC, id ASC`,
+      [serviceDate]
+    );
+
+    const tripIds = tripsRes.rows.map((t) => t.id);
+    if (tripIds.length === 0) return res.json({ date: serviceDate, trips: [] });
+
+    const assignmentsRes = await pool.query(
+      `SELECT a.daily_trip_id, a.role, a.state, a.distance_meters, a.became_assigned_at, a.end_reason,
+              v.id AS vehicle_id, v.car_id
+       FROM trip_vehicle_assignments a
+       JOIN vehicles v ON v.id = a.vehicle_id
+       WHERE a.daily_trip_id = ANY($1::bigint[])
+       ORDER BY a.daily_trip_id ASC, a.distance_meters ASC`,
+      [tripIds]
+    );
+
+    const byTrip = new Map();
+    for (const row of assignmentsRes.rows) {
+      const list = byTrip.get(row.daily_trip_id) || [];
+      list.push(row);
+      byTrip.set(row.daily_trip_id, list);
+    }
+
+    const trips = tripsRes.rows.map((trip) => {
+      const rows = byTrip.get(trip.id) || [];
+      const assignedRow = rows.find((r) => r.role === 'assigned' && r.state === 'active');
+      const candidateRows = rows.filter((r) => r.role === 'candidate' && r.state === 'active');
+
+      let reason = null;
+      let outcome = 'pending';
+
+      if (trip.assignment_state === 'pending') {
+        outcome = 'pending';
+      } else if (assignedRow) {
+        outcome = 'assigned';
+      } else if (rows.length === 0) {
+        reason = '候補なし';
+        outcome = 'unassigned';
+      } else {
+        const assignedRoleRows = rows.filter((r) => r.role === 'assigned');
+        assignedRoleRows.sort((a, b) => {
+          const at = a.became_assigned_at ? new Date(a.became_assigned_at).getTime() : -Infinity;
+          const bt = b.became_assigned_at ? new Date(b.became_assigned_at).getTime() : -Infinity;
+          return bt - at;
+        });
+        const lastAssignedRow = assignedRoleRows[0];
+        reason = (lastAssignedRow && lastAssignedRow.end_reason) || '候補が同時刻帯の別便の担当';
+        outcome = trip.closed_at && SUCCESS_END_REASONS.has(reason) ? 'success' : 'unassigned';
+      }
+
+      return {
+        tripId: trip.id,
+        routeId: trip.route_id,
+        directionId: trip.direction_id,
+        startTime: trip.start_time,
+        headsign: trip.headsign || null,
+        assignmentState: trip.assignment_state,
+        closedAt: trip.closed_at,
+        outcome,
+        assigned: assignedRow
+          ? {
+              vehicleId: assignedRow.vehicle_id,
+              carId: assignedRow.car_id,
+              distanceMeters: assignedRow.distance_meters,
+              becameAssignedAt: assignedRow.became_assigned_at
+            }
+          : null,
+        candidates: candidateRows.map((r) => ({
+          vehicleId: r.vehicle_id,
+          carId: r.car_id,
+          distanceMeters: r.distance_meters
+        })),
+        reason
+      };
+    });
+
+    res.json({ date: serviceDate, trips });
+  } catch (err) {
+    console.error('[api] /admin/assignment-monitor エラー:', err);
+    res.status(500).json({ error: '便の割当監視データの取得に失敗しました。' });
+  }
+});
+
+// GET /api/admin/pass-status?date=YYYY-MM-DD -> 通過判定の現在状態スナップショット（履歴ではない）
+router.get('/admin/pass-status', requireAdminAuth, async (req, res) => {
+  try {
+    const serviceDate = parseServiceDateParam(req.query.date);
+
+    const result = await pool.query(
+      `SELECT d.id AS trip_id, d.start_time, d.headsign, a.id AS assignment_id, a.role, v.car_id,
+              s.name AS stop_name, p.seq_order, p.status, p.actual_time, p.delay_minutes
+       FROM trip_stop_progress p
+       JOIN trip_vehicle_assignments a ON a.id = p.assignment_id
+       JOIN daily_trips d ON d.id = a.daily_trip_id
+       JOIN stops s ON s.id = p.stop_id
+       JOIN vehicles v ON v.id = a.vehicle_id
+       WHERE a.state = 'active' AND d.service_date = $1 AND d.closed_at IS NULL
+       ORDER BY d.start_at ASC, a.id ASC, p.seq_order ASC`,
+      [serviceDate]
+    );
+
+    const rows = result.rows.map((row) => ({
+      tripId: row.trip_id,
+      startTime: row.start_time,
+      headsign: row.headsign || null,
+      assignmentId: row.assignment_id,
+      role: row.role,
+      carId: row.car_id,
+      stopName: row.stop_name,
+      seqOrder: row.seq_order,
+      status: row.status,
+      actualTime: row.actual_time,
+      delayMinutes: row.delay_minutes
+    }));
+
+    res.json({ date: serviceDate, rows });
+  } catch (err) {
+    console.error('[api] /admin/pass-status エラー:', err);
+    res.status(500).json({ error: '通過判定データの取得に失敗しました。' });
+  }
+});
+
+// GET /api/admin/alerts -> 異常アラート（GPS途絶・未割当便・大幅遅延・予測計算失敗・GTFS取得失敗）
+router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
+  try {
+    const serviceDate = getServiceDateString();
+    const alerts = [];
+
+    const staleGpsRes = await pool.query(
+      `SELECT id AS vehicle_id, car_id, route_id, last_gps_at
+       FROM vehicles
+       WHERE status = 'active'
+         AND (last_gps_at IS NULL OR last_gps_at < now() - make_interval(secs => $1::double precision * 60))
+       ORDER BY last_gps_at ASC NULLS FIRST`,
+      [STALE_GPS_MIN]
+    );
+    for (const row of staleGpsRes.rows) {
+      alerts.push({
+        type: 'staleGps',
+        severity: 'warning',
+        vehicleId: row.vehicle_id,
+        carId: row.car_id,
+        routeId: row.route_id,
+        lastGpsAt: row.last_gps_at
+      });
+    }
+
+    const unassignedRes = await pool.query(
+      `SELECT id AS trip_id, route_id, start_time, headsign, start_at
+       FROM daily_trips
+       WHERE assignment_state = 'unassigned' AND closed_at IS NULL
+         AND service_date = $2
+         AND start_at < now() - make_interval(secs => $1::double precision * 60)
+       ORDER BY start_at ASC`,
+      [UNASSIGNED_OVERDUE_MIN, serviceDate]
+    );
+    for (const row of unassignedRes.rows) {
+      alerts.push({
+        type: 'unassignedTrip',
+        severity: 'warning',
+        tripId: row.trip_id,
+        routeId: row.route_id,
+        startTime: row.start_time,
+        headsign: row.headsign || null,
+        minutesOverdue: Math.round((Date.now() - new Date(row.start_at).getTime()) / 60000)
+      });
+    }
+
+    const severeDelayRes = await pool.query(
+      `SELECT a.id AS assignment_id, a.daily_trip_id, a.delay_minutes, v.car_id, d.start_time, d.headsign
+       FROM trip_vehicle_assignments a
+       JOIN daily_trips d ON d.id = a.daily_trip_id
+       JOIN vehicles v ON v.id = a.vehicle_id
+       WHERE a.role = 'assigned' AND a.state = 'active'
+         AND a.delay_minutes >= $1
+         AND d.service_date = $2
+       ORDER BY a.delay_minutes DESC`,
+      [SEVERE_DELAY_MIN, serviceDate]
+    );
+    for (const row of severeDelayRes.rows) {
+      alerts.push({
+        type: 'severeDelay',
+        severity: 'critical',
+        assignmentId: row.assignment_id,
+        tripId: row.daily_trip_id,
+        carId: row.car_id,
+        startTime: row.start_time,
+        headsign: row.headsign || null,
+        delayMinutes: row.delay_minutes
+      });
+    }
+
+    const etaFailureRes = await pool.query(
+      `SELECT a.id AS assignment_id, a.daily_trip_id, v.car_id, d.start_time,
+              MAX(tap.computed_at) AS last_computed_at
+       FROM trip_vehicle_assignments a
+       JOIN daily_trips d ON d.id = a.daily_trip_id
+       JOIN vehicles v ON v.id = a.vehicle_id
+       LEFT JOIN trip_arrival_predictions tap ON tap.assignment_id = a.id
+       WHERE a.role = 'assigned' AND a.state = 'active' AND d.service_date = $2
+       GROUP BY a.id, a.daily_trip_id, v.car_id, d.start_time
+       HAVING MAX(tap.computed_at) IS NULL
+          OR MAX(tap.computed_at) < now() - make_interval(secs => $1::double precision * 60)`,
+      [ETA_STALE_MIN, serviceDate]
+    );
+    for (const row of etaFailureRes.rows) {
+      alerts.push({
+        type: 'etaComputeFailure',
+        severity: 'warning',
+        assignmentId: row.assignment_id,
+        tripId: row.daily_trip_id,
+        carId: row.car_id,
+        startTime: row.start_time,
+        lastComputedAt: row.last_computed_at
+      });
+    }
+
+    const enabledGtfsFeedIds = getEnabledGtfsFeeds().map((f) => f.id);
+    const gtfsFailureRes = enabledGtfsFeedIds.length > 0
+      ? await pool.query(
+          `SELECT id, name, last_fetched_at, last_error
+           FROM feeds
+           WHERE feed_type = 'gtfs' AND last_status = 'error' AND id = ANY($1::text[])`,
+          [enabledGtfsFeedIds]
+        )
+      : { rows: [] };
+    for (const row of gtfsFailureRes.rows) {
+      alerts.push({
+        type: 'gtfsFetchFailure',
+        severity: 'critical',
+        feedId: row.id,
+        feedName: row.name,
+        lastFetchedAt: row.last_fetched_at,
+        lastError: row.last_error
+      });
+    }
+
+    const counts = alerts.reduce((acc, a) => {
+      acc[a.type] = (acc[a.type] || 0) + 1;
+      return acc;
+    }, {});
+
+    alerts.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'critical' ? -1 : 1));
+
+    res.json({ alerts, counts, generatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('[api] /admin/alerts エラー:', err);
+    res.status(500).json({ error: '異常アラートの取得に失敗しました。' });
+  }
+});
+
+// GET /api/admin/gtfs-feeds -> GTFSフィード監視（最終取得時刻・ファイル件数・エラー内容）
+router.get('/admin/gtfs-feeds', requireAdminAuth, async (req, res) => {
+  try {
+    const feeds = getEnabledGtfsFeeds();
+    const ids = feeds.map((f) => f.id);
+    const rowsRes = ids.length > 0
+      ? await pool.query(`SELECT id, last_fetched_at, last_status, last_error FROM feeds WHERE id = ANY($1::text[])`, [ids])
+      : { rows: [] };
+    const rowById = new Map(rowsRes.rows.map((r) => [r.id, r]));
+    const jobStatus = jobMonitor.getJobStatus('pipeline.gtfsUpdate');
+
+    const result = feeds.map((f) => {
+      const row = rowById.get(f.id);
+      let fileCount = 0;
+      try {
+        const names = fs.readdirSync(getGtfsDir(f.id));
+        fileCount = names.filter((name) => MANAGED_GTFS_FILES.includes(name)).length;
+      } catch (e) {
+        fileCount = 0;
+      }
+      return {
+        id: f.id,
+        name: f.name,
+        lastFetchedAt: row ? row.last_fetched_at : null,
+        lastStatus: row ? row.last_status : null,
+        lastError: row ? row.last_error : null,
+        fileCount
+      };
+    });
+
+    res.json({
+      feeds: result,
+      lastJobRun: jobStatus
+        ? { lastFinishedAt: jobStatus.lastFinishedAt, lastDurationMs: jobStatus.lastDurationMs, lastMeta: jobStatus.lastMeta }
+        : null
+    });
+  } catch (err) {
+    console.error('[api] /admin/gtfs-feeds エラー:', err);
+    res.status(500).json({ error: 'GTFSフィード監視データの取得に失敗しました。' });
+  }
+});
+
+// POST /api/admin/gtfs-feeds/:feedId/refetch -> 手動再取得
+router.post('/admin/gtfs-feeds/:feedId/refetch', requireAdminAuth, async (req, res) => {
+  const feed = getEnabledGtfsFeeds().find((f) => f.id === req.params.feedId);
+  if (!feed) {
+    return res.status(404).json({ error: '指定のGTFSフィードが見つかりません。' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const success = await jobMonitor.track('pipeline.gtfsManualRefetch', () =>
+      downloadAndExtractGtfsFeed(client, feed)
+    );
+
+    if (success) {
+      try {
+        const seed = require('../db/seed');
+        await seed();
+        require('../services/dailyTripBuilder').invalidateDailyTripCache();
+        require('../services/gtfsTimetable').invalidateTimetableIndex();
+        require('../services/gtfsFare').invalidateFareIndex();
+      } catch (postErr) {
+        console.error('[api] /admin/gtfs-feeds/:feedId/refetch 事後処理エラー:', postErr.message);
+      }
+    }
+
+    const row = await pool.query(
+      `SELECT last_fetched_at, last_status, last_error FROM feeds WHERE id = $1`,
+      [feed.id]
+    );
+    let fileCount = 0;
+    try {
+      const names = fs.readdirSync(getGtfsDir(feed.id));
+      fileCount = names.filter((name) => MANAGED_GTFS_FILES.includes(name)).length;
+    } catch (e) {
+      fileCount = 0;
+    }
+
+    res.json({
+      success,
+      feed: {
+        id: feed.id,
+        name: feed.name,
+        lastFetchedAt: row.rows[0] ? row.rows[0].last_fetched_at : null,
+        lastStatus: row.rows[0] ? row.rows[0].last_status : null,
+        lastError: row.rows[0] ? row.rows[0].last_error : null,
+        fileCount
+      }
+    });
+  } catch (err) {
+    console.error('[api] /admin/gtfs-feeds/:feedId/refetch エラー:', err);
+    res.status(500).json({ error: 'GTFSフィードの再取得に失敗しました。' });
+  } finally {
+    client.release();
+  }
+});
+
+// GET /api/admin/location-feeds -> 位置情報フィード監視（最終受信時刻・受信件数・形式異常）
+router.get('/admin/location-feeds', requireAdminAuth, async (req, res) => {
+  try {
+    const feeds = getEnabledLocationFeeds();
+    const ids = feeds.map((f) => f.id);
+    const rowsRes = ids.length > 0
+      ? await pool.query(`SELECT id, last_fetched_at, last_status, last_error FROM feeds WHERE id = ANY($1::text[])`, [ids])
+      : { rows: [] };
+    const rowById = new Map(rowsRes.rows.map((r) => [r.id, r]));
+    const jobStatus = jobMonitor.getJobStatus('pipeline.fetchLocation');
+
+    const lastFeedResults = new Map();
+    if (jobStatus && jobStatus.lastMeta && Array.isArray(jobStatus.lastMeta.feeds)) {
+      for (const f of jobStatus.lastMeta.feeds) {
+        if (f && f.feedId) lastFeedResults.set(f.feedId, f);
+      }
+    }
+
+    const result = feeds.map((f) => {
+      const row = rowById.get(f.id);
+      return {
+        id: f.id,
+        name: f.name,
+        lastFetchedAt: row ? row.last_fetched_at : null,
+        lastStatus: row ? row.last_status : null,
+        lastError: row ? row.last_error : null,
+        lastRunCounts: lastFeedResults.get(f.id) || null
+      };
+    });
+
+    res.json({
+      feeds: result,
+      lastJobRun: jobStatus ? { lastFinishedAt: jobStatus.lastFinishedAt, lastDurationMs: jobStatus.lastDurationMs } : null
+    });
+  } catch (err) {
+    console.error('[api] /admin/location-feeds エラー:', err);
+    res.status(500).json({ error: '位置情報フィード監視データの取得に失敗しました。' });
+  }
+});
+
+// GET /api/admin/api-stats -> API稼働監視（応答時間・エラー率・アクセス数・失敗したエンドポイント）
+router.get('/admin/api-stats', requireAdminAuth, (req, res) => {
+  res.json(apiMetrics.getStats());
+});
+
+// GET /api/admin/job-monitor -> ジョブ監視（各パイプライン工程の最終成功時刻・所要時間・失敗履歴）
+router.get('/admin/job-monitor', requireAdminAuth, (req, res) => {
+  res.json({ jobs: jobMonitor.getJobsStatus() });
+});
+
+// ==========================================================
+// ETA予測の根拠表示・精度監視・運行実績ダウンロード
+// いずれも既存のETA計算(etaPredictor.js)・パイプラインには書き込みを行わない、
+// 読み取り専用の追加API。予測精度監視はtrip_arrival_prediction_log（追記専用の
+// 履歴テーブル）を参照する。
+// ==========================================================
+
+// GET /api/admin/eta-basis?date=YYYY-MM-DD
+// -> 稼働中の便・停留所ごとに、ETA予測が何を根拠にしたか（時刻表／過去統計／
+//    直近走行ペースのどれを使ったか）を表示する。
+router.get('/admin/eta-basis', requireAdminAuth, async (req, res) => {
+  try {
+    const serviceDate = parseServiceDateParam(req.query.date);
+
+    const result = await pool.query(
+      `SELECT d.id AS trip_id, d.start_time, d.headsign, a.id AS assignment_id, a.role, v.car_id,
+              s.name AS stop_name, p.seq_order, p.status, p.scheduled_time, p.actual_time, p.delay_minutes,
+              tap.predicted_time, tap.predicted_delay_minutes, tap.source, tap.computed_at
+       FROM trip_stop_progress p
+       JOIN trip_vehicle_assignments a ON a.id = p.assignment_id
+       JOIN daily_trips d ON d.id = a.daily_trip_id
+       JOIN stops s ON s.id = p.stop_id
+       JOIN vehicles v ON v.id = a.vehicle_id
+       LEFT JOIN trip_arrival_predictions tap ON tap.assignment_id = a.id AND tap.stop_id = p.stop_id
+       WHERE a.state = 'active' AND d.service_date = $1 AND d.closed_at IS NULL
+       ORDER BY d.start_at ASC, a.id ASC, p.seq_order ASC`,
+      [serviceDate]
+    );
+
+    const rows = result.rows.map((row) => {
+      const info = describeSource(row.source);
+      return {
+        tripId: row.trip_id,
+        startTime: row.start_time,
+        headsign: row.headsign || null,
+        assignmentId: row.assignment_id,
+        role: row.role,
+        carId: row.car_id,
+        stopName: row.stop_name,
+        seqOrder: row.seq_order,
+        status: row.status,
+        scheduledTime: row.scheduled_time,
+        actualTime: row.actual_time,
+        predictedTime: row.predicted_time,
+        predictedDelayMinutes: row.predicted_delay_minutes,
+        source: row.source,
+        basisCategory: info.category,
+        basisLabel: info.label,
+        computedAt: row.computed_at
+      };
+    });
+
+    res.json({ date: serviceDate, sourceLegend: SOURCE_INFO, rows });
+  } catch (err) {
+    console.error('[api] /admin/eta-basis エラー:', err);
+    res.status(500).json({ error: 'ETA予測根拠データの取得に失敗しました。' });
+  }
+});
+
+// GET /api/admin/prediction-accuracy?days=7&routeId=...&thresholdMinutes=3&leadBucket=...&stopsBeforeBucket=...
+// -> 予測（何分前・何停留所前時点の予測か）と実績の誤差を、路線・停留所・時間帯・曜日別に集計する。
+// 誤差許容分数(thresholdMinutes)やリードタイム/停留所数での絞り込みは管理画面から指定できる。
+router.get('/admin/prediction-accuracy', requireAdminAuth, async (req, res) => {
+  try {
+    const report = await getAccuracyReport({
+      days: req.query.days,
+      routeId: req.query.routeId || null,
+      thresholdMinutes: req.query.thresholdMinutes,
+      leadBucket: req.query.leadBucket || null,
+      stopsBeforeBucket: req.query.stopsBeforeBucket || null
+    });
+    res.json(report);
+  } catch (err) {
+    console.error('[api] /admin/prediction-accuracy エラー:', err);
+    res.status(500).json({ error: 'ETA予測精度データの取得に失敗しました。' });
+  }
+});
+
+// GET /api/admin/operation-records/export?from=YYYY-MM-DD&to=YYYY-MM-DD&routeId=...
+// -> 運行実績（completed_trips/completed_trip_stop_times）をCSVでダウンロードする。
+router.get('/admin/operation-records/export', requireAdminAuth, async (req, res) => {
+  try {
+    const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : getServiceDateString();
+    const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : to;
+
+    const params = [from, to];
+    let routeFilter = '';
+    if (req.query.routeId) {
+      params.push(req.query.routeId);
+      routeFilter = `AND ct.route_id = $${params.length}`;
+    }
+
+    const result = await pool.query(
+      `SELECT ct.id AS completed_trip_id, ct.route_id, r.name AS route_name, ct.car_id, ct.start_time,
+              ct.is_official, ct.day_of_week, ct.day_type, ct.finish_reason, ct.finished_at,
+              cts.seq_order, s.name AS stop_name, cts.scheduled_time, cts.actual_time, cts.delay_minutes
+       FROM completed_trips ct
+       JOIN routes r ON r.id = ct.route_id
+       LEFT JOIN completed_trip_stop_times cts ON cts.completed_trip_id = ct.id
+       LEFT JOIN stops s ON s.id = cts.stop_id
+       WHERE (ct.finished_at AT TIME ZONE 'Asia/Tokyo')::date BETWEEN $1::date AND $2::date
+         ${routeFilter}
+       ORDER BY ct.finished_at ASC, ct.id ASC, cts.seq_order ASC
+       LIMIT 200000`,
+      params
+    );
+
+    const header = ['完了トリップID', '路線ID', '路線名', '車両ID', '便始発時刻', '実績種別', '曜日番号', '曜日区分', '終了理由', '終了確定日時(JST)', '停留所順', '停留所名', '定刻', '実績時刻', '遅延分'];
+    const csvEscape = (v) => {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = [header.map(csvEscape).join(',')];
+    for (const row of result.rows) {
+      lines.push([
+        row.completed_trip_id,
+        row.route_id,
+        row.route_name,
+        row.car_id,
+        row.start_time,
+        row.is_official ? '正式' : '参考（候補車両）',
+        row.day_of_week,
+        row.day_type,
+        row.finish_reason,
+        row.finished_at ? new Date(row.finished_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }) : '',
+        row.seq_order,
+        row.stop_name,
+        row.scheduled_time,
+        row.actual_time,
+        row.delay_minutes
+      ].map(csvEscape).join(','));
+    }
+    const csv = '﻿' + lines.join('\r\n'); // ExcelでのUTF-8誤認識を防ぐBOM付き
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="operation-records_${from}_${to}.csv"`);
+    res.send(csv);
+  } catch (err) {
+    console.error('[api] /admin/operation-records/export エラー:', err);
+    res.status(500).json({ error: '運行実績のダウンロードに失敗しました。' });
   }
 });
 

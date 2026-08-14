@@ -328,6 +328,35 @@ CREATE TABLE IF NOT EXISTS trip_arrival_predictions (
 );
 CREATE INDEX IF NOT EXISTS idx_trip_arrival_predictions_computed_at ON trip_arrival_predictions(computed_at DESC);
 
+-- ETA予測の履歴ログ（追記のみ）。trip_arrival_predictionsは常に最新値のみをUPSERTで
+-- 持つため、「その予測がいつの時点で出されたものか」が失われる。予測精度の監視
+-- （何分前の予測が実績とどれだけ乖離していたか）には時系列の履歴が必要なため、
+-- 別テーブルとして追加した。既存のtrip_arrival_predictions・パイプラインの挙動は変更しない。
+-- 書き込み量を抑えるため、直前に記録した値（predicted_time・source）から変化が
+-- あった場合のみ1行追記する（computeAndStoreAllArrivalsの末尾で行う。詳細はetaPredictor.js参照）。
+-- 到着済み区間はsource='actual'・predicted_time=実績時刻として記録されるため、
+-- このテーブル単体で「その停留所に対する予測の変遷」と「実績」の両方が揃う。
+-- assignment_id経由でtrip_vehicle_assignmentsにCASCADE削除させることで、
+-- daily_tripsの保持期間（既定7日、DAILY_TRIP_RETENTION_DAYS）と寿命を合わせ、
+-- 専用の掃除ジョブを持たずに肥大化を防いでいる。
+CREATE TABLE IF NOT EXISTS trip_arrival_prediction_log (
+  id                       BIGSERIAL PRIMARY KEY,
+  assignment_id            BIGINT NOT NULL REFERENCES trip_vehicle_assignments(id) ON DELETE CASCADE,
+  daily_trip_id            BIGINT NOT NULL,
+  route_id                 TEXT NOT NULL,
+  stop_id                  INTEGER NOT NULL REFERENCES stops(id) ON DELETE CASCADE,
+  seq_order                INTEGER NOT NULL,
+  predicted_time           TEXT,
+  predicted_delay_minutes  INTEGER,
+  source                   TEXT NOT NULL,
+  -- 予測時点で対象停留所の何停留所手前に居たか（etaPredictor.js の predictArrivals()
+  -- 参照）。予測精度監視で「何停留所前に出した予測か」の軸に使う付随メタデータ。
+  stops_before             INTEGER,
+  computed_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_prediction_log_assignment_stop ON trip_arrival_prediction_log(assignment_id, stop_id, computed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_prediction_log_route_time ON trip_arrival_prediction_log(route_id, computed_at DESC);
+
 -- アルピコ交通 公式サイトの運行状況ページをスクレイピングした結果のキャッシュ（1行のみ保持）
 CREATE TABLE IF NOT EXISTS service_status_cache (
   id                INTEGER PRIMARY KEY DEFAULT 1,

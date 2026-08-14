@@ -136,7 +136,7 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 
 ### フロントエンド
 
-素のHTML/CSS/JS、ビルドステップなし。`frontend/index.html` + `app.js`（利用者向け運行状況画面。20秒間隔で`/api/buses`等をポーリング、お気に入りはlocalStorage、SPAルーティングの入口）。`frontend/timetable.js`（時刻表検索）、`frontend/busstop.js`（バス停検索）、`frontend/stopmap.js`（バス停マップ）、`frontend/routesearch.js`（経路検索）はいずれもハッシュではなくパスでルーティングします。`frontend/admin.html`（Basic認証で保護された管理画面。お知らせ編集、バス停・時刻表編集、住所逆引き付きの直近車両位置）。外部IDマッピングの編集セクションは、対応をコード化したため削除済みです。
+素のHTML/CSS/JS、ビルドステップなし。`frontend/index.html` + `app.js`（利用者向け運行状況画面。20秒間隔で`/api/buses`等をポーリング、お気に入りはlocalStorage、SPAルーティングの入口）。`frontend/timetable.js`（時刻表検索）、`frontend/busstop.js`（バス停検索）、`frontend/stopmap.js`（バス停マップ）、`frontend/routesearch.js`（経路検索）はいずれもハッシュではなくパスでルーティングします。`frontend/admin.html`（Basic認証で保護された、PC向けサイドパネル型の運行監視コンソール。運行ダッシュボード・便の割当監視・通過判定・異常アラート・GTFS/位置情報フィード監視・API稼働監視・ジョブ監視・お知らせ編集・祝日カレンダー・住所逆引き付きの直近車両位置・サイト閲覧数）。外部IDマッピングの編集セクションは対応をコード化したため、路線データ編集（バス停座標・時刻表の直接編集）はGTFSフィード側の更新に一本化したため、いずれも削除済みです。
 
 ## 既知の注意点（理解せずに「修正」しないこと）
 
@@ -148,7 +148,7 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 - **通過バス停の扱い（`tripAssignment.js`の`openAssignment()` / `delayCalc.js`）**：あるバス停が`通過`ステータスに確定されるのは、それが便の中で実質的な終点（`lastValidSeq`、実際に定刻を持つ最後のバス停）より**手前**にある経由フラグ付きバス停の場合のみです。`lastValidSeq`より先にある経由フラグ付きバス停は、単に未確定なだけで通過ではありません。この2つを混同したことが実際の過去のバグの原因でした（README §4.11参照）。`delayCalc.js`は`scheduled_time`が無いことを理由にステータスを強制上書きする処理を意図的に廃止しています。
 - **`etaPredictor.js`の`updateSegmentStats()`が`is_official = TRUE`だけを集計するのは意図的です。** 候補車両止まりの記録を混ぜると、別経路をたまたま走っていた車両の所要時間で区間統計が汚染され、担当が切り替わった便では同じ区間を二重計上してしまいます。
 - **バスマップ（`#/busmap`）で`/api/buses-for-map`に特定の`routeId`を決め打ちしないでください。** 全路線を俯瞰する画面なので、1路線に固定するとその路線が運行していない時間帯に0台になります（実際にそれで「バスが表示されない」不具合になっていました）。同じ画面で、地図を作り直すときに`busMarkers`/`userMarker`を捨て忘れると2回目以降に描画されなくなる点、現在地取得を`await`してからバスを取得すると許可ダイアログの間バスが出ない点にも注意してください（README §12）。
-- **`routes/api.js`**：`PUT /api/admin/route-data`は、`router`が既に`/api`配下にマウントされているため、実際には`/api/api/admin/route-data`になります。フロントエンド側の呼び出しはこれに合わせてあるので動作はしますが、パスが二重になっている点に惑わされないこと。また、破壊的変更になるため黙ってリネームしないこと。
+- （過去の注意点）`routes/api.js`にはかつて`PUT /api/admin/route-data`（`router`が`/api`配下にマウント済みのため実際には`/api/api/admin/route-data`という二重パスになっていた）があったが、路線データ編集機能ごと削除済み。同種のルート定義を追加する際は、`router`が`/api`配下にマウントされている前提でパスを書くこと（先頭に`/api`を重ねない）。
 - 上記の3つの曜日区分ロジックについて補足：`getDayType()`は平日/土曜/休日の3区分で、日曜に加えて`holidays`テーブル（`services/holidayCalendar.js`がキャッシュ、`utils/japaneseHolidays.js`が国民の祝日を算出してseed.jsが初期投入、管理画面`/admin`から追加・削除可）に登録された日もholiday扱いになります。`getActiveServiceIds()`はGTFSの正式な`calendar.txt`/`calendar_dates.txt`に基づく当日便生成用の運行日判定です。`getDayType()`自体はDBアクセスを持たない純粋関数のままとし、祝日集合(`holidaySet`)は呼び出し側（`etaPredictor.js`/`finishService.js`）が渡す設計です。
 - **`dailyTripBuilder.js`が「既に車両を割り当て済みの便は書き換えない」ガードを持つのは意図的です。** GTFSは1時間ごとに再取得され、成功すると`seed()`が走ってマスタが入れ替わります。このとき走行中の便の定刻まで書き換えると、遅延計算と実績が破綻します。
 - **`vehicles`テーブルの`business_start_time` / `departure_time` / `trip_id` / `trip_type` / `last_arrived_seq` / `delay_minutes`は、旧・車両起点方式の名残で未使用です。** 移行のロールバック余地のために列だけ残してあります。新しいコードから参照しないでください。

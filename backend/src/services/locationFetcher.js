@@ -123,6 +123,9 @@ async function fetchLocationFeed(client, feed, freshnessMin, now, timeLimit, now
 
   // 車両IDごとに最新のGPS時刻のものだけを残す
   const latestByCar = new Map();
+  let skippedNoRouteMatch = 0;
+  let skippedStaleOrInvalidTime = 0;
+  let skippedInvalidLatLon = 0;
   for (const row of rows) {
     if (row.length < 4) continue;
     const joined = row.join(',');
@@ -133,12 +136,18 @@ async function fetchLocationFeed(client, feed, freshnessMin, now, timeLimit, now
         break;
       }
     }
-    if (!matchedRouteId) continue;
+    if (!matchedRouteId) {
+      skippedNoRouteMatch++;
+      continue;
+    }
 
     const carId = row[0].trim();
     const gpsTimeStr = row[1].trim();
     const gpsDate = new Date(gpsTimeStr.replace(/-/g, '/') + ' +0900');
-    if (Number.isNaN(gpsDate.getTime()) || gpsDate < timeLimit || gpsDate > now) continue;
+    if (Number.isNaN(gpsDate.getTime()) || gpsDate < timeLimit || gpsDate > now) {
+      skippedStaleOrInvalidTime++;
+      continue;
+    }
 
     // 方向列（5列目 / row[4]）を読み取り、路線別のコード設定で direction_id に変換する。
     // 管理画面での対応設定は廃止した（仕様書 6.1）。
@@ -168,12 +177,22 @@ async function fetchLocationFeed(client, feed, freshnessMin, now, timeLimit, now
       `UPDATE feeds SET last_fetched_at = now(), last_status = 'ok', last_error = NULL WHERE id = $1`,
       [feedId]
     );
-    return { inserted: 0, feedId };
+    return {
+      inserted: 0,
+      feedId,
+      scanned: rows.length,
+      skippedNoRouteMatch,
+      skippedStaleOrInvalidTime,
+      skippedInvalidLatLon
+    };
   }
 
   let inserted = 0;
   for (const e of entries) {
-    if (Number.isNaN(e.lat) || Number.isNaN(e.lon)) continue;
+    if (Number.isNaN(e.lat) || Number.isNaN(e.lon)) {
+      skippedInvalidLatLon++;
+      continue;
+    }
     await client.query(
       `INSERT INTO vehicle_positions_raw (route_id, direction_id, direction_raw, car_id, received_time, gps_time, gps_time_ts, lat, lon, feed_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
@@ -199,7 +218,14 @@ async function fetchLocationFeed(client, feed, freshnessMin, now, timeLimit, now
   );
 
   console.log(`[locationFetcher] feed=${feedId} 位置情報を ${inserted} 件追記しました。`);
-  return { inserted, feedId };
+  return {
+    inserted,
+    feedId,
+    scanned: rows.length,
+    skippedNoRouteMatch,
+    skippedStaleOrInvalidTime,
+    skippedInvalidLatLon
+  };
 }
 
 async function fetchLocation() {

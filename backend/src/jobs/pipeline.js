@@ -12,6 +12,7 @@ const { pass } = require('../services/passDetection');
 const { delayCalc } = require('../services/delayCalc');
 const { updateAllGtfsFeeds } = require('../services/gtfsFeedManager');
 const { computeAndStoreAllArrivals } = require('../services/etaPredictor');
+const jobMonitor = require('../services/jobMonitor');
 
 async function runPipeline() {
   // 深夜帯はGPSの取り込みと運行処理を止めるが、当日便の生成と車両割り当ては止めない。
@@ -22,29 +23,29 @@ async function runPipeline() {
   try {
     // GTFSフィードを定期的に更新（失敗してもパイプライン全体は継続）
     try {
-      await updateAllGtfsFeeds();
+      await jobMonitor.track('pipeline.gtfsUpdate', updateAllGtfsFeeds);
     } catch (err) {
       console.error('[pipeline] GTFSフィード更新エラー（継続）:', err.message);
     }
 
     // ① 当日の運行便を生成（生成済みなら即リターン）
-    await ensureDailyTrips();
+    await jobMonitor.track('pipeline.ensureDailyTrips', ensureDailyTrips);
 
     if (night) {
       console.log('[pipeline] 深夜帯のため運行処理をスキップします（当日便の生成のみ実施）。');
       return;
     }
 
-    await fetchLocation();          // ② 位置情報の取得
-    await sortCarId();              // ③ 車両別ログへの振り分け・車両の登録
-    await assignPendingTrips();     // ④ 始発時刻が来た便への担当・候補の割り当て
-    await reassignOrphanTrips();    // ⑤ 担当車両が終了した便の再割り当て
-    await pass();                   // ⑥ 通過判定・欠落補完（担当・候補すべて）
-    await delayCalc();              // ⑦ 遅延計算（担当・候補すべて）
+    await jobMonitor.track('pipeline.fetchLocation', fetchLocation);             // ② 位置情報の取得
+    await jobMonitor.track('pipeline.sortCarId', sortCarId);                     // ③ 車両別ログへの振り分け・車両の登録
+    await jobMonitor.track('pipeline.assignPendingTrips', assignPendingTrips);   // ④ 始発時刻が来た便への担当・候補の割り当て
+    await jobMonitor.track('pipeline.reassignOrphanTrips', reassignOrphanTrips); // ⑤ 担当車両が終了した便の再割り当て
+    await jobMonitor.track('pipeline.pass', pass);                               // ⑥ 通過判定・欠落補完（担当・候補すべて）
+    await jobMonitor.track('pipeline.delayCalc', delayCalc);                     // ⑦ 遅延計算（担当・候補すべて）
 
     // ⑧ 全active割り当てのETAを一括計算しtrip_arrival_predictionsへ保存
     //    （オンデマンド計算からプリコンピュート方式への移行。設計書 docs/design-eta-precompute.md）
-    await computeAndStoreAllArrivals();
+    await jobMonitor.track('pipeline.computeArrivals', computeAndStoreAllArrivals);
   } catch (err) {
     console.error('[pipeline] 実行エラー:', err);
   }

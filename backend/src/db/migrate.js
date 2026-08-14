@@ -220,6 +220,14 @@ async function migrate() {
       WHERE day_type IS NULL
     `);
 
+    // 16. trip_arrival_prediction_log に stops_before を追加（予測精度監視で
+    //     「何停留所前に出した予測か」の軸を追加するため。既にテーブルを作成済みの
+    //     環境向けにALTERで保証する。新規環境ではschema.sqlのCREATE TABLEに
+    //     既に含まれているため実質no-op）。
+    await client.query(`
+      ALTER TABLE trip_arrival_prediction_log ADD COLUMN IF NOT EXISTS stops_before INTEGER
+    `);
+
     await client.query('COMMIT');
     console.log('[migrate] 複数事業者対応・便起点割り当てマイグレーション完了');
   } catch (err) {

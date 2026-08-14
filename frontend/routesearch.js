@@ -46,7 +46,7 @@
   }
 
   async function fetchJson(url) {
-    const res = await fetch(url);
+    const res = await fetch(url, { headers: { 'X-Client-Id': window.BUS_TIME_CLIENT_ID || '' } });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       const error = new Error(body.error || `HTTP ${res.status}`);
@@ -54,6 +54,11 @@
       throw error;
     }
     return res.json();
+  }
+
+  // app.jsで管理している「自動更新ON/OFF」（手動設定・サーバー高負荷時の一時停止の両方を反映）
+  function autoRefreshEnabled() {
+    return typeof window.isBusTimeAutoRefreshEnabled !== 'function' || window.isBusTimeAutoRefreshEnabled();
   }
 
   function root() {
@@ -181,6 +186,74 @@
   function platformLabel(stop) {
     if (!stop || !stop.platformCode) return '';
     return /^\d+$/.test(stop.platformCode) ? `${stop.platformCode}番のりば` : stop.platformCode;
+  }
+
+  /* ---------- お気に入りルート（名前付きで登録する。日付・時刻はurlに含めず開いた時点で検索し直す） ---------- */
+  function routeSearchFavoriteId(state) {
+    return `routesearch|${state.fromKey || state.fromText}|${state.toKey || state.toText}`;
+  }
+
+  function buildRouteSearchFavorite(state, name) {
+    const query = new URLSearchParams();
+    if (state.fromText) query.set('from', state.fromText);
+    if (state.fromKey) query.set('fromKey', state.fromKey);
+    if (state.toText) query.set('to', state.toText);
+    if (state.toKey) query.set('toKey', state.toKey);
+    const qs = query.toString();
+    return {
+      id: routeSearchFavoriteId(state),
+      type: 'routesearch',
+      title: name,
+      subtitle: `${state.fromText} → ${state.toText}`,
+      url: `/routesearch${qs ? `?${qs}` : ''}`
+    };
+  }
+
+  function paintFavRow(state) {
+    const row = document.getElementById('rs-fav-row');
+    if (!row || !window.Favorites) return;
+    const id = routeSearchFavoriteId(state);
+    const existing = window.Favorites.get(id);
+
+    row.innerHTML = existing
+      ? `<div class="flex items-center gap-2 bg-amber-50 border-2 border-amber-200 rounded-xl px-3 py-2">
+           <span class="text-amber-500 text-lg leading-none shrink-0">★</span>
+           <span class="flex-1 min-w-0 text-xs font-bold text-amber-900 truncate">「${esc(existing.title)}」として登録済み</span>
+           <button type="button" data-role="rs-fav-rename" class="text-[11px] font-bold text-amber-800 underline shrink-0">名前を変更</button>
+           <button type="button" data-role="rs-fav-remove" class="text-[11px] font-bold text-red-600 underline shrink-0">解除</button>
+         </div>`
+      : `<button type="button" data-role="rs-fav-add"
+                class="w-full flex items-center justify-center gap-2 bg-white border-2 border-purple-200 text-purple-700 rounded-xl px-3 py-2.5 text-sm font-bold hover:bg-purple-50 active:scale-[0.99] transition-all">
+           <svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3.5l2.6 5.4 5.9.7-4.3 4.1 1.1 5.9L12 16.9l-5.3 2.7 1.1-5.9-4.3-4.1 5.9-.7L12 3.5z"/></svg>
+           この検索をお気に入りルートに登録（通勤など名前を付けて保存）
+         </button>`;
+
+    const addBtn = row.querySelector('[data-role="rs-fav-add"]');
+    if (addBtn) {
+      addBtn.addEventListener('click', () => {
+        const name = window.prompt('お気に入りルートの名前を入力してください（例：通勤）', `${state.fromText} → ${state.toText}`);
+        if (!name || !name.trim()) return;
+        window.Favorites.add(buildRouteSearchFavorite(state, name.trim()));
+        paintFavRow(state);
+      });
+    }
+    const renameBtn = row.querySelector('[data-role="rs-fav-rename"]');
+    if (renameBtn) {
+      renameBtn.addEventListener('click', () => {
+        const current = window.Favorites.get(id);
+        const name = window.prompt('お気に入りルートの名前を変更', current ? current.title : '');
+        if (!name || !name.trim()) return;
+        window.Favorites.add(buildRouteSearchFavorite(state, name.trim()));
+        paintFavRow(state);
+      });
+    }
+    const removeBtn = row.querySelector('[data-role="rs-fav-remove"]');
+    if (removeBtn) {
+      removeBtn.addEventListener('click', () => {
+        window.Favorites.remove(id);
+        paintFavRow(state);
+      });
+    }
   }
 
   /* ---------- ルーティング ---------- */
@@ -588,6 +661,10 @@
     container.innerHTML = result.found ? renderResults(result) : renderNotFound(result);
     bindResultEvents(container, state);
 
+    // 検索を実行した直後（お気に入りからの直接遷移も含む）は、フォーム入力の下にある
+    // 結果まで自動でスクロールする。リアルタイム追随のサイレント更新では動かさない。
+    if (!silent) container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
     // 本日の検索で、リアルタイムに追随できる経路があるときだけポーリングする
     if (result.found && result.isToday) startRealtimePolling(state, seq);
   }
@@ -599,6 +676,7 @@
         stopRealtimePolling();
         return;
       }
+      if (!autoRefreshEnabled()) return;
       runSearch(state, seq, { silent: true });
     }, REALTIME_POLL_MS);
   }
@@ -631,6 +709,7 @@
         </p>
         ${notes.map((note) => `<p class="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2">${esc(note)}</p>`).join('')}
       </div>
+      <div id="rs-fav-row" class="mb-4"></div>
       <div class="space-y-4">
         ${result.journeys.map((journey, index) => renderJourneyCard(journey, index)).join('')}
       </div>
@@ -902,6 +981,8 @@
 
   /* ---------- 結果内の操作 ---------- */
   function bindResultEvents(container, state) {
+    paintFavRow(state);
+
     container.querySelectorAll('[data-role="rs-toggle-stops"]').forEach((button) => {
       button.addEventListener('click', () => {
         const legKey = button.dataset.leg;

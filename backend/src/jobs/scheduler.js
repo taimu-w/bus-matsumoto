@@ -4,6 +4,7 @@ const { finishTrips } = require('../services/finishService');
 const { purgeOldDailyTrips } = require('../services/dailyTripBuilder');
 const { purgeOldGpsLogs } = require('../services/vehicleAssigner');
 const { isNightTime } = require('../utils/time');
+const jobMonitor = require('../services/jobMonitor');
 
 let pipelineTimer = null;
 let finishTimer = null;
@@ -33,7 +34,7 @@ function start() {
         console.log('[scheduler] 深夜帯のため finish 停止');
         return;
       }
-      const result = await finishTrips();
+      const result = await jobMonitor.track('scheduler.finishTrips', finishTrips);
       if (result.finished > 0) {
         console.log(`[scheduler] finish: ${result.finished} 件の割り当てを終了処理しました。`);
       }
@@ -50,8 +51,10 @@ function start() {
     if (cleanupRunning) return;
     cleanupRunning = true;
     try {
-      await purgeOldGpsLogs();
-      await purgeOldDailyTrips();
+      await jobMonitor.track('scheduler.cleanup', async () => {
+        await purgeOldGpsLogs();
+        await purgeOldDailyTrips();
+      });
     } catch (err) {
       console.error('[scheduler] クリーンアップ実行エラー:', err);
     } finally {

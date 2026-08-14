@@ -3,7 +3,7 @@ const POLL_MS = 20000;
 // 自動更新をまたいで保持する状態（開いているアコーディオン・スクロール位置）
 const openTripKeys = new Set();
 
-// 取得した最新データを保持しておく（お気に入り計算・再描画用）
+// 取得した最新データを保持しておく（再描画用）
 let currentBuses = [];
 let currentTimetable = [];
 let selectedRouteId = '11';
@@ -13,8 +13,23 @@ let spaRenderCount = 0;
 
 function $(id) { return document.getElementById(id); }
 
+/**
+ * ブラウザ単位の匿名クライアントID（localStorageで永続化）。
+ * サーバー側の閲覧数カウント（管理画面表示・サーバー負荷判定）にのみ使う。
+ * 他のSPAファイル（timetable.js等）からも参照できるようwindowへ公開する。
+ */
+function getClientId() {
+  let id = localStorage.getItem('busTimeClientId');
+  if (!id) {
+    id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    localStorage.setItem('busTimeClientId', id);
+  }
+  return id;
+}
+window.BUS_TIME_CLIENT_ID = getClientId();
+
 async function fetchJson(url) {
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: { 'X-Client-Id': window.BUS_TIME_CLIENT_ID } });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -142,175 +157,98 @@ function setupAccordionToggle(card, openSet, key, getScrollTarget) {
   });
 }
 
-/* ---------- お気に入り機能（localStorage連携） ---------- */
-function getFavorites() {
-  try {
-    return JSON.parse(localStorage.getItem('favStops')) || [];
-  } catch(e) {
-    return [];
-  }
-}
+/* ---------- お気に入り機能 ----------
+ * 実体（登録・削除・永続化）は favorites.js に一本化した。ここでは
+ * ホーム画面の「お気に入り」一覧（#/favorites）の描画と、バス路線カード・
+ * 路線詳細画面への★ボタン設置のみを担当する。 */
+const FAV_TYPE_LABELS = {
+  route: 'バス路線',
+  routesearch: 'ルート検索',
+  trip: '便',
+  timetable: '時刻表',
+  busstop: 'バス停'
+};
+const FAV_TYPE_ORDER = ['route', 'routesearch', 'trip', 'timetable', 'busstop'];
 
-function toggleFavorite(stopName) {
-  let favs = getFavorites();
-  if (favs.includes(stopName)) {
-    favs = favs.filter(s => s !== stopName);
+/** お気に入りのurlはハッシュ（#/realtime/...）とパス（/busstop/...）の両方があり得るため振り分ける。 */
+function goToFavoriteUrl(url) {
+  if (String(url).startsWith('#')) {
+    window.location.hash = url;
   } else {
-    favs.push(stopName);
-  }
-  localStorage.setItem('favStops', JSON.stringify(favs));
-}
-
-function setupFavoritesContainer() {
-  if (!$('favorites-container')) {
-    const container = document.createElement('div');
-    container.id = 'favorites-container';
-    container.className = 'mb-6';
-    const target = $('realtime-buses');
-    if (target && target.parentNode) {
-      target.parentNode.insertBefore(container, target);
-    }
+    navigateToPath(url);
   }
 }
 
-function renderFavorites() {
-  setupFavoritesContainer();
-  const container = $('favorites-container');
-  container.innerHTML = '';
-  const favs = getFavorites();
+function renderFavoritesList() {
+  const container = $('favorites-list');
+  if (!container) return;
+  const favs = window.Favorites ? window.Favorites.list() : [];
 
   if (favs.length === 0) {
-    container.style.display = 'none';
+    container.innerHTML = '<p class="text-sm font-bold text-gray-500 text-center py-12 px-4">まだお気に入りはありません。<br>バス路線・ルート検索・便・時刻表・バス停の各画面にある★ボタンから登録できます。</p>';
     return;
   }
-  container.style.display = 'block';
 
-  const title = document.createElement('h2');
-  title.className = 'text-lg font-bold text-gray-800 mb-3 flex items-center gap-2 px-1';
-  title.innerHTML = '<span>⭐</span> よく使うバス停';
-  container.appendChild(title);
-
-  const now = new Date();
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
-
-  favs.forEach(stopName => {
-    // 1. リアルタイム情報（接近中のバス）を探す
-    const approachingBuses = [];
-    currentBuses.forEach(bus => {
-      const targetStop = (bus.stops || []).find(s => s.name === stopName);
-      // これから来る（通過ではなく、到着済でもない）場合
-      if (targetStop && targetStop.status !== '到着済' && targetStop.status !== '通過' && !targetStop.isPassStop) {
-        approachingBuses.push({
-          timeStr: targetStop.predictedTime || targetStop.scheduledTime,
-          isRealtime: bus.isRealtime,
-          delay: targetStop.predictedDelayMinutes || targetStop.delayMinutes || 0,
-          rawStop: targetStop
-        });
-      }
-    });
-
-    // 2. 時刻表から今後の便を探す
-    const scheduledTrips = [];
-    currentTimetable.forEach(trip => {
-      const targetStop = (trip.stops || []).find(s => s.stopName === stopName && s.scheduledTime && s.scheduledTime.includes(':'));
-      if (targetStop) {
-        const [h, m] = targetStop.scheduledTime.split(':').map(Number);
-        const tripMinutes = h * 60 + m;
-        // 現在時刻以降の便を抽出
-        if (tripMinutes >= nowMinutes) {
-          scheduledTrips.push({
-            timeStr: targetStop.scheduledTime,
-            delay: 0,
-            rawStop: targetStop
-          });
-        }
-      }
-    });
-
-    // 3. 両方をマージして直近の2件を抽出する
-    const displayList = [];
-    
-    approachingBuses.forEach(rt => {
-      displayList.push({
-        type: 'realtime',
-        timeStr: rt.timeStr,
-        delay: rt.delay,
-        label: rt.isRealtime ? '接近中' : '運行中',
-        rawStop: rt.rawStop
-      });
-    });
-
-    scheduledTrips.forEach(st => {
-      // リアルタイム情報の中に同じ定刻の便がすでにあれば重複させない
-      const isDuplicate = displayList.some(d => d.type === 'realtime' && d.rawStop.scheduledTime === st.timeStr);
-      if (!isDuplicate) {
-        displayList.push({
-          type: 'scheduled',
-          timeStr: st.timeStr,
-          delay: 0,
-          label: '予定'
-        });
-      }
-    });
-
-    // 時間順にソート（時刻文字列を分に変換）
-    displayList.sort((a, b) => {
-       const aTime = (a.timeStr || '').includes(':') ? a.timeStr : '99:99';
-       const bTime = (b.timeStr || '').includes(':') ? b.timeStr : '99:99';
-       const [ah, am] = aTime.split(':').map(Number);
-       const [bh, bm] = bTime.split(':').map(Number);
-       return (ah * 60 + am) - (bh * 60 + bm);
-    });
-
-    const next2 = displayList.slice(0, 2); // 先発と次発を取得
-
-    // 4. カードのDOM構築
-    const card = document.createElement('div');
-    card.className = 'bg-white rounded-xl shadow-sm border-2 border-yellow-300 overflow-hidden mb-4';
-    
-    let infoHtml = '';
-    if (next2.length === 0) {
-      infoHtml = '<p class="text-sm text-gray-500 py-2 text-center">本日の運行は終了しました</p>';
-    } else {
-      next2.forEach((info, idx) => {
-        const titleText = idx === 0 ? '先発' : '次発';
-        const delayHtml = info.delay > 1 ? `<span class="text-red-500 text-xs font-bold ml-1">(${info.delay}分遅れ)</span>` : '';
-        const badgeClass = info.type === 'realtime' 
-          ? (info.label === '接近中' ? 'bg-green-100 text-green-800 border-green-200 animate-pulse' : 'bg-blue-100 text-blue-800 border-blue-200') 
-          : 'bg-gray-100 text-gray-600 border-gray-200';
-        
-        infoHtml += `
-          <div class="flex items-center justify-between py-2 ${idx === 0 && next2.length > 1 ? 'border-b border-dashed border-yellow-200' : ''}">
-            <div class="flex items-baseline gap-2">
-              <span class="text-xs font-bold text-gray-500 w-8">${titleText}</span>
-              <span class="text-2xl font-bold tracking-tight ${info.delay > 1 ? 'text-red-600' : 'text-gray-800'}">${escapeHtml(info.timeStr)}</span>
-              ${delayHtml}
-            </div>
-            <span class="text-[10px] font-bold px-2.5 py-1 rounded border ${badgeClass}">${info.label}</span>
-          </div>
-        `;
-      });
-    }
-
-    card.innerHTML = `
-      <div class="flex justify-between items-center p-3 bg-yellow-50 border-b border-yellow-200">
-        <h3 class="font-bold text-md text-gray-900">${escapeHtml(stopName)}</h3>
-        <button data-fav-remove="${escapeHtml(stopName)}" class="text-yellow-500 hover:text-gray-400 text-2xl focus:outline-none transition-colors leading-none" title="お気に入り解除">★</button>
-      </div>
-      <div class="px-4 py-2">
-        ${infoHtml}
-      </div>
-    `;
-
-    const removeBtn = card.querySelector('[data-fav-remove]');
-    removeBtn.addEventListener('click', () => {
-      toggleFavorite(stopName);
-      renderFavorites();
-      renderBuses(currentBuses); // リスト内の☆表示を同期させるため
-    });
-
-    container.appendChild(card);
+  const groups = new Map();
+  favs.forEach((fav) => {
+    if (!groups.has(fav.type)) groups.set(fav.type, []);
+    groups.get(fav.type).push(fav);
   });
+
+  container.innerHTML = FAV_TYPE_ORDER
+    .filter((type) => groups.has(type))
+    .map((type) => {
+      const items = groups.get(type)
+        .map((fav) => `
+          <div class="flex items-center gap-2 bg-white rounded-xl border-2 border-gray-100 hover:border-amber-300 transition-all">
+            <button type="button" data-role="fav-open" data-url="${escapeHtml(fav.url)}"
+                    class="flex-1 min-w-0 text-left px-3 py-3 active:scale-[0.99] transition-transform">
+              <span class="block font-bold text-gray-900 truncate">${escapeHtml(fav.title)}</span>
+              ${fav.subtitle ? `<span class="block text-[11px] text-gray-500 font-bold truncate mt-0.5">${escapeHtml(fav.subtitle)}</span>` : ''}
+            </button>
+            <button type="button" data-role="fav-remove" data-id="${escapeHtml(fav.id)}"
+                    class="shrink-0 text-gray-300 hover:text-red-500 p-3" title="お気に入り解除">
+              <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l2.6 5.4 5.9.7-4.3 4.1 1.1 5.9L12 16.9l-5.3 2.7 1.1-5.9-4.3-4.1 5.9-.7L12 3.5z"/></svg>
+            </button>
+          </div>`)
+        .join('');
+      return `
+        <div class="mb-5">
+          <h3 class="text-xs font-bold text-gray-500 mb-2 px-1">${escapeHtml(FAV_TYPE_LABELS[type] || type)}（${groups.get(type).length}）</h3>
+          <div class="space-y-2">${items}</div>
+        </div>`;
+    })
+    .join('');
+
+  container.querySelectorAll('[data-role="fav-open"]').forEach((btn) => {
+    btn.addEventListener('click', () => goToFavoriteUrl(btn.dataset.url));
+  });
+  container.querySelectorAll('[data-role="fav-remove"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      window.Favorites.remove(btn.dataset.id);
+      renderFavoritesList();
+    });
+  });
+}
+
+async function renderFavoritesPage() {
+  setPageTitle('お気に入り', 'Favorites');
+  $('section-favorites').style.display = 'block';
+  renderFavoritesList();
+}
+// favorites.js側の★ボタンがどこでトグルされても、開いていれば一覧を最新化する
+window.onFavoritesChanged = () => {
+  if ($('section-favorites') && $('section-favorites').style.display !== 'none') renderFavoritesList();
+};
+
+function routeFavorite(route) {
+  return {
+    id: `route|${route.id}`,
+    type: 'route',
+    title: route.name || route.short_name || '路線',
+    subtitle: 'バス路線・リアルタイム運行状況',
+    url: routeHref(route.id)
+  };
 }
 
 /* ---------- データ取得（画面の見た目・スクロール位置を維持したまま更新する） ---------- */
@@ -326,8 +264,7 @@ async function loadAll() {
     routeOptions = routeData.routes || [];
     syncRouteSelector();
 
-    const [settings, busData, timetable] = await Promise.all([
-      fetchJson(`${API_BASE}/settings?routeId=${encodeURIComponent(selectedRouteId)}`),
+    const [busData, timetable] = await Promise.all([
       fetchJson(`${API_BASE}/buses?routeId=${encodeURIComponent(selectedRouteId)}`),
       fetchJson(`${API_BASE}/timetable?routeId=${encodeURIComponent(selectedRouteId)}`)
     ]);
@@ -340,8 +277,6 @@ async function loadAll() {
     $('loading').style.display = 'none';
     $('app-content').style.display = 'block';
 
-    renderNotices(settings);
-    renderFavorites(); // お気に入りコンテナの表示
     renderBuses(currentBuses);
     renderSchedule(currentTimetable);
 
@@ -380,7 +315,12 @@ function syncRouteSelector() {
   selector.value = selectedRouteId;
 }
 
-/* ---------- お知らせ ---------- */
+/* ---------- お知らせ ----------
+ * トップ画面（ホーム）にのみ表示する。以前はリアルタイム運行状況画面に出していたが、
+ * そちらは特定路線を見るための画面であり、お知らせの置き場としては目に触れにくいため、
+ * ホーム画面（#/）に移した。 */
+const IMPORTANT_NOTICE_SHOWN_KEY = 'busTimeImportantNoticeShown';
+
 function renderNotices(settings) {
   const container = $('notices');
   container.innerHTML = '';
@@ -399,9 +339,23 @@ function renderNotices(settings) {
     container.appendChild(el);
   }
 
+  // 重要なお知らせのポップアップは、同じ内容を毎回の更新のたびに出し直さないよう、
+  // 内容ごとに一度表示したら localStorage に記録し、次回以降は内容が変わるまで出さない。
   if (settings.importantNotice) {
-    $('important-body').textContent = settings.importantNotice;
-    openModal('important-modal');
+    if (localStorage.getItem(IMPORTANT_NOTICE_SHOWN_KEY) !== settings.importantNotice) {
+      $('important-body').textContent = settings.importantNotice;
+      openModal('important-modal');
+      localStorage.setItem(IMPORTANT_NOTICE_SHOWN_KEY, settings.importantNotice);
+    }
+  }
+}
+
+async function loadNotices() {
+  try {
+    const settings = await fetchJson(`${API_BASE}/settings`);
+    renderNotices(settings);
+  } catch (err) {
+    console.error('お知らせの取得エラー:', err);
   }
 }
 
@@ -625,7 +579,7 @@ function setPageTitle(title, subtitle) {
 }
 
 function hideAllPages() {
-  ['section-home', 'section-route-list', 'section-realtime', 'section-routesearch', 'section-map', 'section-busmap', 'section-stopmap', 'section-timetable', 'section-busstop', 'notices'].forEach((id) => {
+  ['section-home', 'section-favorites', 'section-route-list', 'section-realtime', 'section-routesearch', 'section-map', 'section-busmap', 'section-stopmap', 'section-timetable', 'section-busstop', 'notices'].forEach((id) => {
     const el = $(id);
     if (el) el.style.display = 'none';
   });
@@ -653,20 +607,30 @@ function renderRouteList() {
     const displayName = route.name || route.short_name || '路線';
     const accent = parseHexColor(route.color) ? `#${String(route.color).replace('#', '')}` : '#93c5fd';
 
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-2 bg-white rounded-xl border-2 border-gray-100 shadow-sm hover:border-blue-400 transition-all';
+    row.style.borderLeft = `6px solid ${accent}`;
+    row.style.boxShadow = 'inset 3px 0 0 rgba(0,0,0,0.08)';
+
     const link = document.createElement('a');
     link.href = routeHref(route.id);
-    link.className = 'flex items-center gap-3 bg-white rounded-xl border-2 border-gray-100 p-4 pl-3 shadow-sm hover:border-blue-400 active:scale-[0.99] transition-all';
+    link.className = 'flex-1 min-w-0 flex items-center gap-3 p-4 pl-3 active:scale-[0.99] transition-transform';
     // 帯（accent bar）は路線カラーそのもの。淡色の路線カラーが白背景に埋もれて
     // 見えなくなるのを避けるため、帯の縁に常に薄い暗色の輪郭を重ねておく。
-    link.style.borderLeft = `6px solid ${accent}`;
-    link.style.boxShadow = 'inset 3px 0 0 rgba(0,0,0,0.08)';
     link.innerHTML = `
       <span class="min-w-0">
         <p class="font-bold text-lg text-blue-900 truncate">${escapeHtml(displayName)}</p>
       </span>
       <svg class="w-5 h-5 text-gray-300 shrink-0 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>
     `;
-    container.appendChild(link);
+    row.appendChild(link);
+    if (window.Favorites) {
+      const starWrap = document.createElement('div');
+      starWrap.className = 'pr-3 shrink-0';
+      starWrap.innerHTML = window.Favorites.starButtonHtml(routeFavorite(route), { size: 'w-9 h-9' });
+      row.appendChild(starWrap);
+    }
+    container.appendChild(row);
   });
 }
 
@@ -675,6 +639,7 @@ function parseHashRoute() {
   if (parts[0] === 'search') return { page: 'search' };
   if (parts[0] === 'busmap') return { page: 'busmap' };
   if (parts[0] === 'map') return { page: 'map' };
+  if (parts[0] === 'favorites') return { page: 'favorites' };
   if (parts[0] !== 'realtime') return { page: 'home' };
   if (parts.length < 3) return { page: 'realtime-list' };
   const feedId = decodeURIComponent(parts[1]);
@@ -935,6 +900,7 @@ async function renderBusMap() {
       stopBusMapPolling();
       return;
     }
+    if (!autoRefreshEnabled) return;
     loadBusMapBuses();
   }, POLL_MS);
 }
@@ -988,6 +954,8 @@ async function renderCurrentRoute() {
     if (state.page === 'home') {
       setPageTitle('バスタイム', 'Real-time Bus Guide');
       $('section-home').style.display = 'block';
+      $('notices').style.display = 'block';
+      loadNotices();
       return;
     }
     if (state.page === 'search') {
@@ -1001,6 +969,10 @@ async function renderCurrentRoute() {
     }
     if (state.page === 'busmap') {
       await renderBusMap();
+      return;
+    }
+    if (state.page === 'favorites') {
+      await renderFavoritesPage();
       return;
     }
     await ensureRouteOptions();
@@ -1024,8 +996,10 @@ async function renderCurrentRoute() {
     const selectedRoute = routeOptions.find((route) => route.id === selectedRouteId);
     setPageTitle(selectedRoute?.name || 'リアルタイム運行情報', 'Realtime Timetable');
     $('selected-route-name').textContent = selectedRoute?.short_name || selectedRoute?.name || '';
+    $('selected-route-fav').innerHTML = (window.Favorites && selectedRoute)
+      ? window.Favorites.starButtonHtml(routeFavorite(selectedRoute), { size: 'w-9 h-9' })
+      : '';
     $('section-realtime').style.display = 'block';
-    $('notices').style.display = 'block';
     await loadAll();
   } catch (err) {
     console.error('画面表示エラー:', err);
@@ -1035,9 +1009,58 @@ async function renderCurrentRoute() {
   }
 }
 
+/* ---------- 自動更新のON/OFF ---------- */
+const AUTO_REFRESH_STORAGE_KEY = 'busTimeAutoRefresh';
+// ユーザーが明示的に選んだON/OFF（localStorageで次回訪問時も引き継ぐ）。
+// サーバー高負荷による一時停止とは別の状態として扱う（そちらは保存しない＝一時的）。
+let autoRefreshEnabled = localStorage.getItem(AUTO_REFRESH_STORAGE_KEY) !== 'off';
+
+function updateAutoRefreshToggleUI() {
+  const dot = $('auto-refresh-dot');
+  const label = $('auto-refresh-label');
+  if (!dot || !label) return;
+  dot.className = `w-2 h-2 rounded-full shrink-0 ${autoRefreshEnabled ? 'bg-green-500' : 'bg-gray-400'}`;
+  label.textContent = `自動更新 ${autoRefreshEnabled ? 'ON' : 'OFF'}`;
+}
+
+function setAutoRefreshEnabled(enabled, persist = true) {
+  autoRefreshEnabled = enabled;
+  if (persist) localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, enabled ? 'on' : 'off');
+  updateAutoRefreshToggleUI();
+}
+// timetable.js・busstop.js・routesearch.js の各ポーリングからも参照できるようにする
+window.isBusTimeAutoRefreshEnabled = () => autoRefreshEnabled;
+
+function showLoadToast(message) {
+  const toast = $('load-toast');
+  if (!toast) return;
+  toast.textContent = message;
+  toast.classList.remove('hidden');
+  clearTimeout(showLoadToast._timer);
+  showLoadToast._timer = setTimeout(() => toast.classList.add('hidden'), 8000);
+}
+
+/**
+ * 現在のサイト閲覧数からサーバー負荷を確認し、高負荷であれば
+ * ポップアップで知らせたうえで自動更新を一時的にOFFにする。
+ * ユーザーが既に手動でOFFにしている場合は何もしない（二重に通知しない）。
+ */
+async function checkServerLoad() {
+  try {
+    const status = await fetchJson(`${API_BASE}/server-load`);
+    if (status.highLoad && autoRefreshEnabled) {
+      setAutoRefreshEnabled(false, false);
+      showLoadToast('現在アクセスが集中しているため、自動更新を一時的にOFFにしました。「更新」ボタンで手動更新できます。');
+    }
+  } catch (err) {
+    // 負荷判定の取得失敗は自動更新の可否に影響させない（サイレントに無視）
+  }
+}
+
 /* ---------- 初期化 ---------- */
 const refreshBtn = $('refresh-btn');
 const routeSelect = $('route-select');
+const autoRefreshToggle = $('auto-refresh-toggle');
 
 if (refreshBtn) refreshBtn.addEventListener('click', () => {
   if (parseHashRoute().page === 'realtime-detail') loadAll();
@@ -1048,6 +1071,10 @@ if (routeSelect) {
     loadAll();
   });
 }
+if (autoRefreshToggle) {
+  updateAutoRefreshToggleUI();
+  autoRefreshToggle.addEventListener('click', () => setAutoRefreshEnabled(!autoRefreshEnabled));
+}
 
 window.addEventListener('hashchange', renderCurrentRoute);
 // 時刻表検索機能が使う History API による遷移（戻る/進む）にも追随させる
@@ -1056,5 +1083,13 @@ window.addEventListener('popstate', renderCurrentRoute);
 window.renderCurrentRoute = renderCurrentRoute;
 renderCurrentRoute();
 setInterval(() => {
-  if (parseHashRoute().page === 'realtime-detail') loadAll();
+  if (!autoRefreshEnabled) return;
+  const page = parseHashRoute().page;
+  if (page === 'realtime-detail') loadAll();
+  // parseHashRoute()はパスルーティング画面（/routesearch等）でも便宜上'home'を返すため、
+  // 実際にホーム画面のpathnameにいるかも合わせて確認する
+  if (page === 'home' && window.location.pathname === '/') loadNotices();
 }, POLL_MS);
+// サーバー負荷チェックは画面によらず常時行う（次にポーリング画面を開いたときには既にOFFにしておくため）
+checkServerLoad();
+setInterval(checkServerLoad, POLL_MS);
