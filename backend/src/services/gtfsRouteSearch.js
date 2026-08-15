@@ -261,6 +261,20 @@ function dayOffsetOf(seconds) {
   return Number.isFinite(seconds) ? Math.floor(seconds / DAY_SECONDS) : 0;
 }
 
+/**
+ * "HH:MM"形式の予測時刻（日付情報を持たない）を、基準となる定刻の秒（日跨ぎ込み）に
+ * 最も近い日でそろえた秒数にする。深夜便の日跨ぎで半日以上ずれるのを防ぐ。
+ */
+function alignPredictedSeconds(predictedTime, scheduleSeconds) {
+  const raw = parseTimeToSeconds(predictedTime);
+  if (!Number.isFinite(raw) || !Number.isFinite(scheduleSeconds)) return null;
+  const base = Math.floor(scheduleSeconds / DAY_SECONDS) * DAY_SECONDS;
+  let candidate = base + raw;
+  if (candidate - scheduleSeconds > DAY_SECONDS / 2) candidate -= DAY_SECONDS;
+  else if (scheduleSeconds - candidate > DAY_SECONDS / 2) candidate += DAY_SECONDS;
+  return candidate;
+}
+
 /* ==========================================================
  * RAPTOR（ラウンド型）探索
  * ========================================================== */
@@ -627,6 +641,7 @@ function buildJourney(index, labels) {
     walkMinutes: Math.round(walkSeconds / 60),
     isRecommended: false,
     realtime: false,
+    transferAtRisk: false,
     fare: null,
     legs
   };
@@ -673,6 +688,43 @@ function attachFares(fareIndex, journeys) {
       partial: unknownCount > 0 && unknownCount < busLegCount,
       unknown: unknownCount === busLegCount
     };
+  }
+}
+
+/**
+ * 予測が重なったバス便どうしの乗り換えが、実際に間に合うかを検証する。
+ * 定刻上は間に合う乗換でも、前区間が遅延して到着予測が乗換先の予測発車時刻を
+ * 超えてしまう場合は、その乗換に「間に合わない可能性」の警告を付ける。
+ * 経路自体は残す（soft-fail方針を踏襲）が、呼び出し側でおすすめ選定・並び替えに使う。
+ */
+function flagTransferRisks(journey) {
+  const legs = journey.legs;
+  for (let i = 0; i < legs.length; i += 1) {
+    const leg = legs[i];
+    if (leg.type !== 'bus' || !leg.realtime) continue;
+
+    const next = legs[i + 1];
+    if (!next) continue;
+    const walkLeg = next.type === 'walk' ? next : null;
+    const nextBusLeg = walkLeg ? legs[i + 2] : next;
+    if (!nextBusLeg || nextBusLeg.type !== 'bus' || !nextBusLeg.realtime) continue;
+
+    const arrivalRt = alignPredictedSeconds(leg.realtime.predictedArrivalTime, leg.arrivalSeconds);
+    const departureRt = alignPredictedSeconds(nextBusLeg.realtime.predictedDepartureTime, nextBusLeg.departureSeconds);
+    if (arrivalRt === null && departureRt === null) continue;
+
+    const effectiveArrival = arrivalRt !== null ? arrivalRt : leg.arrivalSeconds;
+    const effectiveDeparture = departureRt !== null ? departureRt : nextBusLeg.departureSeconds;
+    // 徒歩を挟む乗換は徒歩所要時間そのものが必要な間隔。同一停留所ならMIN_TRANSFER_SECONDS。
+    const requiredGapSeconds = walkLeg ? walkLeg.arrivalSeconds - walkLeg.departureSeconds : MIN_TRANSFER_SECONDS;
+
+    if (effectiveArrival + requiredGapSeconds > effectiveDeparture) {
+      nextBusLeg.transferRisk = {
+        atStopName: leg.toStop.name,
+        shortByMinutes: Math.max(1, Math.ceil((effectiveArrival + requiredGapSeconds - effectiveDeparture) / 60))
+      };
+      journey.transferAtRisk = true;
+    }
   }
 }
 
@@ -767,6 +819,8 @@ async function attachRealtime(journeys) {
       journey.delayMinutes = journey.legs
         .filter((leg) => leg.type === 'bus' && leg.realtime)
         .reduce((max, leg) => Math.max(max, leg.realtime.predictedArrivalDelayMinutes || 0), 0);
+
+      flagTransferRisks(journey);
     }
   }
 }
@@ -825,8 +879,8 @@ function mergeJourneys(base, extra) {
   return merged;
 }
 
-function rankJourneys(journeys, limit) {
-  // 歩きすぎる経路は、他に候補があるなら出さない
+/** 到着時刻順にソートする（歩きすぎる経路は、他に候補があるなら除く）。 */
+function sortJourneys(journeys) {
   const walkable = journeys.filter((journey) => journey.walkMinutes <= MAX_TOTAL_WALK_MINUTES);
   if (walkable.length > 0) journeys = walkable;
 
@@ -836,22 +890,31 @@ function rankJourneys(journeys, limit) {
       a.transferCount - b.transferCount ||
       b.departureSeconds - a.departureSeconds
   );
-  const top = journeys.slice(0, limit);
+  return journeys;
+}
 
-  let bestIndex = -1;
+/**
+ * 最もスコアの良い経路に「おすすめ」を付ける。
+ * リアルタイム反映後に乗換が間に合わない可能性が判明した経路は、
+ * 他に間に合う候補がある限りおすすめから外す（間に合わない案を積極的に薦めない）。
+ */
+function pickRecommended(journeys) {
+  const feasible = journeys.filter((journey) => !journey.transferAtRisk);
+  const pool = feasible.length > 0 ? feasible : journeys;
+
+  let best = null;
   let bestScore = Number.POSITIVE_INFINITY;
-  top.forEach((journey, i) => {
+  for (const journey of pool) {
     const score =
       journey.arrivalSeconds +
       journey.transferCount * TRANSFER_PENALTY_SECONDS +
       journey.walkMinutes * 60 * WALK_PENALTY_RATIO;
     if (score < bestScore) {
       bestScore = score;
-      bestIndex = i;
+      best = journey;
     }
-  });
-  if (bestIndex >= 0) top[bestIndex].isRecommended = true;
-  return top;
+  }
+  if (best) best.isRecommended = true;
 }
 
 /**
@@ -1019,19 +1082,23 @@ async function searchJourneys(options = {}) {
   const originTimes = new Map();
   for (const key of originKeys) originTimes.set(key, baseSeconds);
 
+  // 表示件数より少し多めに集めておく。リアルタイム反映後に「間に合わない乗換」が
+  // 判明した案を後段で押し下げても、代わりに出せる候補が残るようにするため。
+  const bufferLimit = Math.min(limit + 3, 10);
+
   // 段階的フォールバック（仕様書7章）
   let journeys = [];
   let relaxation = 'normal';
   let ctx = null;
   for (const step of RELAXATION_STEPS) {
     ctx = buildContext(searchIndex, dateStr, step);
-    journeys = collectJourneys(ctx, originTimes, destinationKeys, limit);
+    journeys = collectJourneys(ctx, originTimes, destinationKeys, bufferLimit);
 
     // 徒歩接続を使うと「1駅手前で降りて歩く」方が最速になり、
     // バスだけで完結する案が枝刈りで消えることがある。
     // 利用者はふつう歩かない案も知りたいので、徒歩なしの探索結果も必ず混ぜる。
     const walkFreeCtx = buildContext(searchIndex, dateStr, { ...step, radiusMeters: 0 });
-    journeys = mergeJourneys(journeys, collectJourneys(walkFreeCtx, originTimes, destinationKeys, limit));
+    journeys = mergeJourneys(journeys, collectJourneys(walkFreeCtx, originTimes, destinationKeys, bufferLimit));
 
     if (journeys.length > 0) {
       relaxation = step.key;
@@ -1054,10 +1121,17 @@ async function searchJourneys(options = {}) {
     });
   }
 
-  const ranked = rankJourneys(journeys, limit);
+  const sorted = sortJourneys(journeys).slice(0, bufferLimit);
   const fareIndex = await getFareIndex();
-  attachFares(fareIndex, ranked);
-  if (isToday) await attachRealtime(ranked);
+  attachFares(fareIndex, sorted);
+  if (isToday) await attachRealtime(sorted);
+
+  // リアルタイム反映で「乗換が間に合わない可能性」が判明した案は、
+  // 他に間に合う候補があれば後ろへ回してから表示件数まで切り詰める。
+  const feasible = sorted.filter((journey) => !journey.transferAtRisk);
+  const risky = sorted.filter((journey) => journey.transferAtRisk);
+  const ranked = (feasible.length > 0 ? feasible.concat(risky) : risky).slice(0, limit);
+  pickRecommended(ranked);
 
   // 徒歩だけで行ける距離かどうかの補足（「そもそも歩いた方が早い」ケースの案内）
   const walkableHint = findWalkableHint(searchIndex, originKeys, destinationKeys);

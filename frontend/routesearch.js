@@ -738,6 +738,9 @@
     if (journey.arrivalDayOffset > 0) {
       badges.push('<span class="text-[11px] font-bold text-indigo-800 bg-indigo-100 border border-indigo-300 px-2 py-1 rounded">翌日着</span>');
     }
+    if (journey.transferAtRisk) {
+      badges.push('<span class="text-[11px] font-bold text-red-800 bg-red-100 border border-red-300 px-2 py-1 rounded">⚠ 乗換に間に合わない可能性</span>');
+    }
 
     const fareText = journey.fare.unknown
       ? '運賃不明'
@@ -852,6 +855,12 @@
          </div>`
       : '';
 
+    const transferRiskHtml = leg.transferRisk
+      ? `<div class="text-[11px] font-bold text-red-800 bg-red-50 border border-red-200 rounded-lg px-2 py-1 mt-2">
+           ⚠ ${esc(leg.transferRisk.atStopName)}での乗り換えは、遅延の影響で約${leg.transferRisk.shortByMinutes}分間に合わない見込みです
+         </div>`
+      : '';
+
     const tripUrl = `/timetable/trips/${encodeURIComponent(leg.feedId)}/${encodeURIComponent(leg.routeId)}/${encodeURIComponent(leg.tripId)}/${encodeURIComponent(leg.tripDepartureTime)}`;
 
     return `
@@ -869,6 +878,7 @@
             ${leg.fare ? ` ／ ${esc(yen(leg.fare.price))}` : ' ／ 運賃不明'}
           </p>
           ${realtimeHtml}
+          ${transferRiskHtml}
           <div class="flex flex-wrap gap-3 mt-2">
             <button type="button" data-role="rs-toggle-stops" data-leg="${esc(legKey)}"
                     class="text-[11px] font-bold text-purple-700">
