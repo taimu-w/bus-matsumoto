@@ -750,7 +750,8 @@ async function attachRealtime(journeys) {
   const busEntryCache = new Map();
 
   for (const journey of journeys) {
-    for (const leg of journey.legs) {
+    for (let legIndex = 0; legIndex < journey.legs.length; legIndex += 1) {
+      const leg = journey.legs[legIndex];
       if (leg.type !== 'bus') continue;
       // 翌日ぶんにずらして拾った便は「今日のリアルタイム」ではない
       if (leg.departureDayOffset > 0) continue;
@@ -818,7 +819,26 @@ async function attachRealtime(journeys) {
           departed: Boolean(boardMatch && boardMatch.index <= lastArrivedIndex)
         };
         if (leg.realtime.predictedDepartureTime) leg.departureTime = leg.realtime.predictedDepartureTime;
-        if (leg.realtime.predictedArrivalTime) leg.arrivalTime = leg.realtime.predictedArrivalTime;
+        if (leg.realtime.predictedArrivalTime) {
+          leg.arrivalTime = leg.realtime.predictedArrivalTime;
+
+          // 直後が徒歩区間なら、その発・着時刻もこの便の実際の到着に合わせてずらす。
+          // ここを更新しないと、徒歩区間は定刻の到着時刻を起点にしたままになり、
+          // 遅延で繰り下がった着時刻より前に徒歩の発時刻が来る（＝着＜発の矛盾表示）になる。
+          const nextLeg = journey.legs[legIndex + 1];
+          if (nextLeg && nextLeg.type === 'walk') {
+            const arrivalRt = alignPredictedSeconds(leg.realtime.predictedArrivalTime, leg.arrivalSeconds);
+            const deltaSeconds = arrivalRt === null ? 0 : arrivalRt - nextLeg.departureSeconds;
+            if (deltaSeconds !== 0) {
+              nextLeg.departureSeconds += deltaSeconds;
+              nextLeg.arrivalSeconds += deltaSeconds;
+              nextLeg.departureTime = formatTime(nextLeg.departureSeconds);
+              nextLeg.arrivalTime = formatTime(nextLeg.arrivalSeconds);
+              nextLeg.departureDayOffset = dayOffsetOf(nextLeg.departureSeconds);
+              nextLeg.arrivalDayOffset = dayOffsetOf(nextLeg.arrivalSeconds);
+            }
+          }
+        }
         journey.realtime = true;
       } catch (err) {
         console.error('[gtfsRouteSearch] リアルタイム重ね合わせエラー（定刻表示で継続）:', err.message);
@@ -826,10 +846,28 @@ async function attachRealtime(journeys) {
     }
 
     // 区間の表示時刻が予測に置き換わったら、カード上部の出発・到着時刻も合わせる。
-    // 秒（durationMinutes等の計算元）は定刻のまま保持する。
+    // 各区間のarrivalSeconds/departureSeconds自体（rideMinutes等の計算元）は定刻のまま
+    // 保持するが（乗車時間の目安が予測のブレで揺れないようにするため）、カード上部の
+    // 所要時間はここで表示中の出発・到着時刻から改めて計算し直す。そうしないと、
+    // 上に出ている時刻の差分と「◯分」の表示が食い違って見える。
     if (journey.realtime) {
-      journey.departureTime = journey.legs[0].departureTime;
-      journey.arrivalTime = journey.legs[journey.legs.length - 1].arrivalTime;
+      const firstLeg = journey.legs[0];
+      const lastLeg = journey.legs[journey.legs.length - 1];
+      journey.departureTime = firstLeg.departureTime;
+      journey.arrivalTime = lastLeg.arrivalTime;
+
+      const effectiveDepartureSeconds =
+        firstLeg.type === 'bus' && firstLeg.realtime && firstLeg.realtime.predictedDepartureTime
+          ? alignPredictedSeconds(firstLeg.realtime.predictedDepartureTime, firstLeg.departureSeconds) ??
+            firstLeg.departureSeconds
+          : firstLeg.departureSeconds;
+      const effectiveArrivalSeconds =
+        lastLeg.type === 'bus' && lastLeg.realtime && lastLeg.realtime.predictedArrivalTime
+          ? alignPredictedSeconds(lastLeg.realtime.predictedArrivalTime, lastLeg.arrivalSeconds) ??
+            lastLeg.arrivalSeconds
+          : lastLeg.arrivalSeconds; // 徒歩区間ならこの時点で既に上の伝播でずらし済み
+      journey.durationMinutes = Math.max(1, Math.round((effectiveArrivalSeconds - effectiveDepartureSeconds) / 60));
+
       journey.delayMinutes = journey.legs
         .filter((leg) => leg.type === 'bus' && leg.realtime)
         .reduce((max, leg) => Math.max(max, leg.realtime.predictedArrivalDelayMinutes || 0), 0);
