@@ -101,6 +101,28 @@ CREATE TABLE IF NOT EXISTS holidays (
   name          TEXT
 );
 
+-- 観光スポット情報（観光スポット情報_仕様書）。GTFS由来データ（stops等）とは完全独立。
+-- バス停との関連付けは保存時ではなく参照時に緯度経度の近接検索で都度解決するため、外部キーは持たない。
+CREATE TABLE IF NOT EXISTS tourist_spots (
+  id              SERIAL PRIMARY KEY,
+  name            TEXT NOT NULL,
+  kana            TEXT,
+  romaji          TEXT,
+  lat             DOUBLE PRECISION NOT NULL,
+  lng             DOUBLE PRECISION NOT NULL,
+  url             TEXT,
+  hours           TEXT,
+  stay_duration   TEXT,
+  description     TEXT,
+  photo_url       TEXT,
+  enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 全件洗い替え（管理画面のテキスト一括入力）を名称キーのUPSERTで行うために必須。
+CREATE UNIQUE INDEX IF NOT EXISTS tourist_spots_name_key ON tourist_spots (name);
+
 -- 観測されている物理車両。便との紐付けは trip_vehicle_assignments が持つ。
 -- 運行終了しても行は削除せず status='inactive' にする（1台が複数便に関与するため）。
 CREATE TABLE IF NOT EXISTS vehicles (

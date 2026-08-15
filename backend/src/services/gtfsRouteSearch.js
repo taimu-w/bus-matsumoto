@@ -26,6 +26,7 @@ const { haversineDistanceMeters } = require('../utils/geo');
 const { findLiveAssignment, buildBusEntry } = require('./realtimeTripLookup');
 const { qualifyRouteId } = require('./gtfsFeedManager');
 const { nowInTokyo } = require('../utils/time');
+const touristSpots = require('./touristSpots');
 
 const DAY_SECONDS = 86400;
 
@@ -52,6 +53,12 @@ const NEXT_SERVICE_DAY_LOOKAHEAD = 7;
 const FUZZY_CANDIDATE_LIMIT = 3;
 // 1経路あたりの徒歩の合計上限（これを超える案は、他に候補があれば出さない）
 const MAX_TOTAL_WALK_MINUTES = 25;
+
+// 観光スポット起点/終点の経路検索用（観光スポット情報_仕様書）。
+// 検索半径は表示半径（touristSpots.js の近接表示半径）と揃えて500m程度。
+const SPOT_LINK_RADIUS_METERS = 500;
+const SPOT_LINK_RADIUS_RELAXED_METERS = 1200; // 半径内に1件もバス停が無い場合のフォールバック
+const SPOT_LINK_STOP_LIMIT = 5; // 経路検索の対象バス停数の上限（RAPTORの負荷が半径内バス停数倍に膨らまないよう抑える）
 
 // おすすめ判定の重み（仕様書 5.4）。乗換1回あたり5分、徒歩1秒あたり0.5秒ぶんの不利。
 const TRANSFER_PENALTY_SECONDS = 300;
@@ -707,21 +714,28 @@ function flagTransferRisks(journey) {
     if (!next) continue;
     const walkLeg = next.type === 'walk' ? next : null;
     const nextBusLeg = walkLeg ? legs[i + 2] : next;
-    if (!nextBusLeg || nextBusLeg.type !== 'bus' || !nextBusLeg.realtime) continue;
+    if (!nextBusLeg || nextBusLeg.type !== 'bus') continue;
 
+    // 前区間の実際の到着予測。これが無ければ、この乗換は定刻どおり成立している
+    // （＝チェックする材料が無い）ので何もしない。
     const arrivalRt = alignPredictedSeconds(leg.realtime.predictedArrivalTime, leg.arrivalSeconds);
-    const departureRt = alignPredictedSeconds(nextBusLeg.realtime.predictedDepartureTime, nextBusLeg.departureSeconds);
-    if (arrivalRt === null && departureRt === null) continue;
+    if (arrivalRt === null) continue;
 
-    const effectiveArrival = arrivalRt !== null ? arrivalRt : leg.arrivalSeconds;
+    // 乗換先の便はまだ運行を始めていないことが多い（始発時刻前は割り当てが無くリアルタイム情報が取れない）。
+    // その場合は定刻発車を見込む。実際に何分遅れて出るかは分からないため、
+    // 「間に合わない」方向にのみ安全側で判定する。
+    const departureRt = nextBusLeg.realtime
+      ? alignPredictedSeconds(nextBusLeg.realtime.predictedDepartureTime, nextBusLeg.departureSeconds)
+      : null;
     const effectiveDeparture = departureRt !== null ? departureRt : nextBusLeg.departureSeconds;
+
     // 徒歩を挟む乗換は徒歩所要時間そのものが必要な間隔。同一停留所ならMIN_TRANSFER_SECONDS。
     const requiredGapSeconds = walkLeg ? walkLeg.arrivalSeconds - walkLeg.departureSeconds : MIN_TRANSFER_SECONDS;
 
-    if (effectiveArrival + requiredGapSeconds > effectiveDeparture) {
+    if (arrivalRt + requiredGapSeconds > effectiveDeparture) {
       nextBusLeg.transferRisk = {
         atStopName: leg.toStop.name,
-        shortByMinutes: Math.max(1, Math.ceil((effectiveArrival + requiredGapSeconds - effectiveDeparture) / 60))
+        shortByMinutes: Math.max(1, Math.ceil((arrivalRt + requiredGapSeconds - effectiveDeparture) / 60))
       };
       journey.transferAtRisk = true;
     }
@@ -953,10 +967,54 @@ const RELAXATION_NOTES = {
  * ========================================================== */
 
 /**
- * stopKey もしくは自由文字列からバス停グループを解決する。
- * stopKeyで解決できない場合は名称検索の上位候補を使う（仕様書 3.2）。
+ * 指定座標から半径内にあるバス停グループを近い順に最大limit件返す（GTFSインデックスのみ、DB不使用）。
+ * 呼び出し側で徒歩距離の表示にも使えるよう、距離（distanceMeters）も添えて返す。
  */
-async function resolveEndpoint(index, { stopKey, text }) {
+function findNearbyStopGroupsWithinRadius(index, lat, lon, radiusMeters, limit) {
+  const candidates = [];
+  for (const group of index.groups.values()) {
+    if (!Number.isFinite(group.lat) || !Number.isFinite(group.lon)) continue;
+    const distanceMeters = haversineDistanceMeters(lat, lon, group.lat, group.lon);
+    if (distanceMeters > radiusMeters) continue;
+    candidates.push({ group, distanceMeters });
+  }
+  candidates.sort((a, b) => a.distanceMeters - b.distanceMeters);
+  return candidates.slice(0, limit);
+}
+
+/**
+ * stopKey / 自由文字列 / 観光スポットIDのいずれかからバス停グループ（複数可）を解決する。
+ * stopKeyで解決できない場合は名称検索の上位候補を使う（仕様書 3.2）。
+ * spotIdが渡された場合、観光スポットは tourist_spots テーブルから単発で読む
+ * （探索本体はGTFSインデックスのみを見るという原則の、realtimeTripLookupと同種の例外。
+ *  観光スポット情報_仕様書：バス停との関連付けは参照時に近接検索で解決する）。
+ *
+ * fuzzyは「自由文字列をバス停名にあいまい一致させた」ことだけを表す。観光スポット経由の
+ * 解決はスポット自体が確定済み（spotIdは候補から選んだ結果）なので、あいまい一致とは別種
+ * ——ここでfuzzy:trueにすると「候補から選ぶとより正確になります」という文言が誤って出る
+ * （フロント側はresult.fuzzyだけを見てこのメッセージを出すため）。false固定とする。
+ */
+async function resolveEndpoint(index, { stopKey, text, spotId }) {
+  if (spotId) {
+    const spot = await touristSpots.getEnabledSpotById(spotId);
+    if (!spot) {
+      return { groups: [], fuzzy: false, query: '', spotNotFound: true };
+    }
+    let candidates = findNearbyStopGroupsWithinRadius(index, spot.lat, spot.lng, SPOT_LINK_RADIUS_METERS, SPOT_LINK_STOP_LIMIT);
+    if (candidates.length === 0) {
+      // 半径内に1件も無い場合は、表示用フォールバック方針（段階的に条件を緩める）を踏襲し、
+      // より広い半径で再試行してから諦める。
+      candidates = findNearbyStopGroupsWithinRadius(index, spot.lat, spot.lng, SPOT_LINK_RADIUS_RELAXED_METERS, SPOT_LINK_STOP_LIMIT);
+    }
+    if (candidates.length === 0) {
+      return { groups: [], fuzzy: false, query: spot.name, viaSpot: spot, spotHasNoNearbyStops: true };
+    }
+    const groups = candidates.map((c) => c.group);
+    // 実際に採用されたバス停の徒歩距離を表示できるよう、groupKeyごとの距離を持ち回す。
+    const distanceByGroupKey = new Map(candidates.map((c) => [c.group.groupKey, c.distanceMeters]));
+    return { groups, fuzzy: false, query: spot.name, viaSpot: spot, distanceByGroupKey };
+  }
+
   if (stopKey) {
     const group = resolveGroup(index, stopKey);
     if (group) return { groups: [group], fuzzy: false, query: stopKey };
@@ -967,6 +1025,17 @@ async function resolveEndpoint(index, { stopKey, text }) {
   const candidates = await searchStops(query, FUZZY_CANDIDATE_LIMIT);
   const groups = candidates.map((candidate) => index.groups.get(candidate.stopKey)).filter(Boolean);
   return { groups, fuzzy: true, query };
+}
+
+/** 観光スポット⇔実際に採用されたバス停の徒歩距離・目安分数（観光スポット情報_仕様書）。 */
+function buildSpotWalkInfo(endpoint, actualGroupKey) {
+  if (!endpoint.viaSpot || !endpoint.distanceByGroupKey) return null;
+  const distanceMeters = endpoint.distanceByGroupKey.get(actualGroupKey);
+  if (!Number.isFinite(distanceMeters)) return null;
+  return {
+    distanceMeters: Math.round(distanceMeters),
+    walkMinutes: Math.max(1, Math.round(distanceMeters / WALK_SPEED_METERS_PER_MIN))
+  };
 }
 
 function serializeEndpoint(group) {
@@ -1021,8 +1090,10 @@ function nearbyAlternatives(ctx, groupKey, limit = 3) {
  * @param {object} options
  * @param {string} [options.fromStopKey] 出発地のstopKey（バス停検索・時刻表検索と共通）
  * @param {string} [options.from] 出発地の自由文字列
+ * @param {number|string} [options.fromSpotId] 観光スポットIDを起点にする場合（優先度: spotId > stopKey > text）
  * @param {string} [options.toStopKey]
  * @param {string} [options.to]
+ * @param {number|string} [options.toSpotId]
  * @param {string} [options.date] YYYY-MM-DD（既定: 本日）
  * @param {string} [options.time] HH:MM（既定: 本日なら現在時刻、他日なら05:00）
  * @param {number} [options.limit] 返す経路数（既定5）
@@ -1046,13 +1117,30 @@ async function searchJourneys(options = {}) {
   }
   const baseTime = formatTime(baseSeconds);
 
-  const origin = await resolveEndpoint(index, { stopKey: options.fromStopKey, text: options.from });
-  const destination = await resolveEndpoint(index, { stopKey: options.toStopKey, text: options.to });
+  const origin = await resolveEndpoint(index, { stopKey: options.fromStopKey, text: options.from, spotId: options.fromSpotId });
+  const destination = await resolveEndpoint(index, { stopKey: options.toStopKey, text: options.to, spotId: options.toSpotId });
 
   const common = { date: dateStr, baseTime, isToday };
 
   if (origin.groups.length === 0 || destination.groups.length === 0) {
-    const missing = origin.groups.length === 0 ? origin.query : destination.query;
+    const missingSide = origin.groups.length === 0 ? origin : destination;
+    if (missingSide.spotNotFound) {
+      return {
+        found: false,
+        ...common,
+        reason: 'spot-not-found',
+        message: '指定の観光スポットが見つかりませんでした。'
+      };
+    }
+    if (missingSide.spotHasNoNearbyStops) {
+      return {
+        found: false,
+        ...common,
+        reason: 'spot-no-nearby-stop',
+        message: `「${missingSide.viaSpot.name}」の近くに徒歩圏内のバス停が見つかりませんでした。`
+      };
+    }
+    const missing = missingSide.query;
     const suggestions = missing ? await searchStops(missing, 5) : [];
     return {
       found: false,
@@ -1147,6 +1235,14 @@ async function searchJourneys(options = {}) {
     ...common,
     from: serializeEndpoint(index.groups.get(actualFromKey) || origin.groups[0]),
     to: serializeEndpoint(index.groups.get(actualToKey) || destination.groups[0]),
+    // 観光スポットを起点/終点にした場合の元スポット情報（観光スポット情報_仕様書）。
+    // 「〈松本城〉から徒歩○分の△△バス停発」のような注記に使う。
+    viaSpotFrom: origin.viaSpot
+      ? { spotId: origin.viaSpot.spotId, name: origin.viaSpot.name, ...buildSpotWalkInfo(origin, actualFromKey) }
+      : null,
+    viaSpotTo: destination.viaSpot
+      ? { spotId: destination.viaSpot.spotId, name: destination.viaSpot.name, ...buildSpotWalkInfo(destination, actualToKey) }
+      : null,
     fuzzy: origin.fuzzy || destination.fuzzy,
     fuzzyFrom: origin.fuzzy ? origin.groups.map(serializeEndpoint) : null,
     fuzzyTo: destination.fuzzy ? destination.groups.map(serializeEndpoint) : null,

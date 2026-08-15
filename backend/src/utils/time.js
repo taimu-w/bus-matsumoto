@@ -33,7 +33,7 @@ function parseHHMM(str) {
 
 /**
  * 深夜帯判定。.envのNIGHT_START〜NIGHT_ENDの範囲(日をまたぐ)で判定する。
- * 既定値は23:00〜5:45（元GASと同一）。
+ * 既定値は23:00〜5:00。
  */
 function isNightTime() {
   const nightStart = parseHHMM(process.env.NIGHT_START || '23:00');
@@ -90,19 +90,6 @@ function minutesToTimeStr(minutes) {
   const h = Math.floor(minutes / 60) % 24;
   const m = ((minutes % 60) + 60) % 60;
   return `${h}:${String(m).padStart(2, '0')}`;
-}
-
-/**
- * "H:mm" 形式の時刻文字列を、今日の日付のJST Dateオブジェクトへ変換する。
- * GPS時刻など「今日の時刻」を表す文字列の比較に用いる。
- */
-function timeStrToDateToday(timeStr) {
-  const { h, m } = parseHHMM(String(timeStr).includes(':') ? timeStr : `${timeStr}:00`);
-  if (Number.isNaN(h) || Number.isNaN(m)) return null;
-  const t = nowInTokyo();
-  // JSTのHH:mm:ssをUTCに変換したDateを作る（JST = UTC+9固定、夏時間なし）
-  const utcMs = Date.UTC(t.year, t.month - 1, t.day, h - 9, m, 0);
-  return new Date(utcMs);
 }
 
 /**
@@ -188,7 +175,6 @@ module.exports = {
   formatTimeNoFormat,
   timeStrToMinutes,
   minutesToTimeStr,
-  timeStrToDateToday,
   getServiceDateString,
   serviceDateTimeToDate,
   getDayType,

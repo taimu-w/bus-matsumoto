@@ -189,16 +189,22 @@
   }
 
   /* ---------- お気に入りルート（名前付きで登録する。日付・時刻はurlに含めず開いた時点で検索し直す） ---------- */
+  // 観光スポット起点/終点（観光スポット情報_仕様書）とバス停で名称が衝突しないよう、
+  // 識別子にkindを含める。
   function routeSearchFavoriteId(state) {
-    return `routesearch|${state.fromKey || state.fromText}|${state.toKey || state.toText}`;
+    const fromId = state.fromSpotId ? `spot:${state.fromSpotId}` : (state.fromKey || state.fromText);
+    const toId = state.toSpotId ? `spot:${state.toSpotId}` : (state.toKey || state.toText);
+    return `routesearch|${fromId}|${toId}`;
   }
 
   function buildRouteSearchFavorite(state, name) {
     const query = new URLSearchParams();
     if (state.fromText) query.set('from', state.fromText);
     if (state.fromKey) query.set('fromKey', state.fromKey);
+    if (state.fromSpotId) query.set('fromSpotId', state.fromSpotId);
     if (state.toText) query.set('to', state.toText);
     if (state.toKey) query.set('toKey', state.toKey);
+    if (state.toSpotId) query.set('toSpotId', state.toSpotId);
     const qs = query.toString();
     return {
       id: routeSearchFavoriteId(state),
@@ -269,8 +275,10 @@
     const query = new URLSearchParams();
     if (state.fromText) query.set('from', state.fromText);
     if (state.fromKey) query.set('fromKey', state.fromKey);
+    if (state.fromSpotId) query.set('fromSpotId', state.fromSpotId);
     if (state.toText) query.set('to', state.toText);
     if (state.toKey) query.set('toKey', state.toKey);
+    if (state.toSpotId) query.set('toSpotId', state.toSpotId);
     if (state.date) query.set('date', state.date);
     if (state.time) query.set('time', state.time);
     const qs = query.toString();
@@ -289,11 +297,19 @@
     return {
       fromText: params.get('from') || '',
       fromKey: params.get('fromKey') || '',
+      fromSpotId: params.get('fromSpotId') || '',
       toText: params.get('to') || '',
       toKey: params.get('toKey') || '',
+      toSpotId: params.get('toSpotId') || '',
       date: params.get('date') || todayString(),
       time: params.get('time') || nowHhmm()
     };
+  }
+
+  /** selected.from / selected.to の同一判定用キー（バス停/観光スポットの混在に対応）。 */
+  function endpointIdentity(item) {
+    if (!item) return null;
+    return item.kind === 'spot' ? `spot:${item.spotId}` : `stop:${item.stopKey}`;
   }
 
   /* ==========================================================
@@ -402,9 +418,17 @@
     setupAutocomplete('from', 'rs-from', 'rs-from-suggest', 'rs-from-meta', state);
     setupAutocomplete('to', 'rs-to', 'rs-to-suggest', 'rs-to-meta', state);
 
-    // URLにキーが載っていれば「確定済み」として復元する
-    selected.from = state.fromKey ? { stopKey: state.fromKey, name: state.fromText } : null;
-    selected.to = state.toKey ? { stopKey: state.toKey, name: state.toText } : null;
+    // URLにキーが載っていれば「確定済み」として復元する（観光スポット情報_仕様書：fromSpotId/toSpotId）
+    selected.from = state.fromSpotId
+      ? { kind: 'spot', spotId: state.fromSpotId, name: state.fromText }
+      : state.fromKey
+        ? { kind: 'stop', stopKey: state.fromKey, name: state.fromText }
+        : null;
+    selected.to = state.toSpotId
+      ? { kind: 'spot', spotId: state.toSpotId, name: state.toText }
+      : state.toKey
+        ? { kind: 'stop', stopKey: state.toKey, name: state.toText }
+        : null;
 
     const container = root();
     // 日付を変えたら即再検索する。出発地・目的地が未入力のときは
@@ -470,6 +494,7 @@
     }
     const routeNames = (stop.routes || []).map((route) => route.shortName || route.name).filter(Boolean);
     const parts = [`選択中：${stop.name}`];
+    if (stop.kind === 'spot') parts.push('観光スポット（周辺のバス停から検索します）');
     if (stop.platformCount > 1) parts.push(`乗り場${stop.platformCount}件`);
     if (routeNames.length > 0) parts.push(routeNames.slice(0, 4).join('・'));
     el.textContent = parts.join('｜');
@@ -484,10 +509,11 @@
     if (side === 'from' && state.fromKey) showMeta(metaId, { stopKey: state.fromKey, name: state.fromText });
     if (side === 'to' && state.toKey) showMeta(metaId, { stopKey: state.toKey, name: state.toText });
 
-    const pick = (stop) => {
-      input.value = stop.name;
-      selected[side] = stop;
-      showMeta(metaId, stop);
+    const pick = (item) => {
+      const endpoint = item.kind ? item : { ...item, kind: 'stop' };
+      input.value = endpoint.name;
+      selected[side] = endpoint;
+      showMeta(metaId, endpoint);
       box.innerHTML = '';
     };
 
@@ -509,14 +535,16 @@
       suggestTimers[side] = setTimeout(async () => {
         const seq = ++suggestSeq;
         let stops = [];
+        let spots = [];
         try {
           const result = await fetchJson(`${API_BASE}/route-search/stops?q=${encodeURIComponent(query)}&limit=8`);
           stops = result.stops || [];
+          spots = result.spots || [];
         } catch (err) {
           console.error('バス停候補の取得エラー:', err);
         }
         if (seq !== suggestSeq) return;
-        renderSuggestions(box, stops, pick);
+        renderMixedSuggestions(box, stops, spots, pick);
       }, 180);
     });
 
@@ -563,30 +591,67 @@
     })), onSelect, { label: '近くのバス停' });
   }
 
+  function stopSuggestionCardHtml(stop, index) {
+    return `
+      <button type="button" data-index="${index}"
+              class="w-full text-left bg-white border-2 border-purple-100 rounded-lg p-3 hover:bg-purple-50 active:scale-95 transition-all">
+        <span class="block font-bold text-gray-900">${esc(stop.name)}</span>
+        ${stop.kana ? `<span class="block text-[11px] text-gray-400">${esc(stop.kana)}${stop.romaji ? ` / ${esc(stop.romaji)}` : ''}</span>` : ''}
+        <span class="flex flex-wrap gap-1 mt-1">
+          ${(stop.routes || []).slice(0, 5).map((route) => {
+            const bg = parseHexColor(route.color) ? `#${route.color.replace('#', '')}` : '#e2e8f0';
+            const fg = chipTextColor(route.color, route.textColor);
+            return `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full" style="background:${esc(bg)};color:${esc(fg)}">${esc(route.shortName || route.name)}</span>`;
+          }).join('')}
+        </span>
+      </button>`;
+  }
+
+  /** 観光スポット候補のカード（観光スポット情報_仕様書：地点名検索にバス停候補と混在させる）。 */
+  function spotSuggestionCardHtml(spot, index) {
+    return `
+      <button type="button" data-index="${index}"
+              class="w-full text-left bg-white border-2 border-emerald-100 rounded-lg p-3 hover:bg-emerald-50 active:scale-95 transition-all flex items-center gap-2">
+        ${spot.photoUrl ? `<img src="${esc(spot.photoUrl)}" alt="" class="w-10 h-10 rounded-lg object-cover shrink-0">` : ''}
+        <span class="min-w-0">
+          <span class="flex items-center gap-1.5">
+            <span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded shrink-0">観光スポット</span>
+            <span class="font-bold text-gray-900 truncate">${esc(spot.name)}</span>
+          </span>
+          ${spot.kana ? `<span class="block text-[11px] text-gray-400">${esc(spot.kana)}${spot.romaji ? ` / ${esc(spot.romaji)}` : ''}</span>` : ''}
+        </span>
+      </button>`;
+  }
+
   function renderSuggestions(box, stops, onSelect, { label = '' } = {}) {
     if (stops.length === 0) {
       box.innerHTML = label ? '' : '<p class="text-xs font-bold text-gray-500 px-1">一致するバス停がありません。</p>';
       return;
     }
     const header = label ? `<p class="text-[11px] font-bold text-gray-500 px-1 mb-1">${esc(label)}</p>` : '';
-    box.innerHTML = header + stops
-      .map((stop, i) => `
-        <button type="button" data-index="${i}"
-                class="w-full text-left bg-white border-2 border-purple-100 rounded-lg p-3 hover:bg-purple-50 active:scale-95 transition-all">
-          <span class="block font-bold text-gray-900">${esc(stop.name)}</span>
-          ${stop.kana ? `<span class="block text-[11px] text-gray-400">${esc(stop.kana)}${stop.romaji ? ` / ${esc(stop.romaji)}` : ''}</span>` : ''}
-          <span class="flex flex-wrap gap-1 mt-1">
-            ${(stop.routes || []).slice(0, 5).map((route) => {
-              const bg = parseHexColor(route.color) ? `#${route.color.replace('#', '')}` : '#e2e8f0';
-              const fg = chipTextColor(route.color, route.textColor);
-              return `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full" style="background:${esc(bg)};color:${esc(fg)}">${esc(route.shortName || route.name)}</span>`;
-            }).join('')}
-          </span>
-        </button>`)
-      .join('');
+    box.innerHTML = header + stops.map((stop, i) => stopSuggestionCardHtml(stop, i)).join('');
     box.querySelectorAll('button[data-index]').forEach((button) => {
       button.addEventListener('mousedown', (event) => event.preventDefault());
       button.addEventListener('click', () => onSelect(stops[Number(button.dataset.index)]));
+    });
+  }
+
+  /** バス停候補と観光スポット候補を混在させて描画する（観光スポット情報_仕様書：出発地・目的地の入力候補）。 */
+  function renderMixedSuggestions(box, stops, spots, onSelect) {
+    if (stops.length === 0 && spots.length === 0) {
+      box.innerHTML = '<p class="text-xs font-bold text-gray-500 px-1">一致するバス停・観光スポットがありません。</p>';
+      return;
+    }
+    const items = [
+      ...stops.map((s) => ({ ...s, kind: 'stop' })),
+      ...spots.map((s) => ({ ...s, kind: 'spot' }))
+    ];
+    box.innerHTML = items
+      .map((item, i) => (item.kind === 'spot' ? spotSuggestionCardHtml(item, i) : stopSuggestionCardHtml(item, i)))
+      .join('');
+    box.querySelectorAll('button[data-index]').forEach((button) => {
+      button.addEventListener('mousedown', (event) => event.preventDefault());
+      button.addEventListener('click', () => onSelect(items[Number(button.dataset.index)]));
     });
   }
 
@@ -600,9 +665,9 @@
       showWarning('出発地と目的地を入力してください。');
       return;
     }
-    const sameKey = selected.from && selected.to && selected.from.stopKey === selected.to.stopKey;
+    const sameEndpoint = selected.from && selected.to && endpointIdentity(selected.from) === endpointIdentity(selected.to);
     const sameText = (!selected.from || !selected.to) && fromText === toText;
-    if (sameKey || sameText) {
+    if (sameEndpoint || sameText) {
       showWarning('出発地と目的地が同じです。目的地を変更してください。');
       return;
     }
@@ -611,9 +676,11 @@
 
     navigate(buildUrl({
       fromText,
-      fromKey: selected.from ? selected.from.stopKey : '',
+      fromKey: selected.from && selected.from.kind !== 'spot' ? selected.from.stopKey : '',
+      fromSpotId: selected.from && selected.from.kind === 'spot' ? selected.from.spotId : '',
       toText,
-      toKey: selected.to ? selected.to.stopKey : '',
+      toKey: selected.to && selected.to.kind !== 'spot' ? selected.to.stopKey : '',
+      toSpotId: selected.to && selected.to.kind === 'spot' ? selected.to.spotId : '',
       date,
       time
     }));
@@ -625,9 +692,11 @@
 
   function buildApiUrl(state) {
     const query = new URLSearchParams();
-    if (state.fromKey) query.set('fromStopKey', state.fromKey);
+    if (state.fromSpotId) query.set('fromSpotId', state.fromSpotId);
+    else if (state.fromKey) query.set('fromStopKey', state.fromKey);
     else query.set('from', state.fromText);
-    if (state.toKey) query.set('toStopKey', state.toKey);
+    if (state.toSpotId) query.set('toSpotId', state.toSpotId);
+    else if (state.toKey) query.set('toStopKey', state.toKey);
     else query.set('to', state.toText);
     query.set('date', state.date);
     query.set('time', state.time);
@@ -697,6 +766,20 @@
     if (result.relaxationNote) notes.push(result.relaxationNote);
     if (result.walkableHint) {
       notes.push(`このバス停間は徒歩約${result.walkableHint.walkMinutes}分（約${result.walkableHint.distanceMeters}m）です。`);
+    }
+    // 観光スポットを起点/終点にした場合の注記（観光スポット情報_仕様書）。
+    // 実際に採用されたバス停までの徒歩距離・目安分数が分かる場合は併記する。
+    if (result.viaSpotFrom) {
+      const walk = result.viaSpotFrom.walkMinutes != null
+        ? `（徒歩約${result.viaSpotFrom.walkMinutes}分・約${result.viaSpotFrom.distanceMeters}m）`
+        : '';
+      notes.push(`「${result.viaSpotFrom.name}」から${walk}のバス停を出発地として検索しています。`);
+    }
+    if (result.viaSpotTo) {
+      const walk = result.viaSpotTo.walkMinutes != null
+        ? `（徒歩約${result.viaSpotTo.walkMinutes}分・約${result.viaSpotTo.distanceMeters}m）`
+        : '';
+      notes.push(`「${result.viaSpotTo.name}」まで${walk}のバス停を目的地として検索しています。`);
     }
 
     return `
@@ -814,12 +897,16 @@
   }
 
   function renderStopNode(stop, options) {
-    const times = [];
-    if (options.arrivalTime) times.push(`<span class="font-bold text-gray-900">${esc(timeWithDay(options.arrivalTime, options.arrivalDayOffset))}</span><span class="text-[10px] text-gray-500">着</span>`);
-    if (options.departureTime) times.push(`<span class="font-bold text-gray-900">${esc(timeWithDay(options.departureTime, options.departureDayOffset))}</span><span class="text-[10px] text-gray-500">発</span>`);
+    const timeLines = [];
+    if (options.arrivalTime) {
+      timeLines.push(`<div><span class="font-bold text-gray-900">${esc(timeWithDay(options.arrivalTime, options.arrivalDayOffset))}</span><span class="text-[10px] text-gray-500 ml-0.5">着</span></div>`);
+    }
+    if (options.departureTime) {
+      timeLines.push(`<div><span class="font-bold text-gray-900">${esc(timeWithDay(options.departureTime, options.departureDayOffset))}</span><span class="text-[10px] text-gray-500 ml-0.5">発</span></div>`);
+    }
     // リアルタイム予測が定刻と違うときだけ添える
     if (options.predicted && options.predicted !== options.arrivalTime && options.predicted !== options.departureTime) {
-      times.push(`<span class="font-bold text-green-700">予測 ${esc(options.predicted)}</span>`);
+      timeLines.push(`<div><span class="font-bold text-green-700">予測 ${esc(options.predicted)}</span></div>`);
     }
 
     const link = stop.busstopUrl
@@ -836,7 +923,7 @@
             ${link}
             ${platformLabel(stop) ? `<span class="text-[10px] font-bold text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">${esc(platformLabel(stop))}</span>` : ''}
           </div>
-          <div class="flex flex-wrap items-baseline gap-x-2 text-sm">${times.join('<span class="text-gray-300">/</span>')}</div>
+          <div class="flex flex-col text-sm">${timeLines.join('')}</div>
         </div>
       </div>
     `;

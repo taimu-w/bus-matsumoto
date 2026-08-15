@@ -425,11 +425,20 @@
         </div>
         <div id="bs-approaching-list"><p class="text-sm font-bold text-gray-400 py-3 text-center">読み込み中...</p></div>
       </div>
+
+      <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-200 p-4 mt-4">
+        <div class="flex items-center justify-between mb-2">
+          <p class="text-xs font-bold text-gray-500">周辺の観光スポット</p>
+          <span class="text-[10px] font-bold text-gray-400">半径500m以内・近い順</span>
+        </div>
+        <div id="bs-nearby-spots-list"><p class="text-sm font-bold text-gray-400 py-3 text-center">読み込み中...</p></div>
+      </div>
     `;
 
     bindStopViewEvents(data, platform);
     loadApproaching(data, seq, platform);
     manageApproachingPolling(data, seq, platform);
+    loadNearbySpots(data, seq);
   }
 
   /** 表示モード切替（標柱が複数ある場合のみ表示する。仕様書 3.4 A） */
@@ -826,6 +835,62 @@
             </div>
           </${tag}>`;
       })
+      .join('');
+  }
+
+  /* ---------- 周辺の観光スポット（観光スポット情報_仕様書） ---------- */
+  async function loadNearbySpots(data, seq) {
+    const container = document.getElementById('bs-nearby-spots-list');
+    if (!container) return;
+    try {
+      const res = await fetchJson(`${API_BASE}/busstop/${encodeURIComponent(data.stop.stopKey)}/nearby-spots`);
+      if (seq !== renderSeq) return;
+      renderNearbySpots(container, res.spots || []);
+    } catch (err) {
+      if (seq !== renderSeq) return;
+      // 観光スポット情報の取得失敗はバス停情報自体の表示を妨げない（soft-fail）
+      container.innerHTML = '<p class="text-sm font-bold text-gray-400 py-3 text-center">観光スポット情報を取得できませんでした。</p>';
+    }
+  }
+
+  /** 生URLをそのまま出さず、ドメイン名のみを見せる表示ラベルにする。 */
+  function spotLinkLabel(url) {
+    try {
+      const host = new URL(url).hostname.replace(/^www\./, '');
+      return `公式サイト（${host}）を見る`;
+    } catch {
+      return '公式サイトを見る';
+    }
+  }
+
+  function renderNearbySpots(container, spots) {
+    if (spots.length === 0) {
+      container.innerHTML = '<p class="text-sm font-bold text-gray-400 py-3 text-center">周辺に観光スポットはありません。</p>';
+      return;
+    }
+    container.innerHTML = spots
+      .map((spot) => `
+        <div class="border-2 border-gray-200 rounded-xl overflow-hidden mb-2 last:mb-0">
+          ${spot.photoUrl ? `<img src="${esc(spot.photoUrl)}" alt="${esc(spot.name)}" class="w-full h-32 object-cover">` : ''}
+          <div class="p-3">
+            <div class="flex items-start justify-between gap-2">
+              <p class="font-bold text-gray-900">${esc(spot.name)}</p>
+              <span class="shrink-0 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">徒歩${esc(spot.walkMinutes)}分</span>
+            </div>
+            ${spot.hours ? `<p class="text-xs text-gray-500 mt-1">営業時間：${esc(spot.hours)}</p>` : ''}
+            ${spot.stayDuration ? `<p class="text-xs text-gray-500">滞在目安：${esc(spot.stayDuration)}</p>` : ''}
+            ${spot.description ? `<p class="text-xs text-gray-600 mt-1 line-clamp-3">${esc(spot.description)}</p>` : ''}
+            ${spot.url ? `
+              <a href="${esc(spot.url)}" target="_blank" rel="noopener noreferrer"
+                 class="inline-flex items-center gap-1 mt-2 text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-full px-3 py-1 hover:bg-indigo-100">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                </svg>
+                ${esc(spotLinkLabel(spot.url))}
+              </a>` : ''}
+          </div>
+        </div>
+      `)
       .join('');
   }
 

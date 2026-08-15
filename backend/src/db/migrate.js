@@ -228,6 +228,34 @@ async function migrate() {
       ALTER TABLE trip_arrival_prediction_log ADD COLUMN IF NOT EXISTS stops_before INTEGER
     `);
 
+    // ==========================================================
+    // 17. 観光スポット情報機能（観光スポット情報_仕様書）
+    //     GTFS由来データ（stops/schedule_*）とは完全独立の新規テーブル。
+    //     バス停との関連付けは保存時ではなく参照時の近接検索で解決するため外部キーは持たない。
+    //     新規環境ではschema.sqlのCREATE TABLEに既に含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS tourist_spots (
+        id              SERIAL PRIMARY KEY,
+        name            TEXT NOT NULL,
+        kana            TEXT,
+        romaji          TEXT,
+        lat             DOUBLE PRECISION NOT NULL,
+        lng             DOUBLE PRECISION NOT NULL,
+        url             TEXT,
+        hours           TEXT,
+        stay_duration   TEXT,
+        description     TEXT,
+        photo_url       TEXT,
+        enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS tourist_spots_name_key ON tourist_spots (name)
+    `);
+
     await client.query('COMMIT');
     console.log('[migrate] 複数事業者対応・便起点割り当てマイグレーション完了');
   } catch (err) {

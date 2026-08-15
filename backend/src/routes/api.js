@@ -29,6 +29,7 @@ const {
   startTimeToUrlHhmm
 } = require('../services/realtimeTripLookup');
 const { getApproachingBuses } = require('../services/busStopApproaching');
+const touristSpots = require('../services/touristSpots');
 const { invalidateHolidayCache } = require('../services/holidayCalendar');
 const visitorTracker = require('../services/visitorTracker');
 const jobMonitor = require('../services/jobMonitor');
@@ -176,34 +177,23 @@ router.get('/admin/settings', requireAdminAuth, async (req, res) => {
 // PUT /api/admin/settings -> 管理画面から配信お知らせを更新
 router.put('/admin/settings', requireAdminAuth, async (req, res) => {
   const { notice1, notice2, importantNotice, routeName, operatorName } = req.body || {};
+  const settingsToSave = [
+    ['notice1', notice1 ?? ''],
+    ['notice2', notice2 ?? ''],
+    ['important_notice', importantNotice ?? ''],
+    ['route_name', routeName ?? ''],
+    ['operator_name', operatorName ?? '']
+  ];
 
   try {
     await pool.query('BEGIN');
-    await pool.query(
-      `INSERT INTO system_settings (key, value) VALUES ($1, $2)
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-      ['notice1', notice1 ?? '']
-    );
-    await pool.query(
-      `INSERT INTO system_settings (key, value) VALUES ($1, $2)
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-      ['notice2', notice2 ?? '']
-    );
-    await pool.query(
-      `INSERT INTO system_settings (key, value) VALUES ($1, $2)
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-      ['important_notice', importantNotice ?? '']
-    );
-    await pool.query(
-      `INSERT INTO system_settings (key, value) VALUES ($1, $2)
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-      ['route_name', routeName ?? '']
-    );
-    await pool.query(
-      `INSERT INTO system_settings (key, value) VALUES ($1, $2)
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-      ['operator_name', operatorName ?? '']
-    );
+    for (const [key, value] of settingsToSave) {
+      await pool.query(
+        `INSERT INTO system_settings (key, value) VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        [key, value]
+      );
+    }
     await pool.query('COMMIT');
 
     const settings = await loadSystemSettings();
@@ -264,6 +254,63 @@ router.delete('/admin/holidays/:date', requireAdminAuth, async (req, res) => {
   } catch (err) {
     console.error('[api] /admin/holidays 削除エラー:', err);
     res.status(500).json({ error: '祝日の削除に失敗しました。' });
+  }
+});
+
+// GET /api/admin/tourist-spots -> 観光スポット一覧（無効化行も含む全件、簡易UI用）
+router.get('/admin/tourist-spots', requireAdminAuth, async (req, res) => {
+  try {
+    const spots = await touristSpots.listTouristSpots({ includeDisabled: true });
+    res.json({ spots });
+  } catch (err) {
+    console.error('[api] /admin/tourist-spots 取得エラー:', err);
+    res.status(500).json({ error: '観光スポット一覧の取得に失敗しました。' });
+  }
+});
+
+// PUT /api/admin/tourist-spots -> テキスト一括登録（全件洗い替え／UPSERT、観光スポット情報_仕様書）
+router.put('/admin/tourist-spots', requireAdminAuth, async (req, res) => {
+  const { text } = req.body || {};
+  if (typeof text !== 'string' || !text.trim()) {
+    return res.status(400).json({ ok: false, errors: [{ line: 0, reason: 'テキストを入力してください。' }] });
+  }
+  try {
+    const result = await touristSpots.replaceAllTouristSpots(text);
+    if (!result.ok) return res.status(400).json(result);
+    res.json(result);
+  } catch (err) {
+    console.error('[api] /admin/tourist-spots 一括更新エラー:', err);
+    res.status(500).json({ error: '観光スポット情報の更新に失敗しました。' });
+  }
+});
+
+// PATCH /api/admin/tourist-spots/:id -> 有効/無効切り替え
+router.patch('/admin/tourist-spots/:id', requireAdminAuth, async (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  const { enabled } = req.body || {};
+  if (!Number.isInteger(id) || typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'idとenabled（真偽値）を指定してください。' });
+  }
+  try {
+    const updated = await touristSpots.setSpotEnabled(id, enabled);
+    if (!updated) return res.status(404).json({ error: '指定の観光スポットが見つかりませんでした。' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/tourist-spots/:id 更新エラー:', err);
+    res.status(500).json({ error: '更新に失敗しました。' });
+  }
+});
+
+// DELETE /api/admin/tourist-spots/:id -> 1件削除
+router.delete('/admin/tourist-spots/:id', requireAdminAuth, async (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: '不正なIDです。' });
+  try {
+    await touristSpots.deleteSpot(id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/tourist-spots/:id 削除エラー:', err);
+    res.status(500).json({ error: '削除に失敗しました。' });
   }
 });
 
@@ -589,13 +636,20 @@ router.get('/buses-for-map', async (req, res) => {
 
 // GET /api/route-search/stops?q=... -> 出発地・目的地の候補
 // 漢字・ひらがな・カタカナ・ローマ字（大文字小文字/全半角不問）に対応する。
+// 観光スポット候補（観光スポット情報_仕様書）も同じレスポンスに混ぜて返す。
+// stops配列の形は変更しないため既存挙動には影響しない。
 router.get('/route-search/stops', async (req, res) => {
   try {
     const query = String(req.query.q || '').trim();
-    if (!query) return res.json({ stops: [] });
+    if (!query) return res.json({ stops: [], spots: [] });
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '20', 10) || 20, 1), 50);
-    const stops = await searchRouteSearchStops(query, limit);
-    res.json({ stops });
+    const stopLimit = Math.max(limit - 3, 4);
+    const spotLimit = Math.max(limit - stopLimit, 2);
+    const [stops, spots] = await Promise.all([
+      searchRouteSearchStops(query, stopLimit),
+      touristSpots.searchTouristSpots(query, spotLimit)
+    ]);
+    res.json({ stops, spots });
   } catch (err) {
     console.error('[api] /route-search/stops エラー:', err);
     res.status(500).json({ error: '停留所候補の取得に失敗しました。' });
@@ -605,13 +659,16 @@ router.get('/route-search/stops', async (req, res) => {
 // GET /api/route-search -> 経路検索（乗換2回まで・徒歩接続あり・任意日付・運賃つき）
 // クエリ: fromStopKey|from / toStopKey|to / date=YYYY-MM-DD / time=HH:MM / limit
 //   departureTime は旧APIの名前。time の別名として受け付ける。
+//   fromSpotId|toSpotId は観光スポットIDを起点/終点にする場合（観光スポット情報_仕様書）。
 router.get('/route-search', async (req, res) => {
   try {
     const result = await searchJourneys({
       fromStopKey: req.query.fromStopKey || null,
       from: req.query.from || null,
+      fromSpotId: req.query.fromSpotId || null,
       toStopKey: req.query.toStopKey || null,
       to: req.query.to || null,
+      toSpotId: req.query.toSpotId || null,
       date: req.query.date || null,
       time: req.query.time || req.query.departureTime || null,
       limit: req.query.limit
@@ -1509,6 +1566,25 @@ router.get('/busstop/:stopKey/approaching', async (req, res) => {
   } catch (err) {
     console.error('[api] /busstop/:stopKey/approaching エラー:', err);
     res.status(500).json({ error: '接近中のバス情報の取得に失敗しました。' });
+  }
+});
+
+// GET /api/busstop/:stopKey/nearby-spots -> 周辺の観光スポット（観光スポット情報_仕様書）
+// 全乗り場ページ・乗り場別ページの両方でそのバス停グループの座標を基準に近接検索する。
+// クエリ: radius=メートル（既定500） / limit（既定5）
+router.get('/busstop/:stopKey/nearby-spots', async (req, res) => {
+  try {
+    const data = await getStopTimetable(req.params.stopKey, { date: req.query.date });
+    if (!data) return res.status(404).json({ error: '指定のバス停が見つかりませんでした。' });
+
+    const radius = Math.min(Math.max(Number.parseFloat(req.query.radius || '500') || 500, 50), 3000);
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '5', 10) || 5, 1), 20);
+
+    const spots = await touristSpots.findNearbySpots(data.stop.lat, data.stop.lon, { radiusMeters: radius, limit });
+    res.json({ stopKey: data.stop.stopKey, stopName: data.stop.stopName, spots });
+  } catch (err) {
+    console.error('[api] /busstop/:stopKey/nearby-spots エラー:', err);
+    res.status(500).json({ error: '観光スポット情報の取得に失敗しました。' });
   }
 });
 

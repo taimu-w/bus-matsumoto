@@ -16,7 +16,7 @@
 
 便への車両割り当ての設計背景は[docs/design-trip-first-assignment.md](docs/design-trip-first-assignment.md)にまとめてあります。
 
-**アーキテクチャ・データフロー・モジュールごとの詳細な挙動は[README.md](README.md)に網羅的にまとめられています。大きめの変更を行う前に必ず読んでください。** なぜ現在の構造になっているのか（うっかり再発させやすい実際のバグへの意図的な回避策を含む）が説明されています（下記の「既知の注意点」も参照）。
+**アーキテクチャ・データフローの全体像は[README.md](README.md)、各機能の詳細な挙動は[docs/](docs/)以下の各ドキュメントにまとめられています。大きめの変更を行う前に必ず関連するものを読んでください。** なぜ現在の構造になっているのか（うっかり再発させやすい実際のバグへの意図的な回避策を含む）が説明されています（下記の「既知の注意点」も参照）。
 
 ## コマンド
 
@@ -38,7 +38,7 @@ docker compose up --build
 ```
 `docker-entrypoint.sh`がコンテナ起動のたびに、DB接続待機 → `migrate.js` → `seed.js` → `server.js`起動、を実行します。利用者向け画面：`http://localhost:3000`、管理画面：`http://localhost:3000/admin`。
 
-このリポジトリにはテストスイートもlint設定も存在しません。これらのためのnpmスクリプトを勝手に作らないでください。
+`backend/test/`に、DBやネットワークを必要としない純粋関数（`utils/time.js`・`utils/geo.js`・`utils/kana.js`・`services/gtfsFrequencies.js`・`config/directionMapping.js`）の現在の挙動を固定する軽量な回帰テストがあります。追加依存なしでNode組み込みの`node --test`（Node 18+）で実行します。`npm test`で実行できます。lint設定は存在しません。テスト・lintのnpmスクリプトを追加する際は、既存の挙動を変えない範囲であることを確認した上で行ってください。
 
 PostgreSQL接続は`DATABASE_URL`（ホスティング環境向け、SSL接続前提）または`PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD`（ローカル向け）で設定します。調整可能な環境変数（判定半径・タイムアウト閾値・ポーリング間隔など）は`backend/.env.example`を参照してください。位置情報フィードやGTFS ZIPフィードのURLは環境変数**でもDBでもなく**、`backend/src/config/feeds.js`（コード）で管理されています。外部ID⇔GTFS route_idの対応も同じくコード（`backend/src/config/routeExternalIdMapping.js`）です。
 
@@ -111,11 +111,11 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 
 ### 到着予測（`services/etaPredictor.js`）
 
-過去の区間別走行時間統計（`segment_travel_stats`、曜日区分×時間帯でバケット化）と、その車両直近の走行ペース（`liveFactor`、0.5〜2.5倍にクランプ、直近の完了区間から算出）を組み合わせます。データの有無に応じて段階的にフォールバックします：過去統計+ペース補正 → 時刻表所要時間×ペース補正 → 時刻表差分そのまま → 固定5分。定刻を持たない通過専用の区間は`naive_anchored`で別途処理し、直近の「定刻を持っていた」バス停まで遡って基準点にします。これは固定5分の推測が通過区間の連続で積み重なってしまうのを防ぐためです。完全な判定表（`source`フィールドの値：`schedule`、`actual`、`historical`、`schedule_paced`、`naive`、`through_skip`、`naive_anchored`）はREADME.md §5を参照してください。
+過去の区間別走行時間統計（`segment_travel_stats`、曜日区分×時間帯でバケット化）と、その車両直近の走行ペース（`liveFactor`、0.5〜2.5倍にクランプ、直近の完了区間から算出）を組み合わせます。データの有無に応じて段階的にフォールバックします：過去統計+ペース補正 → 時刻表所要時間×ペース補正 → 時刻表差分そのまま → 固定5分。定刻を持たない通過専用の区間は`naive_anchored`で別途処理し、直近の「定刻を持っていた」バス停まで遡って基準点にします。これは固定5分の推測が通過区間の連続で積み重なってしまうのを防ぐためです。完全な判定表（`source`フィールドの値：`schedule`、`actual`、`historical`、`schedule_paced`、`naive`、`through_skip`、`naive_anchored`）は[docs/eta-prediction-algorithm.md](docs/eta-prediction-algorithm.md)を参照してください。
 
 ### 経路検索（`services/gtfsRouteSearch.js` / `frontend/routesearch.js`）
 
-リアルタイム運行状況とは**探索のデータ経路が完全に独立した機能**です。2026年8月に、DBの`daily_trips`/`stops`を検索していた旧実装（`routeSearch.js`）から、時刻表検索と同じGTFSインメモリインデックス（`gtfsTimetable.js`）を直接探索する方式へ全面的に置き換えました。設計背景と要望の対応は[docs/経路検索機能_改善仕様書.md](docs/経路検索機能_改善仕様書.md)、実装の詳細はREADME.md §8を参照してください。
+リアルタイム運行状況とは**探索のデータ経路が完全に独立した機能**です。2026年8月に、DBの`daily_trips`/`stops`を検索していた旧実装（`routeSearch.js`）から、時刻表検索と同じGTFSインメモリインデックス（`gtfsTimetable.js`）を直接探索する方式へ全面的に置き換えました。設計背景・アルゴリズムの詳細は[docs/経路検索機能_改善仕様書.md](docs/経路検索機能_改善仕様書.md)を参照してください。
 
 - 探索は**DBを一切見ません**。任意の日付で検索でき、当日便の生成状況にも、DBの死活にも影響されません。
 - アルゴリズムはRAPTOR型（ラウンド＝乗車回数）。乗換2回まで（フォールバック時3回）、バス停グループ間400m（同800m）以内は徒歩で乗り継げるものとして扱います。
@@ -128,7 +128,7 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 
 ### 時刻表検索（`services/gtfsTimetable.js` / `frontend/timetable.js`）
 
-リアルタイム運行状況とは**データ経路が完全に独立した機能**です。DB（`stops`/`schedule_*`）を一切使わず、ディスク上のGTFSファイルをそのままの粒度でメモリにインデックス化します。既存の`stops`テーブルはGTFSの`stop_id`・標柱・`stop_headsign`を保持していないため、時刻表検索の要件を満たせないからです。インデックスは30分TTLで、GTFS更新成功時に`invalidateTimetableIndex()`で無効化されます。詳細はREADME.md §16を参照してください。
+リアルタイム運行状況とは**データ経路が完全に独立した機能**です。DB（`stops`/`schedule_*`）を一切使わず、ディスク上のGTFSファイルをそのままの粒度でメモリにインデックス化します。既存の`stops`テーブルはGTFSの`stop_id`・標柱・`stop_headsign`を保持していないため、時刻表検索の要件を満たせないからです。インデックスは30分TTLで、GTFS更新成功時に`invalidateTimetableIndex()`で無効化されます。詳細は[docs/timetable-search.md](docs/timetable-search.md)を参照してください。
 
 - バス停の統合キー：同一ベースID＋同名なら`{stop_id}`、名前が違えば`{gtfs_id}_{stop_id}`。さらに同名かつ400m以内のバス停を1件へ統合し（2フィードに同じ物理バス停が別IDで入っているため）、使われなくなったキーは別名として残します。
 - よみがな・ローマ字は`translations.txt`から取得し、ローマ字が無ければ`utils/kana.js`がヘボン式で自動生成します。漢字→よみがなの変換は行いません。
@@ -145,9 +145,9 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 - **`services/routeSearch.js`へ経路探索を戻さないでください。** 現在このファイルに残っているのは`/api/stops/search`用のDB検索だけです。経路探索は`services/gtfsRouteSearch.js`（GTFSインデックス直読み）が担当します。
 - **曜日区分・運行日判定のロジックは用途ごとに3つ独立しています。統合しないでください。** `utils/time.js`の`getDayType()`（ETA統計のバケット分け専用）、`gtfsCalendar.js`の`getActiveServiceIds()`（当日便生成専用。DB保存形式の文字列を返し、有効期間チェックなし）、`gtfsTimetable.js`の`getActiveServices()`（時刻表検索専用。任意の日付・有効期間チェック・表示ラベルあり）。
 - **「同時刻帯＝始発時刻の差が10分以内」という重複割り当て防止のルールを、「稼働中の車両は他の便に割り当てない」に単純化しないでください。** 8:00便の担当車両が8:11便の担当になるのは仕様上正しい動作です。判定は`tripAssignment.js`の`hasSamePeriodConflict()`に集約してあります（`ASSIGN_SAME_PERIOD_MIN`、既定10分）。
-- **通過バス停の扱い（`tripAssignment.js`の`openAssignment()` / `delayCalc.js`）**：あるバス停が`通過`ステータスに確定されるのは、それが便の中で実質的な終点（`lastValidSeq`、実際に定刻を持つ最後のバス停）より**手前**にある経由フラグ付きバス停の場合のみです。`lastValidSeq`より先にある経由フラグ付きバス停は、単に未確定なだけで通過ではありません。この2つを混同したことが実際の過去のバグの原因でした（README §4.11参照）。`delayCalc.js`は`scheduled_time`が無いことを理由にステータスを強制上書きする処理を意図的に廃止しています。
+- **通過バス停の扱い（`tripAssignment.js`の`openAssignment()` / `delayCalc.js`）**：あるバス停が`通過`ステータスに確定されるのは、それが便の中で実質的な終点（`lastValidSeq`、実際に定刻を持つ最後のバス停）より**手前**にある経由フラグ付きバス停の場合のみです。`lastValidSeq`より先にある経由フラグ付きバス停は、単に未確定なだけで通過ではありません。この2つを混同したことが実際の過去のバグの原因でした（詳細は[docs/pass-detection.md](docs/pass-detection.md)）。`delayCalc.js`は`scheduled_time`が無いことを理由にステータスを強制上書きする処理を意図的に廃止しています。
 - **`etaPredictor.js`の`updateSegmentStats()`が`is_official = TRUE`だけを集計するのは意図的です。** 候補車両止まりの記録を混ぜると、別経路をたまたま走っていた車両の所要時間で区間統計が汚染され、担当が切り替わった便では同じ区間を二重計上してしまいます。
-- **バスマップ（`#/busmap`）で`/api/buses-for-map`に特定の`routeId`を決め打ちしないでください。** 全路線を俯瞰する画面なので、1路線に固定するとその路線が運行していない時間帯に0台になります（実際にそれで「バスが表示されない」不具合になっていました）。同じ画面で、地図を作り直すときに`busMarkers`/`userMarker`を捨て忘れると2回目以降に描画されなくなる点、現在地取得を`await`してからバスを取得すると許可ダイアログの間バスが出ない点にも注意してください（README §12）。
+- **バスマップ（`#/busmap`）で`/api/buses-for-map`に特定の`routeId`を決め打ちしないでください。** 全路線を俯瞰する画面なので、1路線に固定するとその路線が運行していない時間帯に0台になります（実際にそれで「バスが表示されない」不具合になっていました）。同じ画面で、地図を作り直すときに`busMarkers`/`userMarker`を捨て忘れると2回目以降に描画されなくなる点、現在地取得を`await`してからバスを取得すると許可ダイアログの間バスが出ない点にも注意してください。
 - （過去の注意点）`routes/api.js`にはかつて`PUT /api/admin/route-data`（`router`が`/api`配下にマウント済みのため実際には`/api/api/admin/route-data`という二重パスになっていた）があったが、路線データ編集機能ごと削除済み。同種のルート定義を追加する際は、`router`が`/api`配下にマウントされている前提でパスを書くこと（先頭に`/api`を重ねない）。
 - 上記の3つの曜日区分ロジックについて補足：`getDayType()`は平日/土曜/休日の3区分で、日曜に加えて`holidays`テーブル（`services/holidayCalendar.js`がキャッシュ、`utils/japaneseHolidays.js`が国民の祝日を算出してseed.jsが初期投入、管理画面`/admin`から追加・削除可）に登録された日もholiday扱いになります。`getActiveServiceIds()`はGTFSの正式な`calendar.txt`/`calendar_dates.txt`に基づく当日便生成用の運行日判定です。`getDayType()`自体はDBアクセスを持たない純粋関数のままとし、祝日集合(`holidaySet`)は呼び出し側（`etaPredictor.js`/`finishService.js`）が渡す設計です。
 - **`dailyTripBuilder.js`が「既に車両を割り当て済みの便は書き換えない」ガードを持つのは意図的です。** GTFSは1時間ごとに再取得され、成功すると`seed()`が走ってマスタが入れ替わります。このとき走行中の便の定刻まで書き換えると、遅延計算と実績が破綻します。

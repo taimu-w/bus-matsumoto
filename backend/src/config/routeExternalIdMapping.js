@@ -71,22 +71,6 @@ function resolveRouteIdByExternalId(externalId) {
 }
 
 /**
- * 指定GTFSフィードに属する外部IDだけを抜き出した Map（外部ID → route_id）を返す。
- * 位置情報フィードごとの絞り込みに使う。
- */
-function getExternalIdsForFeed(gtfsFeedId) {
-  const result = new Map();
-  if (!gtfsFeedId) return result;
-  const prefix = `${gtfsFeedId}:`;
-  for (const [externalId, routeId] of Object.entries(ROUTE_EXTERNAL_ID_MAP)) {
-    if (routeId.startsWith(prefix)) {
-      result.set(externalId, routeId);
-    }
-  }
-  return result;
-}
-
-/**
  * 複数のGTFSフィードに属する外部IDをまとめた Map を返す。
  * 配列が空の場合は「絞り込みなし」として全件を返す。
  * 1つの位置情報フィードが複数のGTFSフィードにまたがるケース（アルピコ交通）のためのもの。
@@ -151,7 +135,6 @@ function validateRouteExternalIdMap(knownRouteIds = null) {
 module.exports = {
   ROUTE_EXTERNAL_ID_MAP,
   resolveRouteIdByExternalId,
-  getExternalIdsForFeed,
   getExternalIdsForFeeds,
   getAllExternalIds,
   validateRouteExternalIdMap
