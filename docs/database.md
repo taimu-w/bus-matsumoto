@@ -26,9 +26,15 @@
 | `completed_trip_stop_times` | アーカイブされた便のバス停ごとの実績（`actual_minutes`は統計集計用） |
 | `segment_travel_stats` | ★区間別・曜日区分別・時間帯別の走行時間統計（ETA予測の核。詳細は[eta-prediction-algorithm.md](eta-prediction-algorithm.md)） |
 | `trip_arrival_predictions` | ★**プリコンピュートされた到着予測**（パイプラインが60秒ごとに全active割り当て分を保存。`assignment_id, stop_id`が複合主キー。APIはここから読み出すだけ → [design-eta-precompute.md](design-eta-precompute.md)） |
-| `trip_arrival_prediction_log` | ETA予測の履歴ログ（追記のみ）。`trip_arrival_predictions`は最新値のみのUPSERTのため「いつの時点の予測か」が失われる。予測精度監視のため、直前の記録から値が変化した場合のみ1行追記する。`assignment_id`経由でCASCADE削除されるため専用の掃除ジョブを持たない |
+| `trip_arrival_prediction_log` | ETA予測の履歴ログ（追記のみ）。`trip_arrival_predictions`は最新値のみのUPSERTのため「いつの時点の予測か」が失われる。予測精度監視のため、直前の記録から値が変化した場合のみ1行追記する。`assignment_id`経由でCASCADE削除されるため専用の掃除ジョブを持たない。`source='actual'`だけを対象にした部分インデックスを2本持つ（下記） |
 | `service_status_cache` | アルピコ交通公式サイトの運行状況ページをスクレイピングした結果のキャッシュ（1行のみ保持） |
 | `active_vehicle_summary`（VIEW） | 稼働中車両のサマリ表示用ビュー |
+
+## 予測精度監視まわりのインデックス
+
+`trip_arrival_prediction_log`には、通常のインデックス（`assignment_id, stop_id, computed_at DESC` と `route_id, computed_at DESC`）に加えて、`WHERE source = 'actual'`の部分インデックスが2本あります（`idx_prediction_log_actual_time` / `idx_prediction_log_actual_route_time`）。
+
+予測精度の集計（`services/predictionAccuracy.js`）は「実績が確定した行（`source='actual'`）を期間で絞る」ところから始まりますが、この行はテーブル全体の4割程度しかありません。部分インデックスにすることで、路線を絞る場合・絞らない場合のどちらでも、全件スキャンして`source`でフィルタする形を避けられます。**2本あるのは、路線絞り込みの有無で先頭列が変わるためです。片方だけにしないでください。**
 
 ## 未使用列・旧方式の名残
 

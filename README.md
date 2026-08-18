@@ -114,7 +114,7 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 | `gtfsCalendar.js` | GTFSカレンダー（`calendar.txt`/`calendar_dates.txt`）に基づく当日便生成用の運行日判定 | |
 | `gtfsData.js` | route_id解決（`resolveRouteId`）の唯一の窓口 | |
 | `gtfsTimetable.js` | 時刻表検索のインメモリインデックス | [docs/timetable-search.md](docs/timetable-search.md) |
-| `gtfsRouteSearch.js` | 経路検索エンジン（RAPTOR型） | [docs/経路検索機能_改善仕様書.md](docs/経路検索機能_改善仕様書.md) |
+| `gtfsRouteSearch.js` | 経路検索エンジン（RAPTOR型。出発時刻指定と到着時刻指定の両方、詳細設定による条件の絞り込み） | [docs/経路検索機能_改善仕様書.md](docs/経路検索機能_改善仕様書.md) |
 | `gtfsFare.js` | 運賃データ（`fare_attributes.txt`/`fare_rules.txt`）の索引と照会 | |
 | `realtimeTripLookup.js` | GTFS識別子⇔当日の運行実績の橋渡し（経路検索・バス停検索が共通で使う） | |
 | `busStopApproaching.js` | バス停検索の「接近中のバス」 | |
@@ -149,7 +149,7 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 - DBスキーマ（テーブル一覧・役割・未使用列）: [docs/database.md](docs/database.md)
 - APIエンドポイント一覧: [docs/api-reference.md](docs/api-reference.md)
 
-代表的な公開エンドポイントだけ挙げると、`GET /api/buses`（担当車両のリアルタイム運行状況＋到着予測）・`GET /api/timetable`（本日の時刻表）・`GET /api/route-search`（経路検索）・`GET /api/routes`（路線一覧）です。管理系（`/api/admin/...`）はBasic認証（`ADMIN_USERNAME`/`ADMIN_PASSWORD`）で保護されています。
+代表的な公開エンドポイントだけ挙げると、`GET /api/buses`（担当車両のリアルタイム運行状況＋到着予測）・`GET /api/timetable`（本日の時刻表）・`GET /api/route-search`（経路検索。詳細設定 `maxTransfers`/`allowWalkTransfer`/`minTransferMinutes` は任意で、未指定なら従来どおりの条件）・`GET /api/routes`（路線一覧）です。管理系（`/api/admin/...`）はBasic認証（`ADMIN_USERNAME`/`ADMIN_PASSWORD`）で保護されています。
 
 ---
 
@@ -158,7 +158,7 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 素のHTML/CSS/JS、ビルドステップなし。
 
 - `frontend/index.html` + `frontend/app.js`: 利用者向け運行状況画面。`POLL_MS`（20秒）間隔で`/api/buses`等をポーリング、お気に入りはlocalStorage、SPAルーティングの入口。バスマップ（`#/busmap`、Leaflet + OpenStreetMap）も含む。
-- `frontend/timetable.js`（時刻表検索）・`frontend/busstop.js`（バス停検索）・`frontend/stopmap.js`（バス停マップ）・`frontend/routesearch.js`（経路検索）は、いずれもハッシュではなくパス（History API）でルーティングします。
+- `frontend/timetable.js`（時刻表検索）・`frontend/busstop.js`（バス停検索）・`frontend/stopmap.js`（バス停マップ）・`frontend/routesearch.js`（経路検索）は、いずれもハッシュではなくパス（History API）でルーティングします。経路検索は「経路一覧（`/routesearch?…`）→ 経路詳細（`…&journey=N`）」の2階層で、乗り換え時刻や通過バス停は詳細側に表示します（[docs/経路検索機能_改善仕様書.md](docs/経路検索機能_改善仕様書.md) 6.3）。検索フォームには折りたたみの「詳細設定」があり、乗り換え回数（「乗り換えなし」など）・徒歩での乗り継ぎの有無・乗り換えの余裕時間を指定できます。**既定は従来どおりの条件**で、既定値の項目はURLにも載せません（同 5.8・6.2）。
 - `frontend/admin.html`: Basic認証で保護された管理画面（運行ダッシュボード・便の割当監視・通過判定・異常アラート・GTFS/位置情報フィード監視・API稼働監視・ジョブ監視・お知らせ編集・祝日カレンダー・観光スポット編集・直近車両位置）。
 - `frontend/style.css`: 共通スタイル。
 

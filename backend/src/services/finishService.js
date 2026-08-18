@@ -19,7 +19,7 @@ const { loadHolidaySet } = require('./holidayCalendar');
 async function loadLatestGpsByVehicle(client, vehicleIds) {
   if (vehicleIds.length === 0) return new Map();
   const res = await client.query(
-    `SELECT DISTINCT ON (vehicle_id) vehicle_id, lat, lon, gps_time_ts
+    `SELECT DISTINCT ON (vehicle_id) vehicle_id, lat, lon, gps_time, gps_time_ts
      FROM vehicle_gps_log
      WHERE vehicle_id = ANY($1::int[])
      ORDER BY vehicle_id, gps_time_ts DESC, id DESC`,
@@ -43,6 +43,18 @@ async function getAssignmentTerminal(client, assignmentId) {
     [assignmentId]
   );
   return res.rows[0] || null;
+}
+
+/**
+ * まだ到着済/通過になっていない（＝未到達の）バス停一覧を返す。
+ * GPS途絶時の「終点到着」救済判定（残り未到達バス停が終点のみか）に使う。
+ */
+async function getUnreachedStops(client, assignmentId) {
+  const res = await client.query(
+    `SELECT stop_id FROM trip_stop_progress WHERE assignment_id = $1 AND status = ''`,
+    [assignmentId]
+  );
+  return res.rows;
 }
 
 async function endAssignment(client, assignmentId, reason) {
@@ -184,6 +196,9 @@ async function closeDailyTrip(client, dailyTripId, reason) {
 async function finishTrips() {
   const client = await pool.connect();
   const endRadius = parseFloat(process.env.END_AREA_RADIUS_METERS || '150');
+  // GPS途絶時、未到達バス停が終点のみの場合に「終点到着」とみなす救済判定の半径。
+  // 途絶中は測位精度が落ちている前提のため、通常の終了エリア判定(END_AREA_RADIUS_METERS)より広くとる。
+  const gpsTimeoutTerminalRadius = parseFloat(process.env.GPS_TIMEOUT_TERMINAL_RADIUS_METERS || '300');
   const maxAgeMin = parseInt(process.env.VEHICLE_MAX_AGE_MIN || '120', 10);
   // 割り当て直後の終了誤判定をブロックする保護期間
   const protectionMin = parseInt(process.env.FINISH_PROTECTION_MIN || '10', 10);
@@ -243,9 +258,33 @@ async function finishTrips() {
             }
           }
 
-          // 条件④: GPS更新停止
+          // 条件④: GPS更新停止（途絶）
           if (!reason && staleVehicles.has(a.vehicle_id)) {
-            reason = 'GPS更新停止';
+            // 途絶時は即ロスト扱いにせず、未到達バス停が「終点のみ」残っている場合に限り
+            // 最終GPSが終点付近（gpsTimeoutTerminalRadius）かどうかで終点到着への救済判定を行う。
+            // 未到達バス停が2個以上残っている場合はこれまでどおり通信障害/ロストとして扱う。
+            if (terminal && terminal.status !== '到着済') {
+              const unreached = await getUnreachedStops(client, a.assignment_id);
+              const onlyTerminalUnreached =
+                unreached.length === 1 && unreached[0].stop_id === terminal.stop_id;
+
+              if (onlyTerminalUnreached && gps) {
+                const distToTerminal = haversineDistanceMeters(gps.lat, gps.lon, terminal.lat, terminal.lon);
+                if (distToTerminal <= gpsTimeoutTerminalRadius) {
+                  await client.query(
+                    `UPDATE trip_stop_progress
+                     SET status = '到着済', actual_time = $1, interpolated = TRUE
+                     WHERE assignment_id = $2 AND stop_id = $3`,
+                    [gps.gps_time, a.assignment_id, terminal.stop_id]
+                  );
+                  reason = '終点到着（GPS途絶時判定）';
+                }
+              }
+            }
+
+            if (!reason) {
+              reason = 'GPS更新停止';
+            }
           }
         }
 

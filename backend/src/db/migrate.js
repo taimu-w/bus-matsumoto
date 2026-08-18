@@ -256,6 +256,22 @@ async function migrate() {
       CREATE UNIQUE INDEX IF NOT EXISTS tourist_spots_name_key ON tourist_spots (name)
     `);
 
+    // ==========================================================
+    // 18. 予測精度監視の集計をSQL側へ移したことに伴う部分インデックス
+    //     （services/predictionAccuracy.js）。
+    //     集計は「実績（source='actual'）の行を期間で絞る」ところから始まるため、
+    //     source='actual' だけを含む部分インデックスで走査量を落とす。
+    //     新規環境ではschema.sqlに含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_prediction_log_actual_time
+      ON trip_arrival_prediction_log(computed_at DESC) WHERE source = 'actual'
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_prediction_log_actual_route_time
+      ON trip_arrival_prediction_log(route_id, computed_at DESC) WHERE source = 'actual'
+    `);
+
     await client.query('COMMIT');
     console.log('[migrate] 複数事業者対応・便起点割り当てマイグレーション完了');
   } catch (err) {

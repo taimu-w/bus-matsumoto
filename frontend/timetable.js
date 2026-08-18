@@ -19,6 +19,9 @@
   let searchQuery = '';
   let searchTimer = null;
   let searchSeq = 0;
+  // 「近くのバス停」候補。位置情報の許可ダイアログを毎回出さないよう、取得結果をページ内で使い回す（busstop.jsと同じ方式）。
+  let nearbyStopsCache = null;
+  let nearbyStopsPromise = null;
   // 「乗り場別」を選んだ直後の選択UI（'map' | 'headsign' | null）
   let platformChooser = null;
   let chooserStopKey = null;
@@ -277,14 +280,20 @@
     `;
 
     const input = document.getElementById('tt-search-input');
+    const container = document.getElementById('tt-search-results');
     input.value = searchQuery;
     input.addEventListener('input', () => {
       searchQuery = input.value;
       clearTimeout(searchTimer);
+      if (!searchQuery.trim()) {
+        showNearbyStops(container);
+        return;
+      }
       searchTimer = setTimeout(runSearch, 180);
     });
-    input.focus();
+    // 入力欄への自動フォーカス（＝キーボードの自動表示）は廃止し、代わりに近くのバス停を候補として出す（busstop.jsと同じ方針）。
     if (searchQuery.trim()) runSearch();
+    else showNearbyStops(container);
   }
 
   async function runSearch() {
@@ -292,7 +301,7 @@
     if (!container) return;
     const query = searchQuery.trim();
     if (!query) {
-      container.innerHTML = '';
+      showNearbyStops(container);
       return;
     }
 
@@ -307,39 +316,103 @@
     }
   }
 
+  /** 検索結果カード1件分のHTML。「近くのバス停」候補でも見た目を揃えるため共通化する（busstop.jsのstopCardHtmlと同じ方針）。 */
+  function stopCardHtml(stop) {
+    const reading = [stop.nameHiragana, stop.nameRomaji].filter(Boolean).join(' / ');
+    const chips = (stop.routes || [])
+      .slice(0, 6)
+      .map((route) => {
+        const bg = parseHexColor(route.color) ? `#${route.color.replace('#', '')}` : '#e2e8f0';
+        const fg = chipTextColor(route.color, route.textColor);
+        return `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full" style="background:${esc(bg)};color:${esc(fg)}">${esc(route.shortName || route.name)}</span>`;
+      })
+      .join('');
+    const more = (stop.routes || []).length > 6 ? `<span class="text-[10px] font-bold text-gray-500">ほか${stop.routes.length - 6}路線</span>` : '';
+    const badge = Number.isFinite(stop.walkMinutes)
+      ? `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1 shrink-0">徒歩約${stop.walkMinutes}分</span>`
+      : `<span class="text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded px-2 py-1 shrink-0">${stop.platformCount}乗り場</span>`;
+    // 検索結果のタップ先は直接 /timetable/stops/{stop_id}（この画面の時刻表詳細）。
+    return `
+      <a href="${stopUrl(stop.stopKey)}" data-spa
+         class="block bg-white border-2 border-gray-200 rounded-xl p-3 hover:border-sky-500 active:scale-[0.99] transition-all">
+        <div class="flex items-center justify-between gap-2">
+          <div class="min-w-0">
+            <p class="font-bold text-lg text-gray-900 truncate">${esc(stop.stopName)}</p>
+            ${reading ? `<p class="text-[11px] text-gray-500 font-bold truncate">${esc(reading)}</p>` : ''}
+          </div>
+          ${badge}
+        </div>
+        <div class="flex flex-wrap gap-1 mt-2 items-center">${chips}${more}</div>
+      </a>`;
+  }
+
   function renderSearchResults(container, stops) {
     if (stops.length === 0) {
       container.innerHTML = '<p class="text-sm font-bold text-gray-500">該当するバス停が見つかりませんでした。</p>';
       return;
     }
 
-    container.innerHTML = stops
-      .map((stop) => {
-        const reading = [stop.nameHiragana, stop.nameRomaji].filter(Boolean).join(' / ');
-        const chips = (stop.routes || [])
-          .slice(0, 6)
-          .map((route) => {
-            const bg = parseHexColor(route.color) ? `#${route.color.replace('#', '')}` : '#e2e8f0';
-            const fg = chipTextColor(route.color, route.textColor);
-            return `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full" style="background:${esc(bg)};color:${esc(fg)}">${esc(route.shortName || route.name)}</span>`;
-          })
-          .join('');
-        const more = (stop.routes || []).length > 6 ? `<span class="text-[10px] font-bold text-gray-500">ほか${stop.routes.length - 6}路線</span>` : '';
-        // 検索結果のタップ先は直接 /timetable/stops/{stop_id}（この画面の時刻表詳細）。
-        return `
-          <a href="${stopUrl(stop.stopKey)}" data-spa
-             class="block bg-white border-2 border-gray-200 rounded-xl p-3 hover:border-sky-500 active:scale-[0.99] transition-all">
-            <div class="flex items-center justify-between gap-2">
-              <div class="min-w-0">
-                <p class="font-bold text-lg text-gray-900 truncate">${esc(stop.stopName)}</p>
-                ${reading ? `<p class="text-[11px] text-gray-500 font-bold truncate">${esc(reading)}</p>` : ''}
-              </div>
-              <span class="text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded px-2 py-1 shrink-0">${stop.platformCount}乗り場</span>
-            </div>
-            <div class="flex flex-wrap gap-1 mt-2 items-center">${chips}${more}</div>
-          </a>`;
-      })
-      .join('');
+    container.innerHTML = stops.map(stopCardHtml).join('');
+  }
+
+  /** 現在地から近いバス停（最大5件）。位置情報の許可ダイアログは1画面につき1回だけ出す（busstop.jsと同じ実装）。 */
+  async function getNearbyStops() {
+    if (nearbyStopsCache) return nearbyStopsCache;
+    if (!nearbyStopsPromise) {
+      nearbyStopsPromise = (async () => {
+        if (typeof window.getUserLocation !== 'function') return [];
+        const location = await window.getUserLocation();
+        if (!location) return [];
+        try {
+          const query = new URLSearchParams({ lat: location.lat, lon: location.lng, limit: 5 });
+          const data = await fetchJson(`${API_BASE}/busstop/nearby?${query.toString()}`);
+          return data.stops || [];
+        } catch (err) {
+          return [];
+        }
+      })();
+    }
+    nearbyStopsCache = await nearbyStopsPromise;
+    return nearbyStopsCache;
+  }
+
+  /**
+   * お気に入り登録済みバス停のサマリー（重複なし・登録が新しい順、busstop.jsと同じ実装）。
+   * 特定の乗り場のみお気に入りでもバス停単位（すべての乗り場）で候補に出す。
+   */
+  async function getFavoriteStops() {
+    const keys = window.Favorites ? window.Favorites.favoriteBusStopKeys() : [];
+    if (keys.length === 0) return [];
+    try {
+      const query = new URLSearchParams({ keys: keys.join(',') });
+      const data = await fetchJson(`${API_BASE}/busstop/by-keys?${query.toString()}`);
+      return data.stops || [];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  /** 検索欄が空のときの初期表示。自動フォーカスの代わりにお気に入りバス停・近くのバス停を
+   *  候補として出す（お気に入りを一番上、その次に近い順。soft-fail：取得できなければ何も出さない）。 */
+  async function showNearbyStops(container) {
+    container.innerHTML = '<p class="text-sm font-bold text-gray-400 py-3 text-center">近くのバス停を確認中...</p>';
+    const [favoriteStops, nearbyStops] = await Promise.all([getFavoriteStops(), getNearbyStops()]);
+    // 取得を待つ間に入力・画面遷移されていたら上書きしない
+    if (searchQuery.trim() || document.getElementById('tt-search-results') !== container) return;
+    const favoriteKeys = new Set(favoriteStops.map((stop) => stop.stopKey));
+    const nearbyOnlyStops = nearbyStops.filter((stop) => !favoriteKeys.has(stop.stopKey));
+    if (favoriteStops.length === 0 && nearbyOnlyStops.length === 0) {
+      container.innerHTML = '';
+      return;
+    }
+    const sections = [];
+    if (favoriteStops.length > 0) {
+      sections.push(`<p class="text-xs font-bold text-gray-500 px-1">お気に入りバス停</p><div class="mt-2 space-y-2">${favoriteStops.map(stopCardHtml).join('')}</div>`);
+    }
+    if (nearbyOnlyStops.length > 0) {
+      sections.push(`<p class="text-xs font-bold text-gray-500 px-1 ${favoriteStops.length > 0 ? 'mt-4' : ''}">現在地から近いバス停</p><div class="mt-2 space-y-2">${nearbyOnlyStops.map(stopCardHtml).join('')}</div>`);
+    }
+    container.innerHTML = sections.join('');
   }
 
   /* ---------- 画面: バス停詳細 ---------- */

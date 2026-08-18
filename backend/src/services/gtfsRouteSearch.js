@@ -54,6 +54,14 @@ const FUZZY_CANDIDATE_LIMIT = 3;
 // 1経路あたりの徒歩の合計上限（これを超える案は、他に候補があれば出さない）
 const MAX_TOTAL_WALK_MINUTES = 25;
 
+// --- 詳細設定（利用者が指定できる探索条件）---
+// いずれも「未指定＝これまでどおり」に落ちるようにしてある。
+// 詳細設定は探索条件を**絞る方向にだけ**効かせる（段階的フォールバックが緩めた条件も、
+// 利用者が明示した上限は超えない。「直通のみ」で探したのに乗換つきの案が出る、を防ぐため）。
+const MAX_TRANSFERS_LIMIT = MAX_ROUNDS_RELAXED - 1;
+const TRANSFER_MARGIN_MIN_MINUTES = 1;
+const TRANSFER_MARGIN_MAX_MINUTES = 15;
+
 // 観光スポット起点/終点の経路検索用（観光スポット情報_仕様書）。
 // 検索半径は表示半径（touristSpots.js の近接表示半径）と揃えて500m程度。
 const SPOT_LINK_RADIUS_METERS = 500;
@@ -63,6 +71,62 @@ const SPOT_LINK_STOP_LIMIT = 5; // 経路検索の対象バス停数の上限（
 // おすすめ判定の重み（仕様書 5.4）。乗換1回あたり5分、徒歩1秒あたり0.5秒ぶんの不利。
 const TRANSFER_PENALTY_SECONDS = 300;
 const WALK_PENALTY_RATIO = 0.5;
+
+/* ==========================================================
+ * 詳細設定（探索条件の絞り込み）
+ * ========================================================== */
+
+/**
+ * 詳細設定を正規化する。**未指定・不正値は必ず既定（＝従来の挙動）へ落とす。**
+ * 旧クライアント・既存のURL・お気に入りが何も付けずに叩いても挙動が変わらないようにするため。
+ *
+ * @param {object} options searchJourneys() のオプション（クエリ文字列由来の文字列も受ける）
+ * @returns {{maxTransfers:number|null, allowWalkTransfer:boolean, minTransferSeconds:number, isDefault:boolean}}
+ */
+function normalizeSearchPreferences(options = {}) {
+  // 乗換回数の上限。null＝指定なし（段階的フォールバックのラウンド数に任せる＝従来どおり）。
+  let maxTransfers = null;
+  const rawMaxTransfers = options.maxTransfers;
+  if (rawMaxTransfers !== null && rawMaxTransfers !== undefined && String(rawMaxTransfers).trim() !== '') {
+    const parsed = Number.parseInt(rawMaxTransfers, 10);
+    if (Number.isFinite(parsed)) maxTransfers = Math.min(Math.max(parsed, 0), MAX_TRANSFERS_LIMIT);
+  }
+
+  // 徒歩での乗り継ぎを使うか。既定は使う。明示的に否定されたときだけ false。
+  const rawAllowWalk = options.allowWalkTransfer;
+  const allowWalkTransfer = !(
+    rawAllowWalk === false || rawAllowWalk === 0 || rawAllowWalk === 'false' || rawAllowWalk === '0'
+  );
+
+  // 乗り換えに要求する最低の余裕時間（分）。未指定なら従来の MIN_TRANSFER_SECONDS。
+  let minTransferSeconds = MIN_TRANSFER_SECONDS;
+  const parsedMargin = Number.parseInt(options.minTransferMinutes, 10);
+  if (Number.isFinite(parsedMargin)) {
+    minTransferSeconds =
+      Math.min(Math.max(parsedMargin, TRANSFER_MARGIN_MIN_MINUTES), TRANSFER_MARGIN_MAX_MINUTES) * 60;
+  }
+
+  return {
+    maxTransfers,
+    allowWalkTransfer,
+    minTransferSeconds,
+    isDefault:
+      maxTransfers === null && allowWalkTransfer && minTransferSeconds === MIN_TRANSFER_SECONDS
+  };
+}
+
+// 「詳細設定なし」の条件。0件のときに「設定が原因か」を切り分ける再探索で使う。
+const DEFAULT_PREFERENCES = normalizeSearchPreferences({});
+
+/** レスポンスに載せる形（画面が現在の条件を復元・表示するのに使う）。 */
+function serializePreferences(preferences) {
+  return {
+    maxTransfers: preferences.maxTransfers,
+    allowWalkTransfer: preferences.allowWalkTransfer,
+    minTransferMinutes: Math.round(preferences.minTransferSeconds / 60),
+    isDefault: preferences.isDefault
+  };
+}
 
 /* ==========================================================
  * 探索用インデックス（GTFSインデックスから派生。builtAtが変われば作り直す）
@@ -121,6 +185,66 @@ function buildBoardingsByGroup(index) {
     list.sort((a, b) => a.departureSeconds - b.departureSeconds);
   }
   return boardingsByGroup;
+}
+
+/**
+ * バス停グループごとの「降車できる到着」一覧を作る（到着時刻指定＝逆向き探索用）。
+ * buildBoardingsByGroup と対になるインデックスで、乗車可否ではなく降車可否で絞り、
+ * 到着時刻（arrival_time が無ければ departure_time）で並べる。
+ *
+ * 絞り込み条件は runRaptor の降車判定（scanTrip）とまったく同じにしてある。
+ * ここがずれると「出発時刻指定では出るのに到着時刻指定では出ない区間」が生まれる。
+ */
+function buildAlightingsByGroup(index) {
+  const alightingsByGroup = new Map();
+
+  for (const [tripKey, stopTimes] of index.stopTimesByTrip.entries()) {
+    const trip = index.trips.get(tripKey);
+    if (!trip) continue;
+    const offsets = tripInstanceOffsets(trip);
+
+    for (const stopTime of stopTimes) {
+      if (stopTime.dropOffType === 1) continue; // 降車できない停車
+      const arrivalRaw = Number.isFinite(stopTime.arrivalSeconds)
+        ? stopTime.arrivalSeconds
+        : stopTime.departureSeconds;
+      if (!Number.isFinite(arrivalRaw)) continue;
+      const stop = index.stops.get(stopTime.stopKey);
+      if (!stop || !stop.groupKey) continue;
+
+      if (!alightingsByGroup.has(stop.groupKey)) alightingsByGroup.set(stop.groupKey, []);
+      const list = alightingsByGroup.get(stop.groupKey);
+      for (const offset of offsets) {
+        list.push({
+          tripKey,
+          tripIndex: stopTime.tripIndex,
+          offsetSeconds: offset,
+          arrivalSeconds: arrivalRaw + offset
+        });
+      }
+    }
+  }
+
+  for (const list of alightingsByGroup.values()) {
+    list.sort((a, b) => a.arrivalSeconds - b.arrivalSeconds);
+  }
+  return alightingsByGroup;
+}
+
+/**
+ * 降車インデックスは到着時刻指定の検索でしか使わないため、初回に使うまで作らない。
+ * （出発時刻指定だけを使っている利用者に、余分な構築コストとメモリを負わせない）
+ */
+function getAlightingsByGroup(searchIndex) {
+  if (!searchIndex.alightingsByGroup) {
+    const startedAt = Date.now();
+    searchIndex.alightingsByGroup = buildAlightingsByGroup(searchIndex.index);
+    console.log(
+      `[gtfsRouteSearch] 到着時刻指定用インデックス構築完了: バス停${searchIndex.alightingsByGroup.size}件 ` +
+      `(${Date.now() - startedAt}ms)`
+    );
+  }
+  return searchIndex.alightingsByGroup;
 }
 
 /**
@@ -190,6 +314,8 @@ async function getSearchIndex() {
     builtAt: index.builtAt,
     index,
     boardingsByGroup,
+    // 到着時刻指定の検索で初めて使うときに構築する（getAlightingsByGroup）
+    alightingsByGroup: null,
     footpathsByRadius: new Map(),
     // 日付ごとの「その日運行する便」の集合（最大8日ぶんを保持）
     activeTripsByDate: new Map()
@@ -295,7 +421,15 @@ function alignPredictedSeconds(predictedTime, scheduleSeconds) {
  * @returns {Array<{arrivalSeconds:number, round:number, destinationKey:string, labels:Array}>}
  */
 function runRaptor(ctx, originTimes, destinationKeys) {
-  const { searchIndex, footpaths, activeTripsByShift, maxRounds, windowSeconds } = ctx;
+  const {
+    searchIndex,
+    footpaths,
+    activeTripsByShift,
+    maxRounds,
+    windowSeconds,
+    // 詳細設定で伸ばせる乗換余裕。未指定なら従来の既定値。
+    minTransferSeconds = MIN_TRANSFER_SECONDS
+  } = ctx;
   const index = searchIndex.index;
   const boardingsByGroup = searchIndex.boardingsByGroup;
 
@@ -374,7 +508,7 @@ function runRaptor(ctx, originTimes, destinationKeys) {
       const readySeconds = arrivalByRound[round - 1].get(groupKey);
       if (readySeconds === undefined) continue;
       // 最初の乗車には乗換余裕を課さない
-      const departAfter = round === 1 ? readySeconds : readySeconds + MIN_TRANSFER_SECONDS;
+      const departAfter = round === 1 ? readySeconds : readySeconds + minTransferSeconds;
       const boardings = boardingsByGroup.get(groupKey);
       if (!boardings) continue;
 
@@ -477,6 +611,232 @@ function lowerBound(boardings, seconds) {
     else high = mid;
   }
   return low;
+}
+
+/** 到着時刻でソート済みの配列から、seconds を超える最初の位置を返す（逆向き探索用）。 */
+function upperBoundByArrival(alightings, seconds) {
+  let low = 0;
+  let high = alightings.length;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (alightings[mid].arrivalSeconds <= seconds) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+}
+
+/* ==========================================================
+ * 逆向きRAPTOR（到着時刻指定）
+ * ========================================================== */
+
+/**
+ * 「◯時までに着きたい」ための逆向き探索。runRaptor を時間軸で反転させたもので、
+ * τ[k][stop] は「あと k 回バスに乗れば目的地に間に合う、そのバス停の最遅出発時刻」。
+ * 各ラウンドでは「そのバス停に τ までに到着する便」を探し、便を遡って
+ * より手前のバス停の最遅出発時刻を更新する。
+ *
+ * runRaptor との対応（この対称性を崩すと、出発時刻指定では出るのに
+ * 到着時刻指定では出ない区間が生まれるので注意）:
+ *   最早到着の最小化   ⇔ 最遅出発の最大化
+ *   乗車（pickup可）    ⇔ 降車（drop_off可）から遡る
+ *   乗換余裕はラウンド1（＝最初の乗車）で免除 ⇔ ラウンド1（＝最後の降車）で免除
+ *   基準時刻＋探索窓で打ち切り ⇔ 基準時刻−探索窓で打ち切り
+ *
+ * @param {object} ctx buildContext() の戻り値
+ * @param {Map<string, number>} destinationTimes 目的地グループ → 到着期限（秒）
+ * @param {Set<string>} originKeys 出発地グループの集合
+ * @returns {Array<{departureSeconds:number, round:number, originKey:string, labels:Array}>}
+ */
+function runRaptorReverse(ctx, destinationTimes, originKeys) {
+  const {
+    searchIndex,
+    footpaths,
+    activeTripsByShift,
+    maxRounds,
+    windowSeconds,
+    minTransferSeconds = MIN_TRANSFER_SECONDS
+  } = ctx;
+  const index = searchIndex.index;
+  const alightingsByGroup = getAlightingsByGroup(searchIndex);
+
+  const latestTarget = Math.max(...destinationTimes.values());
+  const searchFloorSeconds = latestTarget - windowSeconds;
+
+  // τ[k][groupKey]（最遅出発時刻）。ラウンドごとに保持する（経路復元に必要）。
+  const departureByRound = [new Map()];
+  const labelByRound = [new Map()];
+  // 全ラウンド通しての最良（＝最も遅い）出発時刻（枝刈り用）
+  const best = new Map();
+  let bestOrigin = Number.NEGATIVE_INFINITY;
+
+  const improve = (round, groupKey, seconds, label) => {
+    if (seconds <= (best.get(groupKey) ?? Number.NEGATIVE_INFINITY)) return false;
+    if (seconds < bestOrigin) return false; // 出発地をより遅く出られる経路が既にある
+    best.set(groupKey, seconds);
+    departureByRound[round].set(groupKey, seconds);
+    labelByRound[round].set(groupKey, label);
+    if (originKeys.has(groupKey) && seconds > bestOrigin) bestOrigin = seconds;
+    return true;
+  };
+
+  let marked = new Set();
+  for (const [groupKey, seconds] of destinationTimes.entries()) {
+    if (improve(0, groupKey, seconds, null)) marked.add(groupKey);
+  }
+  // 目的地への徒歩接続（ラウンド0）
+  relaxFootpaths(0, marked);
+
+  function relaxFootpaths(round, markedSet) {
+    const added = [];
+    // 徒歩の連鎖の禁止も順向きと同じ（relax 開始時点の状態を固定してから走査する）
+    const targets = [];
+    for (const groupKey of markedSet) {
+      const label = labelByRound[round].get(groupKey);
+      if (label && label.type === 'walk') continue;
+      const departure = departureByRound[round].get(groupKey);
+      if (departure === undefined) continue;
+      targets.push({ groupKey, departure });
+    }
+
+    for (const { groupKey, departure } of targets) {
+      for (const link of footpaths.get(groupKey) || []) {
+        // link.groupKey から groupKey へ歩く（徒歩接続は距離が対称なので同じ表を使える）
+        const seconds = departure - link.walkSeconds;
+        if (seconds < searchFloorSeconds) continue;
+        const label = {
+          type: 'walk',
+          round,
+          toRound: round,
+          toGroupKey: groupKey,
+          walkSeconds: link.walkSeconds,
+          distanceMeters: link.distanceMeters,
+          departureSeconds: seconds,
+          arrivalSeconds: departure
+        };
+        if (improve(round, link.groupKey, seconds, label)) added.push(link.groupKey);
+      }
+    }
+    for (const groupKey of added) markedSet.add(groupKey);
+  }
+
+  const results = [];
+
+  for (let round = 1; round <= maxRounds; round += 1) {
+    departureByRound[round] = new Map();
+    labelByRound[round] = new Map();
+    const nextMarked = new Set();
+    const scanned = new Set();
+
+    for (const groupKey of marked) {
+      const readySeconds = departureByRound[round - 1].get(groupKey);
+      if (readySeconds === undefined) continue;
+      // ラウンド1＝最後の降車（目的地に着くだけ）なので乗換余裕は要らない
+      const arriveBefore = round === 1 ? readySeconds : readySeconds - minTransferSeconds;
+      const alightings = alightingsByGroup.get(groupKey);
+      if (!alightings) continue;
+
+      for (const shift of activeTripsByShift) {
+        const shiftedTo = arriveBefore - shift.offsetSeconds;
+        const shiftedFrom = Math.max(searchFloorSeconds, bestOrigin) - shift.offsetSeconds;
+        if (shiftedTo < shiftedFrom) continue;
+
+        // 到着時刻が遅い側から見ていく（早い便ほど出発も早くなり、有用性が下がる）
+        let i = upperBoundByArrival(alightings, shiftedTo) - 1;
+        for (; i >= 0; i -= 1) {
+          const alighting = alightings[i];
+          if (alighting.arrivalSeconds < shiftedFrom) break;
+          if (!shift.activeTripKeys.has(alighting.tripKey)) continue;
+
+          const instanceKey = `${alighting.tripKey}|${alighting.offsetSeconds}|${shift.offsetSeconds}`;
+          if (scanned.has(instanceKey)) continue;
+          scanned.add(instanceKey);
+
+          scanTripBackward(round, groupKey, alighting, shift, nextMarked);
+        }
+      }
+    }
+
+    relaxFootpaths(round, nextMarked);
+
+    // このラウンド（＝乗車round回、乗換round-1回）で出発地から間に合うか
+    for (const originKey of originKeys) {
+      const departure = departureByRound[round].get(originKey);
+      if (departure === undefined) continue;
+      const labels = reconstructForward(originKey, round);
+      if (labels && labels.some((label) => label.type === 'bus')) {
+        results.push({ departureSeconds: departure, round, originKey, labels });
+      }
+    }
+
+    if (nextMarked.size === 0) break;
+    marked = nextMarked;
+  }
+
+  function scanTripBackward(round, alightGroupKey, alighting, shift, nextMarked) {
+    const stopTimes = index.stopTimesByTrip.get(alighting.tripKey);
+    if (!stopTimes) return;
+    const totalOffset = alighting.offsetSeconds + shift.offsetSeconds;
+
+    for (let j = alighting.tripIndex - 1; j >= 0; j -= 1) {
+      const stopTime = stopTimes[j];
+      if (stopTime.pickupType === 1) continue; // 乗車できない停車
+      if (!Number.isFinite(stopTime.departureSeconds)) continue;
+      const stop = index.stops.get(stopTime.stopKey);
+      if (!stop || !stop.groupKey) continue;
+
+      const departure = stopTime.departureSeconds + totalOffset;
+      const label = {
+        type: 'bus',
+        round,
+        toRound: round - 1,
+        toGroupKey: alightGroupKey,
+        tripKey: alighting.tripKey,
+        offsetSeconds: totalOffset,
+        tripOffsetSeconds: alighting.offsetSeconds,
+        boardIndex: j,
+        alightIndex: alighting.tripIndex,
+        departureSeconds: departure,
+        arrivalSeconds: alighting.arrivalSeconds + shift.offsetSeconds
+      };
+      if (improve(round, stop.groupKey, departure, label)) nextMarked.add(stop.groupKey);
+    }
+  }
+
+  /** 出発地から目的地へ向かってラベルをたどる（逆向き探索のラベルは「次の一手」を指している）。 */
+  function reconstructForward(originKey, round) {
+    const labels = [];
+    let currentKey = originKey;
+    let currentRound = round;
+    for (let guard = 0; guard < 32; guard += 1) {
+      const label = labelByRound[currentRound]?.get(currentKey);
+      if (!label) return labels.length > 0 ? labels : null;
+      labels.push({ ...label, fromGroupKey: currentKey });
+      currentKey = label.toGroupKey;
+      currentRound = label.toRound;
+    }
+    return null;
+  }
+
+  return results;
+}
+
+/**
+ * 逆向き探索の徒歩区間は「次のバスにぎりぎり間に合う最遅の時刻」で組み立てられている。
+ * バスを降りたあとの徒歩は、実際には降車直後に歩き始めるので、
+ * 直前のバスの到着時刻へ寄せ直す（そうしないと「降車後しばらく待ってから歩く」表示になる）。
+ * 先頭の徒歩（出発地→最初のバス停）は最遅のままにする。到着時刻指定では
+ * 「家をいつ出ればよいか」がそのまま答えになるため。
+ */
+function normalizeReverseLabels(labels) {
+  for (let i = 0; i < labels.length; i += 1) {
+    const label = labels[i];
+    if (label.type !== 'walk') continue;
+    const previous = labels[i - 1];
+    if (!previous || previous.type !== 'bus') continue;
+    label.departureSeconds = previous.arrivalSeconds;
+    label.arrivalSeconds = previous.arrivalSeconds + label.walkSeconds;
+  }
+  return labels;
 }
 
 /* ==========================================================
@@ -704,7 +1064,7 @@ function attachFares(fareIndex, journeys) {
  * 超えてしまう場合は、その乗換に「間に合わない可能性」の警告を付ける。
  * 経路自体は残す（soft-fail方針を踏襲）が、呼び出し側でおすすめ選定・並び替えに使う。
  */
-function flagTransferRisks(journey) {
+function flagTransferRisks(journey, minTransferSeconds = MIN_TRANSFER_SECONDS) {
   const legs = journey.legs;
   for (let i = 0; i < legs.length; i += 1) {
     const leg = legs[i];
@@ -729,8 +1089,8 @@ function flagTransferRisks(journey) {
       : null;
     const effectiveDeparture = departureRt !== null ? departureRt : nextBusLeg.departureSeconds;
 
-    // 徒歩を挟む乗換は徒歩所要時間そのものが必要な間隔。同一停留所ならMIN_TRANSFER_SECONDS。
-    const requiredGapSeconds = walkLeg ? walkLeg.arrivalSeconds - walkLeg.departureSeconds : MIN_TRANSFER_SECONDS;
+    // 徒歩を挟む乗換は徒歩所要時間そのものが必要な間隔。同一停留所なら探索時と同じ乗換余裕。
+    const requiredGapSeconds = walkLeg ? walkLeg.arrivalSeconds - walkLeg.departureSeconds : minTransferSeconds;
 
     if (arrivalRt + requiredGapSeconds > effectiveDeparture) {
       nextBusLeg.transferRisk = {
@@ -745,7 +1105,7 @@ function flagTransferRisks(journey) {
 /**
  * 当日の運行実績・予測を重ねる。失敗しても定刻表示のまま成立させる（soft-fail）。
  */
-async function attachRealtime(journeys) {
+async function attachRealtime(journeys, minTransferSeconds = MIN_TRANSFER_SECONDS) {
   // 同じ便を何度も引かないためのリクエスト内キャッシュ
   const busEntryCache = new Map();
 
@@ -753,8 +1113,9 @@ async function attachRealtime(journeys) {
     for (let legIndex = 0; legIndex < journey.legs.length; legIndex += 1) {
       const leg = journey.legs[legIndex];
       if (leg.type !== 'bus') continue;
-      // 翌日ぶんにずらして拾った便は「今日のリアルタイム」ではない
-      if (leg.departureDayOffset > 0) continue;
+      // 翌日・前日ぶんにずらして拾った便は「今日のリアルタイム」ではない
+      // （当日の daily_trips を引く realtimeTripLookup とは別の日の便になってしまう）
+      if (leg.departureDayOffset !== 0) continue;
 
       try {
         const cacheKey = `${leg.feedId}|${leg.routeId}|${leg.tripId}|${leg.tripDepartureTime}`;
@@ -872,7 +1233,7 @@ async function attachRealtime(journeys) {
         .filter((leg) => leg.type === 'bus' && leg.realtime)
         .reduce((max, leg) => Math.max(max, leg.realtime.predictedArrivalDelayMinutes || 0), 0);
 
-      flagTransferRisks(journey);
+      flagTransferRisks(journey, minTransferSeconds);
     }
   }
 }
@@ -882,36 +1243,45 @@ async function attachRealtime(journeys) {
  * ========================================================== */
 
 /**
- * 指定条件で経路候補を集める。先頭区間の発車を1分ずつ進めながら再探索し、
+ * 指定条件で経路候補を集める。基準時刻を1分ずつずらしながら再探索し、
  * 乗換回数ごとの最良解をまとめて集める（仕様書 5.4）。
+ *
+ * @param {Map<string, number>} baseTimes 出発時刻指定なら出発地→出発可能時刻、
+ *                                        到着時刻指定なら目的地→到着期限
+ * @param {Set<string>} targetKeys 出発時刻指定なら目的地、到着時刻指定なら出発地
+ * @param {'departure'|'arrival'} timeMode
  */
-function collectJourneys(ctx, originTimes, destinationKeys, limit) {
+function collectJourneys(ctx, baseTimes, targetKeys, limit, timeMode = 'departure') {
   const index = ctx.searchIndex.index;
+  const reverse = timeMode === 'arrival';
   const journeys = [];
   const seen = new Set();
-  let baseTimes = originTimes;
+  let times = baseTimes;
 
   for (let iteration = 0; iteration < MAX_ITERATIONS && journeys.length < limit; iteration += 1) {
-    const results = runRaptor(ctx, baseTimes, destinationKeys);
+    const results = reverse ? runRaptorReverse(ctx, times, targetKeys) : runRaptor(ctx, times, targetKeys);
     if (results.length === 0) break;
 
-    let earliestDeparture = Number.POSITIVE_INFINITY;
+    // 出発時刻指定なら「最も早い出発」、到着時刻指定なら「最も遅い到着」を次回の基準にする
+    let pivot = reverse ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY;
     for (const result of results) {
-      const journey = buildJourney(index, result.labels);
+      const journey = buildJourney(index, reverse ? normalizeReverseLabels(result.labels) : result.labels);
       if (!journey) continue;
       const key = journeyKey(journey);
       if (seen.has(key)) continue;
       seen.add(key);
       journeys.push(journey);
-      earliestDeparture = Math.min(earliestDeparture, journey.departureSeconds);
+      pivot = reverse
+        ? Math.max(pivot, journey.arrivalSeconds)
+        : Math.min(pivot, journey.departureSeconds);
     }
 
-    if (!Number.isFinite(earliestDeparture)) break;
-    // 次の探索は「最初の便の1分後以降」から。次発・次々発が並ぶようにする。
-    const nextStart = earliestDeparture + 60;
-    baseTimes = new Map();
-    for (const [groupKey, seconds] of originTimes.entries()) {
-      baseTimes.set(groupKey, Math.max(seconds, nextStart));
+    if (!Number.isFinite(pivot)) break;
+    // 次の探索は「最初の便の1分後以降」／「最後の便の1分前まで」。次発・次々発（前便・前々便）が並ぶようにする。
+    const nextPivot = reverse ? pivot - 60 : pivot + 60;
+    times = new Map();
+    for (const [groupKey, seconds] of baseTimes.entries()) {
+      times.set(groupKey, reverse ? Math.min(seconds, nextPivot) : Math.max(seconds, nextPivot));
     }
   }
 
@@ -931,10 +1301,23 @@ function mergeJourneys(base, extra) {
   return merged;
 }
 
-/** 到着時刻順にソートする（歩きすぎる経路は、他に候補があるなら除く）。 */
-function sortJourneys(journeys) {
+/**
+ * 並べ替える（歩きすぎる経路は、他に候補があるなら除く）。
+ * 出発時刻指定は「早く着く順」、到着時刻指定は「遅く出発できる順」＝指定時刻に近い便から。
+ */
+function sortJourneys(journeys, timeMode = 'departure') {
   const walkable = journeys.filter((journey) => journey.walkMinutes <= MAX_TOTAL_WALK_MINUTES);
   if (walkable.length > 0) journeys = walkable;
+
+  if (timeMode === 'arrival') {
+    journeys.sort(
+      (a, b) =>
+        b.departureSeconds - a.departureSeconds ||
+        a.transferCount - b.transferCount ||
+        a.arrivalSeconds - b.arrivalSeconds
+    );
+    return journeys;
+  }
 
   journeys.sort(
     (a, b) =>
@@ -949,16 +1332,20 @@ function sortJourneys(journeys) {
  * 最もスコアの良い経路に「おすすめ」を付ける。
  * リアルタイム反映後に乗換が間に合わない可能性が判明した経路は、
  * 他に間に合う候補がある限りおすすめから外す（間に合わない案を積極的に薦めない）。
+ *
+ * 到着時刻指定では「早く着く」ことに価値は無い（指定時刻までに着けばよい）ので、
+ * 評価軸を「出発時刻の遅さ」に置き換える。乗換・徒歩の不利は同じ重みのまま。
  */
-function pickRecommended(journeys) {
+function pickRecommended(journeys, timeMode = 'departure') {
   const feasible = journeys.filter((journey) => !journey.transferAtRisk);
   const pool = feasible.length > 0 ? feasible : journeys;
 
   let best = null;
   let bestScore = Number.POSITIVE_INFINITY;
   for (const journey of pool) {
+    const base = timeMode === 'arrival' ? -journey.departureSeconds : journey.arrivalSeconds;
     const score =
-      journey.arrivalSeconds +
+      base +
       journey.transferCount * TRANSFER_PENALTY_SECONDS +
       journey.walkMinutes * 60 * WALK_PENALTY_RATIO;
     if (score < bestScore) {
@@ -973,7 +1360,7 @@ function pickRecommended(journeys) {
  * 探索コンテキスト（運行日・徒歩半径・ラウンド数・探索窓）を組み立てる。
  * 前日サービスの24時超え便・翌日サービスの便も取り込む（仕様書 5.2）。
  */
-function buildContext(searchIndex, dateStr, { radiusMeters, maxRounds, windowSeconds }) {
+function buildContext(searchIndex, dateStr, { radiusMeters, maxRounds, windowSeconds, minTransferSeconds }) {
   return {
     searchIndex,
     footpaths: getFootpaths(searchIndex, radiusMeters),
@@ -983,7 +1370,9 @@ function buildContext(searchIndex, dateStr, { radiusMeters, maxRounds, windowSec
       { offsetSeconds: DAY_SECONDS, activeTripKeys: getActiveTripKeys(searchIndex, shiftDate(dateStr, 1)) }
     ],
     maxRounds,
-    windowSeconds
+    windowSeconds,
+    // 詳細設定の「乗り換えの余裕時間」。省略時は従来の既定値。
+    minTransferSeconds: Number.isFinite(minTransferSeconds) ? minTransferSeconds : MIN_TRANSFER_SECONDS
   };
 }
 
@@ -999,6 +1388,74 @@ const RELAXATION_NOTES = {
   'wide-window': '指定時刻からしばらく後に出発する便を含みます。',
   'walk-transfer': '徒歩での乗り継ぎ（最大800m）を含む経路です。'
 };
+
+// 到着時刻指定のときの文言。探索窓の緩和は「指定時刻のかなり前に出発する便」を意味する。
+const RELAXATION_NOTES_ARRIVAL = {
+  normal: null,
+  'wide-window': '指定時刻よりかなり早く出発する便を含みます。',
+  'walk-transfer': '徒歩での乗り継ぎ（最大800m）を含む経路です。'
+};
+
+/**
+ * 段階的フォールバックの1段階に詳細設定を反映する。
+ * 段階が進むと条件が緩む（徒歩800m・乗換3回まで）が、利用者が明示した上限は超えさせない。
+ * 「直通のみ」で検索したのにフォールバックで乗換つきの案が出てしまう、という事故を防ぐため。
+ */
+function applyPreferencesToStep(step, preferences) {
+  return {
+    ...step,
+    radiusMeters: preferences.allowWalkTransfer ? step.radiusMeters : 0,
+    maxRounds:
+      preferences.maxTransfers === null
+        ? step.maxRounds
+        : Math.min(step.maxRounds, preferences.maxTransfers + 1),
+    minTransferSeconds: preferences.minTransferSeconds
+  };
+}
+
+/**
+ * 段階的フォールバック（仕様書7章）を回して経路候補を集める。
+ * 最初に1件以上見つかった段階で打ち切り、その段階のキーを relaxation として返す。
+ *
+ * @returns {{journeys:Array, relaxation:string, ctx:object|null}}
+ */
+function runRelaxationSearch({ searchIndex, dateStr, searchTimes, searchTargets, bufferLimit, timeMode, preferences }) {
+  let journeys = [];
+  let relaxation = 'normal';
+  let ctx = null;
+  // 詳細設定で条件を絞ると、段階が違っても同じ探索条件になることがある
+  //（例：徒歩なし＋乗換0回では段階2と段階3が一致する）。同じ探索を繰り返さない。
+  const attempted = new Set();
+
+  for (const step of RELAXATION_STEPS) {
+    const effective = applyPreferencesToStep(step, preferences);
+    const attemptKey = `${effective.radiusMeters}|${effective.maxRounds}|${effective.windowSeconds}|${effective.minTransferSeconds}`;
+    if (attempted.has(attemptKey)) continue;
+    attempted.add(attemptKey);
+
+    ctx = buildContext(searchIndex, dateStr, effective);
+    journeys = collectJourneys(ctx, searchTimes, searchTargets, bufferLimit, timeMode);
+
+    // 徒歩接続を使うと「1駅手前で降りて歩く」方が最速になり、
+    // バスだけで完結する案が枝刈りで消えることがある。
+    // 利用者はふつう歩かない案も知りたいので、徒歩なしの探索結果も必ず混ぜる。
+    // （徒歩を使わない設定のときは、まったく同じ探索の繰り返しになるので行わない）
+    if (effective.radiusMeters > 0) {
+      const walkFreeCtx = buildContext(searchIndex, dateStr, { ...effective, radiusMeters: 0 });
+      journeys = mergeJourneys(
+        journeys,
+        collectJourneys(walkFreeCtx, searchTimes, searchTargets, bufferLimit, timeMode)
+      );
+    }
+
+    if (journeys.length > 0) {
+      relaxation = step.key;
+      break;
+    }
+  }
+
+  return { journeys, relaxation, ctx };
+}
 
 /* ==========================================================
  * 出発地・目的地の解決
@@ -1076,6 +1533,83 @@ function buildSpotWalkInfo(endpoint, actualGroupKey) {
   };
 }
 
+/** 観光スポットを徒歩レグの端点として表現する疑似バス停参照（stopKeyは持たない）。 */
+function serializeSpotRef(spot) {
+  return {
+    stopKey: null,
+    stopId: null,
+    feedId: null,
+    name: spot.name,
+    platformCode: '',
+    lat: spot.lat,
+    lon: spot.lng,
+    busstopUrl: null
+  };
+}
+
+/**
+ * 観光スポット起点/終点の経路に、スポット⇔実際に採用されたバス停間の徒歩レグを
+ * 先頭/末尾へ組み込む（観光スポット情報_仕様書）。従来は注記文言だけで案内していたが、
+ * 経路そのものの一部として表示するため legs 配列・所要時間・徒歩分数を更新する。
+ */
+function attachSpotWalkLegs(ranked, origin, destination) {
+  for (const journey of ranked) {
+    if (origin.viaSpot) {
+      const firstLeg = journey.legs[0];
+      const info = buildSpotWalkInfo(origin, firstLeg.fromStop.stopKey);
+      if (info) {
+        const arrivalSeconds = journey.departureSeconds;
+        const departureSeconds = arrivalSeconds - info.walkMinutes * 60;
+        journey.legs.unshift({
+          type: 'walk',
+          fromStop: serializeSpotRef(origin.viaSpot),
+          toStop: firstLeg.fromStop,
+          walkMinutes: info.walkMinutes,
+          distanceMeters: info.distanceMeters,
+          departureSeconds,
+          arrivalSeconds,
+          departureTime: formatTime(departureSeconds),
+          arrivalTime: formatTime(arrivalSeconds),
+          departureDayOffset: dayOffsetOf(departureSeconds),
+          arrivalDayOffset: dayOffsetOf(arrivalSeconds)
+        });
+        journey.departureSeconds = departureSeconds;
+        journey.departureTime = formatTime(departureSeconds);
+        journey.departureDayOffset = dayOffsetOf(departureSeconds);
+        journey.walkMinutes += info.walkMinutes;
+        journey.durationMinutes = Math.max(1, Math.round((journey.arrivalSeconds - departureSeconds) / 60));
+      }
+    }
+
+    if (destination.viaSpot) {
+      const lastLeg = journey.legs[journey.legs.length - 1];
+      const info = buildSpotWalkInfo(destination, lastLeg.toStop.stopKey);
+      if (info) {
+        const departureSeconds = journey.arrivalSeconds;
+        const arrivalSeconds = departureSeconds + info.walkMinutes * 60;
+        journey.legs.push({
+          type: 'walk',
+          fromStop: lastLeg.toStop,
+          toStop: serializeSpotRef(destination.viaSpot),
+          walkMinutes: info.walkMinutes,
+          distanceMeters: info.distanceMeters,
+          departureSeconds,
+          arrivalSeconds,
+          departureTime: formatTime(departureSeconds),
+          arrivalTime: formatTime(arrivalSeconds),
+          departureDayOffset: dayOffsetOf(departureSeconds),
+          arrivalDayOffset: dayOffsetOf(arrivalSeconds)
+        });
+        journey.arrivalSeconds = arrivalSeconds;
+        journey.arrivalTime = formatTime(arrivalSeconds);
+        journey.arrivalDayOffset = dayOffsetOf(arrivalSeconds);
+        journey.walkMinutes += info.walkMinutes;
+        journey.durationMinutes = Math.max(1, Math.round((arrivalSeconds - journey.departureSeconds) / 60));
+      }
+    }
+  }
+}
+
 function serializeEndpoint(group) {
   return {
     stopKey: group.groupKey,
@@ -1134,7 +1668,11 @@ function nearbyAlternatives(ctx, groupKey, limit = 3) {
  * @param {number|string} [options.toSpotId]
  * @param {string} [options.date] YYYY-MM-DD（既定: 本日）
  * @param {string} [options.time] HH:MM（既定: 本日なら現在時刻、他日なら05:00）
+ * @param {'departure'|'arrival'} [options.timeMode] time の意味（既定: departure＝この時刻以降に出発）
  * @param {number} [options.limit] 返す経路数（既定5）
+ * @param {number|string} [options.maxTransfers] 詳細設定：乗換回数の上限（0＝乗り換えなし。既定: 指定なし）
+ * @param {boolean|string} [options.allowWalkTransfer] 詳細設定：徒歩での乗り継ぎを使うか（既定: true）
+ * @param {number|string} [options.minTransferMinutes] 詳細設定：乗り換えの余裕時間（分。既定: 1）
  */
 async function searchJourneys(options = {}) {
   const searchIndex = await getSearchIndex();
@@ -1143,10 +1681,23 @@ async function searchJourneys(options = {}) {
   const dateStr = /^\d{4}-\d{2}-\d{2}$/.test(String(options.date || '')) ? options.date : today;
   const isToday = dateStr === today;
   const limit = Math.min(Math.max(Number.parseInt(options.limit || '5', 10) || 5, 1), 10);
+  // 未指定・不正値は従来どおりの出発時刻指定として扱う（旧クライアントとの互換）
+  const timeMode = options.timeMode === 'arrival' ? 'arrival' : 'departure';
+  // 詳細設定（乗換回数の上限・徒歩での乗り継ぎ・乗換余裕）。未指定なら従来どおりの条件。
+  const preferences = normalizeSearchPreferences(options);
 
   let baseSeconds = parseTimeToSeconds(options.time);
   if (!Number.isFinite(baseSeconds)) {
-    if (isToday) {
+    if (timeMode === 'arrival') {
+      // 到着時刻の既定値。始発時刻（05:00）を到着期限にすると何も見つからないため、
+      // 本日は「1時間後までに到着」、他日は正午を既定とする。
+      if (isToday) {
+        const t = nowInTokyo();
+        baseSeconds = t.hour * 3600 + t.minute * 60 + 3600;
+      } else {
+        baseSeconds = 12 * 3600;
+      }
+    } else if (isToday) {
       const t = nowInTokyo();
       baseSeconds = t.hour * 3600 + t.minute * 60;
     } else {
@@ -1158,7 +1709,8 @@ async function searchJourneys(options = {}) {
   const origin = await resolveEndpoint(index, { stopKey: options.fromStopKey, text: options.from, spotId: options.fromSpotId });
   const destination = await resolveEndpoint(index, { stopKey: options.toStopKey, text: options.to, spotId: options.toSpotId });
 
-  const common = { date: dateStr, baseTime, isToday };
+  // preferences は成否にかかわらず必ず返す（画面が現在の詳細設定を復元・表示するのに使う）
+  const common = { date: dateStr, baseTime, isToday, timeMode, preferences: serializePreferences(preferences) };
 
   if (origin.groups.length === 0 || destination.groups.length === 0) {
     const missingSide = origin.groups.length === 0 ? origin : destination;
@@ -1205,34 +1757,46 @@ async function searchJourneys(options = {}) {
     };
   }
 
-  const originTimes = new Map();
-  for (const key of originKeys) originTimes.set(key, baseSeconds);
+  // 探索の基準時刻。出発時刻指定は出発地に、到着時刻指定は目的地に置く。
+  // 観光スポットを目的地にした場合は「スポットに指定時刻までに着く」必要があるため、
+  // バス停ごとにスポットまでの徒歩時間を差し引いた時刻を到着期限にする。
+  const searchTimes = new Map();
+  if (timeMode === 'arrival') {
+    for (const key of destinationKeys) {
+      const spotWalk = buildSpotWalkInfo(destination, key);
+      searchTimes.set(key, baseSeconds - (spotWalk ? spotWalk.walkMinutes * 60 : 0));
+    }
+  } else {
+    for (const key of originKeys) searchTimes.set(key, baseSeconds);
+  }
+  const searchTargets = timeMode === 'arrival' ? originKeys : destinationKeys;
 
   // 表示件数より少し多めに集めておく。リアルタイム反映後に「間に合わない乗換」が
   // 判明した案を後段で押し下げても、代わりに出せる候補が残るようにするため。
   const bufferLimit = Math.min(limit + 3, 10);
 
   // 段階的フォールバック（仕様書7章）
-  let journeys = [];
-  let relaxation = 'normal';
-  let ctx = null;
-  for (const step of RELAXATION_STEPS) {
-    ctx = buildContext(searchIndex, dateStr, step);
-    journeys = collectJourneys(ctx, originTimes, destinationKeys, bufferLimit);
-
-    // 徒歩接続を使うと「1駅手前で降りて歩く」方が最速になり、
-    // バスだけで完結する案が枝刈りで消えることがある。
-    // 利用者はふつう歩かない案も知りたいので、徒歩なしの探索結果も必ず混ぜる。
-    const walkFreeCtx = buildContext(searchIndex, dateStr, { ...step, radiusMeters: 0 });
-    journeys = mergeJourneys(journeys, collectJourneys(walkFreeCtx, originTimes, destinationKeys, bufferLimit));
-
-    if (journeys.length > 0) {
-      relaxation = step.key;
-      break;
-    }
-  }
+  const searchArgs = { searchIndex, dateStr, searchTimes, searchTargets, bufferLimit, timeMode };
+  const { journeys, relaxation, ctx } = runRelaxationSearch({ ...searchArgs, preferences });
 
   if (journeys.length === 0) {
+    // 詳細設定が原因で0件になったのかを切り分ける。設定を外せば見つかるなら、
+    // 「日付・時刻を変えてください」ではなく「設定を外して検索」を案内する方が正しい。
+    if (!preferences.isDefault) {
+      const withoutPreferences = runRelaxationSearch({ ...searchArgs, preferences: DEFAULT_PREFERENCES });
+      if (withoutPreferences.journeys.length > 0) {
+        return {
+          found: false,
+          ...common,
+          from: serializeEndpoint(origin.groups[0]),
+          to: serializeEndpoint(destination.groups[0]),
+          reason: 'no-route-with-conditions',
+          message: '詳細設定の条件に合う経路が見つかりませんでした。',
+          // 設定を外せば経路があると分かっているので、画面に解除の導線を出させる
+          canRelaxPreferences: true
+        };
+      }
+    }
     return buildNotFoundResponse({
       searchIndex,
       ctx,
@@ -1243,21 +1807,23 @@ async function searchJourneys(options = {}) {
       destinationKeys,
       dateStr,
       baseSeconds,
-      limit
+      limit,
+      timeMode,
+      preferences
     });
   }
 
-  const sorted = sortJourneys(journeys).slice(0, bufferLimit);
+  const sorted = sortJourneys(journeys, timeMode).slice(0, bufferLimit);
   const fareIndex = await getFareIndex();
   attachFares(fareIndex, sorted);
-  if (isToday) await attachRealtime(sorted);
+  if (isToday) await attachRealtime(sorted, preferences.minTransferSeconds);
 
   // リアルタイム反映で「乗換が間に合わない可能性」が判明した案は、
   // 他に間に合う候補があれば後ろへ回してから表示件数まで切り詰める。
   const feasible = sorted.filter((journey) => !journey.transferAtRisk);
   const risky = sorted.filter((journey) => journey.transferAtRisk);
   const ranked = (feasible.length > 0 ? feasible.concat(risky) : risky).slice(0, limit);
-  pickRecommended(ranked);
+  pickRecommended(ranked, timeMode);
 
   // 徒歩だけで行ける距離かどうかの補足（「そもそも歩いた方が早い」ケースの案内）
   const walkableHint = findWalkableHint(searchIndex, originKeys, destinationKeys);
@@ -1267,6 +1833,10 @@ async function searchJourneys(options = {}) {
   const representative = ranked.find((journey) => journey.isRecommended) || ranked[0];
   const actualFromKey = representative.legs[0].fromStop.stopKey;
   const actualToKey = representative.legs[representative.legs.length - 1].toStop.stopKey;
+
+  // スポット起点/終点の場合、スポット⇔バス停の徒歩レグを経路自体に組み込む。
+  // actualFromKey/actualToKeyは組み込み前（=実際に乗降するバス停）を指すのでこの後に呼ぶ。
+  attachSpotWalkLegs(ranked, origin, destination);
 
   return {
     found: true,
@@ -1285,12 +1855,25 @@ async function searchJourneys(options = {}) {
     fuzzyFrom: origin.fuzzy ? origin.groups.map(serializeEndpoint) : null,
     fuzzyTo: destination.fuzzy ? destination.groups.map(serializeEndpoint) : null,
     relaxation,
-    relaxationNote: ranked.some((journey) => journey.departureDayOffset > 0)
-      ? '指定時刻以降にこの日の便が無いため、翌日の便を表示しています。'
-      : RELAXATION_NOTES[relaxation] || null,
+    relaxationNote: buildRelaxationNote(ranked, relaxation, timeMode),
     walkableHint,
     journeys: ranked
   };
+}
+
+/**
+ * 結果に添える注記。日跨ぎ（翌日の便・前日の便）を拾った場合はそれを優先して伝える。
+ * 到着時刻指定では、指定時刻より前にこの日の便が無いと前日の深夜便になり得る。
+ */
+function buildRelaxationNote(journeys, relaxation, timeMode) {
+  if (journeys.some((journey) => journey.departureDayOffset > 0)) {
+    return '指定時刻以降にこの日の便が無いため、翌日の便を表示しています。';
+  }
+  if (journeys.some((journey) => journey.departureDayOffset < 0)) {
+    return '指定時刻までに間に合う便がこの日に無いため、前日の深夜便を表示しています。';
+  }
+  const notes = timeMode === 'arrival' ? RELAXATION_NOTES_ARRIVAL : RELAXATION_NOTES;
+  return notes[relaxation] || null;
 }
 
 function findWalkableHint(searchIndex, originKeys, destinationKeys) {
@@ -1312,7 +1895,7 @@ function findWalkableHint(searchIndex, originKeys, destinationKeys) {
  * どうしても見つからなかった場合の応答。
  * 「次に運行がある日」を7日先まで探し、利用者が次に取れる行動を必ず示す（仕様書 6.6）。
  */
-function buildNotFoundResponse({ searchIndex, ctx, common, origin, destination, originKeys, destinationKeys, dateStr, baseSeconds, limit }) {
+function buildNotFoundResponse({ searchIndex, ctx, common, origin, destination, originKeys, destinationKeys, dateStr, baseSeconds, limit, timeMode = 'departure', preferences = DEFAULT_PREFERENCES }) {
   const base = {
     found: false,
     ...common,
@@ -1335,19 +1918,50 @@ function buildNotFoundResponse({ searchIndex, ctx, common, origin, destination, 
     };
   }
 
-  // 同じ日の始発から探し直す（時刻が遅すぎただけのケース）
-  if (baseSeconds > 4 * 3600) {
-    const earlyCtx = buildContext(searchIndex, dateStr, RELAXATION_STEPS[2]);
+  // その日の始発から順向きに探し直す（時刻の指定だけが原因のケースの切り分けに使う）。
+  // 到着時刻指定では「その日の最も早い到着」を、出発時刻指定では「その日の始発」を案内する。
+  // 案内する「始発」「次の運行日」も詳細設定を満たすものでなければ意味が無いので、
+  // ここでも同じ条件（最も緩い段階に詳細設定を反映したもの）で探す。
+  const findFirstJourneysOfDay = (targetDate) => {
+    const earlyCtx = buildContext(searchIndex, targetDate, applyPreferencesToStep(RELAXATION_STEPS[2], preferences));
     const earlyTimes = new Map();
     for (const key of originKeys) earlyTimes.set(key, 0);
-    const earlyJourneys = collectJourneys(earlyCtx, earlyTimes, destinationKeys, 1);
+    return collectJourneys(earlyCtx, earlyTimes, destinationKeys, 1);
+  };
+  const earliestArrivalOf = (journeys) => Math.min(...journeys.map((journey) => journey.arrivalSeconds));
+
+  if (timeMode === 'arrival') {
+    // 指定した到着時刻が早すぎたケース
+    const earlyJourneys = findFirstJourneysOfDay(dateStr);
+    if (earlyJourneys.length > 0 && earliestArrivalOf(earlyJourneys) > baseSeconds) {
+      return {
+        ...base,
+        reason: 'before-first-bus',
+        message: `${common.baseTime} までにこの区間へ到着する便はありません。`,
+        // label は画面側が日付表記を組み立てられるよう kind で渡す
+        suggestion: {
+          kind: 'first-arrival',
+          date: dateStr,
+          time: formatTime(earliestArrivalOf(earlyJourneys)),
+          timeMode
+        }
+      };
+    }
+  } else if (baseSeconds > 4 * 3600) {
+    // 同じ日の始発から探し直す（時刻が遅すぎただけのケース）
+    const earlyJourneys = findFirstJourneysOfDay(dateStr);
     if (earlyJourneys.length > 0) {
       return {
         ...base,
         reason: 'after-last-bus',
         message: `${common.baseTime} 以降にこの区間を結ぶ便はありません。`,
         // label は画面側が日付表記を組み立てられるよう kind で渡す
-        suggestion: { kind: 'first-bus', date: dateStr, time: formatTime(earlyJourneys[0].departureSeconds) }
+        suggestion: {
+          kind: 'first-bus',
+          date: dateStr,
+          time: formatTime(earlyJourneys[0].departureSeconds),
+          timeMode
+        }
       };
     }
   }
@@ -1355,10 +1969,7 @@ function buildNotFoundResponse({ searchIndex, ctx, common, origin, destination, 
   // 翌日以降で最初に成立する日を探す
   for (let i = 1; i <= NEXT_SERVICE_DAY_LOOKAHEAD; i += 1) {
     const candidateDate = shiftDate(dateStr, i);
-    const candidateCtx = buildContext(searchIndex, candidateDate, RELAXATION_STEPS[2]);
-    const candidateTimes = new Map();
-    for (const key of originKeys) candidateTimes.set(key, 0);
-    const candidateJourneys = collectJourneys(candidateCtx, candidateTimes, destinationKeys, 1);
+    const candidateJourneys = findFirstJourneysOfDay(candidateDate);
     if (candidateJourneys.length > 0) {
       return {
         ...base,
@@ -1367,7 +1978,13 @@ function buildNotFoundResponse({ searchIndex, ctx, common, origin, destination, 
         suggestion: {
           kind: 'next-service-day',
           date: candidateDate,
-          time: formatTime(candidateJourneys[0].departureSeconds)
+          // 到着時刻指定のときは、そのままフォームの到着時刻に入れられる値を返す
+          time: formatTime(
+            timeMode === 'arrival'
+              ? earliestArrivalOf(candidateJourneys)
+              : candidateJourneys[0].departureSeconds
+          ),
+          timeMode
         }
       };
     }

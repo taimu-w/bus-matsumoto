@@ -241,3 +241,20 @@ html {
 .has-bottom-nav {
   padding-bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
 }
+
+/* <details>/<summary> の既定の三角マーカーを消す（経路検索の「詳細設定」パネル）。
+   Tailwindの list-none だけではWebKit系（iOS Safari）のマーカーが残るため、
+   開閉の目印は summary 内の「開く▾／閉じる▴」だけに統一する。 */
+summary.list-none::-webkit-details-marker {
+  display: none;
+}
+
+/* 「開く▾／閉じる▴」の出し分け。TailwindのCDNビルドに依存する group-open: を使わず、
+   素のCSSで確実に切り替える（クラスはJSでinnerHTMLに書き出されるため）。 */
+#rs-advanced .rs-adv-close,
+#rs-advanced[open] .rs-adv-open {
+  display: none;
+}
+#rs-advanced[open] .rs-adv-close {
+  display: inline;
+}

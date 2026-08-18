@@ -9,11 +9,62 @@
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
   <style>
     body { font-family: 'Noto Sans JP', sans-serif; }
-    .nav-btn.active { background-color: rgba(255,255,255,0.16); color: #fff; }
-    .nav-btn { color: #bfdbfe; }
-    .nav-btn:hover { background-color: rgba(255,255,255,0.08); }
+
+    /* サイドナビ */
+    .nav-btn {
+      color: #bfdbfe;
+      display: flex; align-items: center; gap: 0.6rem;
+      border-left: 3px solid transparent;
+      transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+    }
+    .nav-btn svg { opacity: .85; }
+    .nav-btn:hover { background-color: rgba(255,255,255,0.08); color: #fff; }
+    .nav-btn.active { background-color: rgba(255,255,255,0.16); color: #fff; border-left-color: #60a5fa; }
+    .nav-btn.active svg { opacity: 1; }
+
+    /* スクロールバー */
     ::-webkit-scrollbar { width: 10px; height: 10px; }
     ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 6px; }
+
+    /* カード（白背景・枠線・角丸のブロック）にホバーで軽い立体感を付ける */
+    .bg-white.rounded-xl.border { transition: box-shadow .15s ease, border-color .15s ease; }
+    .bg-white.rounded-xl.border:hover { box-shadow: 0 4px 14px rgba(15, 23, 42, 0.07); }
+
+    /* テーブル：見出し固定・行の可読性向上
+       overflow-x-auto なコンテナはブラウザ仕様上 overflow-y も auto 扱いになり、
+       それ自体が独立したスクロールコンテナになる（= sticky の基準が main ではなくこの div になる）。
+       そのため高さを明示的に持たせ、コンテナ自身がスクロールする形にして sticky を機能させる。 */
+    .bg-white.rounded-xl.border.overflow-x-auto {
+      max-height: min(32rem, 70vh);
+      overflow-y: auto;
+    }
+    table.w-full thead th {
+      position: sticky; top: 0; z-index: 1;
+      box-shadow: 0 1px 0 0 #e2e8f0;
+    }
+    table.w-full tbody tr:hover { background-color: #f1f5f9; }
+    table.w-full tbody tr:nth-child(even) { background-color: #fafbfc; }
+    table.w-full tbody tr:nth-child(even):hover { background-color: #f1f5f9; }
+    table.w-full td, table.w-full th { transition: background-color .1s ease; }
+
+    /* ボタン共通の押下フィードバックとフォーカス表示 */
+    button { transition: background-color .15s ease, box-shadow .15s ease, opacity .15s ease, transform .05s ease; }
+    button:not(:disabled):active { transform: translateY(1px); }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
+      outline: 2px solid #2563eb; outline-offset: 2px; border-radius: 4px;
+    }
+
+    /* フォーム部品 */
+    input, select, textarea { transition: border-color .15s ease, box-shadow .15s ease; }
+    input:hover, select:hover, textarea:hover { border-color: #94a3b8; }
+    input:focus, select:focus, textarea:focus {
+      border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); outline: none;
+    }
+
+    /* セクション切替時に軽いフェードで表示 */
+    .section:not(.hidden) { animation: section-fade .18s ease; }
+    @keyframes section-fade { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: translateY(0); } }
   </style>
 </head>
 <body class="bg-slate-100 text-slate-900">
@@ -34,7 +85,7 @@
           <label class="block text-sm font-bold">パスワード
             <input id="password" type="password" class="mt-1 w-full border rounded-lg px-3 py-2" placeholder="admin123" />
           </label>
-          <button id="login-btn" class="w-full bg-blue-700 text-white font-bold rounded-lg px-4 py-3">ログイン</button>
+          <button id="login-btn" class="w-full bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-lg px-4 py-3">ログイン</button>
         </div>
         <div id="login-status" class="hidden mt-4 rounded-lg px-4 py-3 text-sm font-bold"></div>
       </div>
@@ -52,30 +103,78 @@
         <div>
           <p class="px-2 text-[11px] font-black tracking-wider text-blue-300 mb-1">モニタリング</p>
           <div class="space-y-0.5">
-            <button data-section="dashboard" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">運行ダッシュボード</button>
-            <button data-section="assignment" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">便の割当監視</button>
-            <button data-section="pass" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">通過判定</button>
-            <button data-section="eta-basis" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">ETA予測根拠</button>
-            <button data-section="prediction-accuracy" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">予測精度の監視</button>
-            <button data-section="alerts" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold flex items-center justify-between">
-              <span>異常アラート</span>
+            <button data-section="dashboard" data-label="運行ダッシュボード" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3" y="12" width="4" height="8" rx="1"></rect><rect x="10" y="6" width="4" height="14" rx="1"></rect><rect x="17" y="9" width="4" height="11" rx="1"></rect></svg>
+              <span>運行ダッシュボード</span>
+            </button>
+            <button data-section="assignment" data-label="便の割当監視" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="17" rx="2"></rect><path d="M9 3.5h6a1 1 0 011 1V6H8V4.5a1 1 0 011-1z"></path><path d="M8.5 12.5l2 2 4.5-5"></path></svg>
+              <span>便の割当監視</span>
+            </button>
+            <button data-section="pass" data-label="通過判定" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"></circle><path d="M8.3 12.3l2.4 2.4 5-5.4"></path></svg>
+              <span>通過判定</span>
+            </button>
+            <button data-section="eta-basis" data-label="ETA予測根拠" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7.5V12l3.2 2"></path></svg>
+              <span>ETA予測根拠</span>
+            </button>
+            <button data-section="prediction-accuracy" data-label="予測精度の監視" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"></circle><circle cx="12" cy="12" r="4.5"></circle><circle cx="12" cy="12" r="0.6" fill="currentColor"></circle></svg>
+              <span>予測精度の監視</span>
+            </button>
+            <button data-section="alerts" data-label="異常アラート" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold flex items-center justify-between">
+              <span class="flex items-center gap-2">
+                <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 4L21 19H3L12 4z"></path><path d="M12 10v4"></path><circle cx="12" cy="16.5" r="0.7" fill="currentColor" stroke="none"></circle></svg>
+                <span>異常アラート</span>
+              </span>
               <span id="alerts-nav-badge" class="hidden ml-2 inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded-full bg-red-500 text-white text-[11px] font-black">0</span>
             </button>
-            <button data-section="gtfs-feeds" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">GTFSフィード監視</button>
-            <button data-section="location-feeds" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">位置情報フィード監視</button>
-            <button data-section="api-stats" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">API稼働監視</button>
-            <button data-section="job-monitor" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">ジョブ監視</button>
+            <button data-section="gtfs-feeds" data-label="GTFSフィード監視" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="6" cy="18" r="1.4" fill="currentColor" stroke="none"></circle><path d="M5 12.5a6.5 6.5 0 016.5 6.5"></path><path d="M5 7a12 12 0 0112 12"></path></svg>
+              <span>GTFSフィード監視</span>
+            </button>
+            <button data-section="location-feeds" data-label="位置情報フィード監視" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 20.5S5.5 13.5 5.5 9a6.5 6.5 0 0113 0c0 4.5-6.5 11.5-6.5 11.5z"></path><circle cx="12" cy="9" r="2.2"></circle></svg>
+              <span>位置情報フィード監視</span>
+            </button>
+            <button data-section="api-stats" data-label="API稼働監視" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="6" rx="1.4"></rect><rect x="3.5" y="14" width="17" height="6" rx="1.4"></rect><circle cx="7" cy="7" r="0.7" fill="currentColor" stroke="none"></circle><circle cx="7" cy="17" r="0.7" fill="currentColor" stroke="none"></circle></svg>
+              <span>API稼働監視</span>
+            </button>
+            <button data-section="job-monitor" data-label="ジョブ監視" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+              <span>ジョブ監視</span>
+            </button>
           </div>
         </div>
         <div>
           <p class="px-2 text-[11px] font-black tracking-wider text-blue-300 mb-1">設定・配信</p>
           <div class="space-y-0.5">
-            <button data-section="notices" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">お知らせ編集</button>
-            <button data-section="holidays" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">祝日カレンダー</button>
-            <button data-section="tourist-spots" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">観光スポット管理</button>
-            <button data-section="positions" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">バス位置情報モニター</button>
-            <button data-section="viewers" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">サイト閲覧数</button>
-            <button data-section="operation-records" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">運行実績ダウンロード</button>
+            <button data-section="notices" data-label="お知らせ編集" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3" y="5" width="15" height="10" rx="2.5"></rect><path d="M7 15l-1 4 4.5-4"></path></svg>
+              <span>お知らせ編集</span>
+            </button>
+            <button data-section="holidays" data-label="祝日カレンダー" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2"></rect><path d="M3.5 10h17"></path><path d="M8 3v4"></path><path d="M16 3v4"></path></svg>
+              <span>祝日カレンダー</span>
+            </button>
+            <button data-section="tourist-spots" data-label="観光スポット管理" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M6 3v18"></path><path d="M6 4.5h12l-3 4 3 4H6z"></path></svg>
+              <span>観光スポット管理</span>
+            </button>
+            <button data-section="positions" data-label="バス位置情報モニター" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"></circle><path d="M14.5 9.5L13 13l-3.5 1.5L11 11l3.5-1.5z"></path></svg>
+              <span>バス位置情報モニター</span>
+            </button>
+            <button data-section="viewers" data-label="サイト閲覧数" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M2.5 12S6.5 5.5 12 5.5 21.5 12 21.5 12 17.5 18.5 12 18.5 2.5 12 2.5 12z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>
+              <span>サイト閲覧数</span>
+            </button>
+            <button data-section="operation-records" data-label="運行実績ダウンロード" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="4.5" rx="1.2"></rect><path d="M5.5 8.5V18a1.5 1.5 0 001.5 1.5h10a1.5 1.5 0 001.5-1.5V8.5"></path><path d="M10 12.5h4"></path></svg>
+              <span>運行実績ダウンロード</span>
+            </button>
           </div>
         </div>
       </nav>
@@ -87,6 +186,10 @@
 
     <main class="flex-1 h-screen overflow-y-auto">
       <div class="max-w-6xl mx-auto p-6 space-y-4">
+        <div id="page-title-bar" class="sticky top-0 z-20 -mx-6 -mt-6 mb-1 px-6 pt-4 pb-3 bg-slate-100/95 backdrop-blur border-b border-slate-200 flex items-center gap-2.5">
+          <span id="page-title-icon" class="w-8 h-8 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center shrink-0"></span>
+          <h1 id="page-title-text" class="text-base font-bold text-slate-700"></h1>
+        </div>
         <div id="status" class="hidden rounded-lg px-4 py-3 text-sm font-bold"></div>
 
         <!-- 運行ダッシュボード -->
@@ -107,7 +210,7 @@
           </div>
           <div class="bg-white rounded-xl border overflow-x-auto">
             <table class="w-full text-sm">
-              <thead class="bg-slate-50 text-slate-500 text-xs">
+              <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0 z-10">
                 <tr>
                   <th class="text-left px-3 py-2">便</th>
                   <th class="text-left px-3 py-2">状態</th>
@@ -149,54 +252,63 @@
         <section id="section-prediction-accuracy" class="section hidden space-y-4">
           <div>
             <h2 class="text-xl font-bold">予測精度の監視</h2>
-            <p class="text-sm text-slate-500">各停留所に到着した実績をもとに、予測はいつ・何停留所手前で出されたものかによって常に変動します。下の条件で絞り込んで誤差を確認できます。</p>
+            <p class="text-sm text-slate-500">各停留所に到着した実績をもとに、予測はいつ・何停留所手前で出されたものかによって常に変動します。下の条件で絞り込んで誤差を確認できます。集計は指定期間内の全サンプルを対象にしています（件数が多くても間引きません）。</p>
           </div>
 
-          <div class="bg-white rounded-xl border p-4 flex flex-wrap gap-3 items-end">
-            <label class="text-xs font-bold text-slate-500">集計期間
-              <select id="accuracy-days" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block">
-                <option value="1">当日</option>
-                <option value="3">直近3日</option>
-                <option value="7" selected>直近7日</option>
-                <option value="14">直近14日</option>
-                <option value="31">直近31日</option>
-              </select>
-            </label>
-            <label class="text-xs font-bold text-slate-500">路線
-              <select id="accuracy-route" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block min-w-[9rem]">
-                <option value="">すべて</option>
-              </select>
-            </label>
-            <label class="text-xs font-bold text-slate-500">誤差許容（この分数以内を「的中」とみなす）
-              <select id="accuracy-threshold" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block">
-                <option value="1">±1分</option>
-                <option value="2">±2分</option>
-                <option value="3" selected>±3分</option>
-                <option value="5">±5分</option>
-                <option value="10">±10分</option>
-              </select>
-            </label>
-            <label class="text-xs font-bold text-slate-500">予測タイミング（何分前）
-              <select id="accuracy-lead" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block">
-                <option value="">すべて</option>
-                <option value="5分未満">5分未満</option>
-                <option value="5〜15分前">5〜15分前</option>
-                <option value="15〜30分前">15〜30分前</option>
-                <option value="30分以上前">30分以上前</option>
-              </select>
-            </label>
-            <label class="text-xs font-bold text-slate-500">予測タイミング（何停留所前）
-              <select id="accuracy-stops-before" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block">
-                <option value="">すべて</option>
-                <option value="1停留所前">1停留所前</option>
-                <option value="2停留所前">2停留所前</option>
-                <option value="3停留所前">3停留所前</option>
-                <option value="4〜6停留所前">4〜6停留所前</option>
-                <option value="7停留所以上前">7停留所以上前</option>
-              </select>
-            </label>
-            <button id="refresh-accuracy-btn" class="bg-blue-700 text-white font-bold rounded-lg px-3 py-2 text-sm">更新</button>
-            <button id="clear-accuracy-filter-btn" class="bg-slate-100 text-slate-600 font-bold rounded-lg px-3 py-2 text-sm">絞り込み解除</button>
+          <div class="bg-white rounded-xl border p-4">
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <p class="text-xs font-bold text-slate-400">絞り込み条件</p>
+              <span id="accuracy-meta" class="text-xs text-slate-400"></span>
+            </div>
+            <div class="flex flex-wrap gap-3 items-end">
+              <label class="text-xs font-bold text-slate-500 bg-slate-50 border rounded-lg px-3 py-2">集計期間
+                <select id="accuracy-days" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block bg-white">
+                  <option value="1">当日</option>
+                  <option value="3">直近3日</option>
+                  <option value="7" selected>直近7日</option>
+                  <option value="14">直近14日</option>
+                  <option value="31">直近31日</option>
+                </select>
+              </label>
+              <label class="text-xs font-bold text-slate-500 bg-slate-50 border rounded-lg px-3 py-2">路線
+                <select id="accuracy-route" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block min-w-[9rem] bg-white">
+                  <option value="">すべて</option>
+                </select>
+              </label>
+              <label class="text-xs font-bold text-slate-500 bg-slate-50 border rounded-lg px-3 py-2">誤差許容（この分数以内を「的中」とみなす）
+                <select id="accuracy-threshold" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block bg-white">
+                  <option value="1">±1分</option>
+                  <option value="2">±2分</option>
+                  <option value="3" selected>±3分</option>
+                  <option value="5">±5分</option>
+                  <option value="10">±10分</option>
+                </select>
+              </label>
+              <label class="text-xs font-bold text-slate-500 bg-slate-50 border rounded-lg px-3 py-2">予測タイミング（何分前）
+                <select id="accuracy-lead" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block bg-white">
+                  <option value="">すべて</option>
+                  <option value="5分未満">5分未満</option>
+                  <option value="5〜15分前">5〜15分前</option>
+                  <option value="15〜30分前">15〜30分前</option>
+                  <option value="30分以上前">30分以上前</option>
+                </select>
+              </label>
+              <label class="text-xs font-bold text-slate-500 bg-slate-50 border rounded-lg px-3 py-2">予測タイミング（何停留所前）
+                <select id="accuracy-stops-before" class="mt-1 border rounded-lg px-2 py-1.5 text-sm block bg-white">
+                  <option value="">すべて</option>
+                  <option value="1停留所前">1停留所前</option>
+                  <option value="2停留所前">2停留所前</option>
+                  <option value="3停留所前">3停留所前</option>
+                  <option value="4〜6停留所前">4〜6停留所前</option>
+                  <option value="7停留所以上前">7停留所以上前</option>
+                </select>
+              </label>
+              <button id="refresh-accuracy-btn" class="bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-lg px-3 py-2.5 text-sm flex items-center gap-1.5">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                更新
+              </button>
+              <button id="clear-accuracy-filter-btn" class="bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold rounded-lg px-3 py-2.5 text-sm">絞り込み解除</button>
+            </div>
           </div>
 
           <div id="accuracy-summary" class="grid gap-3 md:grid-cols-4"></div>
@@ -208,7 +320,7 @@
                 <span class="text-xs font-normal text-slate-400">行のボタンで絞り込み</span>
               </div>
               <table class="w-full text-sm">
-                <thead class="bg-slate-50 text-slate-500 text-xs">
+                <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0 z-10">
                   <tr>
                     <th class="text-left px-3 py-2">リードタイム</th>
                     <th class="text-left px-3 py-2">件数</th>
@@ -225,7 +337,7 @@
                 <span class="text-xs font-normal text-slate-400">行のボタンで絞り込み</span>
               </div>
               <table class="w-full text-sm">
-                <thead class="bg-slate-50 text-slate-500 text-xs">
+                <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0 z-10">
                   <tr>
                     <th class="text-left px-3 py-2">停留所数</th>
                     <th class="text-left px-3 py-2">件数</th>
@@ -239,7 +351,7 @@
             <div class="bg-white rounded-xl border overflow-x-auto">
               <div class="px-4 py-2 bg-slate-50 font-bold text-sm">曜日区分別の誤差</div>
               <table class="w-full text-sm">
-                <thead class="bg-slate-50 text-slate-500 text-xs">
+                <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0 z-10">
                   <tr>
                     <th class="text-left px-3 py-2">曜日区分</th>
                     <th class="text-left px-3 py-2">件数</th>
@@ -253,7 +365,7 @@
             <div class="bg-white rounded-xl border overflow-x-auto">
               <div class="px-4 py-2 bg-slate-50 font-bold text-sm">時間帯別の誤差</div>
               <table class="w-full text-sm">
-                <thead class="bg-slate-50 text-slate-500 text-xs">
+                <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0 z-10">
                   <tr>
                     <th class="text-left px-3 py-2">時間帯</th>
                     <th class="text-left px-3 py-2">件数</th>
@@ -269,7 +381,7 @@
           <div class="bg-white rounded-xl border overflow-x-auto">
             <div class="px-4 py-2 bg-slate-50 font-bold text-sm">路線別の誤差</div>
             <table class="w-full text-sm">
-              <thead class="bg-slate-50 text-slate-500 text-xs">
+              <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0 z-10">
                 <tr>
                   <th class="text-left px-3 py-2">路線</th>
                   <th class="text-left px-3 py-2">件数</th>
@@ -284,7 +396,7 @@
           <div class="bg-white rounded-xl border overflow-x-auto">
             <div class="px-4 py-2 bg-slate-50 font-bold text-sm">誤差の大きい停留所（上位30件）</div>
             <table class="w-full text-sm">
-              <thead class="bg-slate-50 text-slate-500 text-xs">
+              <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0 z-10">
                 <tr>
                   <th class="text-left px-3 py-2">路線</th>
                   <th class="text-left px-3 py-2">停留所</th>
@@ -301,7 +413,7 @@
           <div class="bg-white rounded-xl border overflow-x-auto">
             <div class="px-4 py-2 bg-slate-50 font-bold text-sm">到着停留所ごとの予測と実績の誤差明細（直近100件）</div>
             <table class="w-full text-sm">
-              <thead class="bg-slate-50 text-slate-500 text-xs">
+              <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0 z-10">
                 <tr>
                   <th class="text-left px-3 py-2">路線</th>
                   <th class="text-left px-3 py-2">停留所</th>
@@ -329,11 +441,14 @@
         <section id="section-gtfs-feeds" class="section hidden space-y-3">
           <div class="flex items-center justify-between gap-3">
             <h2 class="text-xl font-bold">GTFSフィード監視</h2>
-            <button id="refresh-gtfs-feeds-btn" class="bg-blue-700 text-white font-bold rounded-lg px-3 py-2 text-sm">更新</button>
+            <button id="refresh-gtfs-feeds-btn" class="bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-lg px-3 py-2 text-sm flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+              更新
+            </button>
           </div>
           <div class="bg-white rounded-xl border overflow-x-auto">
             <table class="w-full text-sm">
-              <thead class="bg-slate-50 text-slate-500 text-xs">
+              <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0 z-10">
                 <tr>
                   <th class="text-left px-3 py-2">フィード</th>
                   <th class="text-left px-3 py-2">最終取得時刻</th>
@@ -352,11 +467,14 @@
         <section id="section-location-feeds" class="section hidden space-y-3">
           <div class="flex items-center justify-between gap-3">
             <h2 class="text-xl font-bold">位置情報フィード監視</h2>
-            <button id="refresh-location-feeds-btn" class="bg-blue-700 text-white font-bold rounded-lg px-3 py-2 text-sm">更新</button>
+            <button id="refresh-location-feeds-btn" class="bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-lg px-3 py-2 text-sm flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+              更新
+            </button>
           </div>
           <div class="bg-white rounded-xl border overflow-x-auto">
             <table class="w-full text-sm">
-              <thead class="bg-slate-50 text-slate-500 text-xs">
+              <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0 z-10">
                 <tr>
                   <th class="text-left px-3 py-2">フィード</th>
                   <th class="text-left px-3 py-2">最終取得時刻</th>
@@ -374,11 +492,14 @@
         <section id="section-api-stats" class="section hidden space-y-3">
           <div class="flex items-center justify-between gap-3">
             <h2 class="text-xl font-bold">API稼働監視</h2>
-            <button id="refresh-api-stats-btn" class="bg-blue-700 text-white font-bold rounded-lg px-3 py-2 text-sm">更新</button>
+            <button id="refresh-api-stats-btn" class="bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-lg px-3 py-2 text-sm flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+              更新
+            </button>
           </div>
           <div class="bg-white rounded-xl border overflow-x-auto">
             <table class="w-full text-sm">
-              <thead class="bg-slate-50 text-slate-500 text-xs">
+              <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0 z-10">
                 <tr>
                   <th class="text-left px-3 py-2">エンドポイント</th>
                   <th class="text-left px-3 py-2">アクセス数</th>
@@ -401,7 +522,7 @@
           <h2 class="text-xl font-bold">ジョブ監視</h2>
           <div class="bg-white rounded-xl border overflow-x-auto">
             <table class="w-full text-sm">
-              <thead class="bg-slate-50 text-slate-500 text-xs">
+              <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0 z-10">
                 <tr>
                   <th class="text-left px-3 py-2">ジョブ</th>
                   <th class="text-left px-3 py-2">最終成功時刻</th>
@@ -430,7 +551,7 @@
           <label class="block text-sm font-bold">重要なお知らせ
             <textarea id="importantNotice" rows="4" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
           </label>
-          <button id="save-btn" class="bg-green-700 text-white font-bold rounded-lg px-4 py-3">保存</button>
+          <button id="save-btn" class="bg-green-700 hover:bg-green-800 text-white font-bold rounded-lg px-4 py-3">保存</button>
         </section>
 
         <!-- 祝日カレンダー -->
@@ -446,7 +567,7 @@
             <label class="text-sm font-bold">名称（任意）
               <input id="holiday-name" type="text" class="mt-1 border rounded-lg px-3 py-2" placeholder="臨時休業日 など" />
             </label>
-            <button id="add-holiday-btn" class="bg-slate-800 text-white font-bold rounded-lg px-4 py-2">追加</button>
+            <button id="add-holiday-btn" class="bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-lg px-4 py-2">追加</button>
           </div>
           <div id="holidays-list" class="text-sm divide-y border rounded-lg overflow-hidden bg-white"></div>
         </section>
@@ -464,7 +585,7 @@
             placeholder="松本城&#9;まつもとじょう&#9;Matsumoto-jo&#9;36.2381&#9;137.9686&#9;https://...&#9;8:30〜17:00&#9;1時間程度&#9;国宝五重六階の天守&#9;https://res.cloudinary.com/.../castle.jpg"
             class="w-full border rounded-lg px-3 py-2 font-mono text-xs"></textarea>
           <div class="flex items-center gap-3">
-            <button id="save-spots-btn" class="bg-green-700 text-white font-bold rounded-lg px-4 py-3">登録（全件洗い替え）</button>
+            <button id="save-spots-btn" class="bg-green-700 hover:bg-green-800 text-white font-bold rounded-lg px-4 py-3">登録（全件洗い替え）</button>
             <span id="spots-save-status" class="text-sm font-bold"></span>
           </div>
           <div id="spots-errors" class="hidden bg-red-50 border-2 border-red-200 rounded-lg p-3 text-sm text-red-800 space-y-1"></div>
@@ -482,7 +603,7 @@
               <h2 class="text-xl font-bold">バス位置情報モニター</h2>
               <p class="text-sm text-slate-500">直近3分以内にGPSデータを受信したバスの位置を表示します。</p>
             </div>
-            <button id="refresh-positions-btn" class="bg-blue-700 text-white font-bold rounded-lg px-4 py-2 flex items-center gap-2">
+            <button id="refresh-positions-btn" class="bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-lg px-4 py-2 flex items-center gap-2">
               <svg id="pos-refresh-icon" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
@@ -500,7 +621,10 @@
               <h2 class="text-xl font-bold">サイト閲覧数</h2>
               <p class="text-sm text-slate-500">直近90秒以内にアクセスがあった利用者数の目安です。しきい値以上になると利用者側の自動更新が一時的にOFFになります。</p>
             </div>
-            <button id="refresh-viewers-btn" class="bg-blue-700 text-white font-bold rounded-lg px-4 py-2">更新</button>
+            <button id="refresh-viewers-btn" class="bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-lg px-4 py-2 flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+              更新
+            </button>
           </div>
           <div id="viewers-status" class="text-sm font-bold text-slate-500">読み込み中...</div>
         </section>
@@ -523,7 +647,10 @@
                 <option value="">すべて</option>
               </select>
             </label>
-            <button id="download-records-btn" class="bg-green-700 text-white font-bold rounded-lg px-4 py-2">CSVダウンロード</button>
+            <button id="download-records-btn" class="bg-green-700 hover:bg-green-800 text-white font-bold rounded-lg px-4 py-2 flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14"></path></svg>
+              CSVダウンロード
+            </button>
           </div>
           <div id="records-status" class="text-sm text-slate-500"></div>
         </section>
@@ -672,6 +799,14 @@
       }, intervalMs);
     }
 
+    function updatePageTitleBar(id) {
+      const navBtn = document.querySelector(`[data-section="${id}"]`);
+      if (!navBtn) return;
+      const svg = navBtn.querySelector('svg');
+      document.getElementById('page-title-icon').innerHTML = svg ? svg.outerHTML : '';
+      document.getElementById('page-title-text').textContent = navBtn.dataset.label || '';
+    }
+
     function showSection(id) {
       document.querySelectorAll('.section').forEach((el) => el.classList.add('hidden'));
       const target = document.getElementById(`section-${id}`);
@@ -680,6 +815,7 @@
       document.querySelectorAll('[data-section]').forEach((btn) => {
         btn.classList.toggle('active', btn.dataset.section === id);
       });
+      updatePageTitleBar(id);
 
       stopAllPollers();
       const loader = SECTION_LOADERS[id];
@@ -944,6 +1080,19 @@
       };
     }
 
+    // 絞り込みを立て続けに切り替えたときに、走り終えた古いリクエストの結果で画面が
+    // 上書きされたり、不要な集計クエリがDBに積み上がったりしないよう、
+    // 新しいリクエストを出す前に前のリクエストを中断する。
+    let accuracyAbort = null;
+
+    function setAccuracyLoading(loading) {
+      const btn = document.getElementById('refresh-accuracy-btn');
+      btn.disabled = loading;
+      btn.classList.toggle('opacity-60', loading);
+      btn.classList.toggle('cursor-not-allowed', loading);
+      if (loading) document.getElementById('accuracy-meta').textContent = '集計中…';
+    }
+
     async function loadPredictionAccuracy() {
       await ensureAccuracyRoutesLoaded();
       const f = currentAccuracyFilters();
@@ -951,7 +1100,34 @@
       if (f.routeId) params.set('routeId', f.routeId);
       if (f.leadBucket) params.set('leadBucket', f.leadBucket);
       if (f.stopsBeforeBucket) params.set('stopsBeforeBucket', f.stopsBeforeBucket);
-      const data = await api(`/api/admin/prediction-accuracy?${params.toString()}`);
+
+      if (accuracyAbort) accuracyAbort.abort();
+      const controller = new AbortController();
+      accuracyAbort = controller;
+      setAccuracyLoading(true);
+
+      let data;
+      try {
+        data = await api(`/api/admin/prediction-accuracy?${params.toString()}`, { signal: controller.signal });
+      } catch (err) {
+        // 中断は「後から来た絞り込みが引き継いだ」だけなのでエラー表示しない
+        if (err.name === 'AbortError') return;
+        setAccuracyLoading(false);
+        document.getElementById('accuracy-meta').textContent = '';
+        throw err;
+      } finally {
+        if (accuracyAbort === controller) accuracyAbort = null;
+      }
+      setAccuracyLoading(false);
+
+      const metaParts = [`集計時刻 ${fmtDateTime(data.generatedAt)}`];
+      if (typeof data.totalSampleCount === 'number') {
+        metaParts.push(`サンプル ${data.sampleCount.toLocaleString()} / ${data.totalSampleCount.toLocaleString()}件`);
+      }
+      if (typeof data.computeMs === 'number') {
+        metaParts.push(data.cached ? 'キャッシュ' : `集計 ${fmtDuration(data.computeMs)}`);
+      }
+      document.getElementById('accuracy-meta').textContent = metaParts.join(' ・ ');
 
       document.querySelectorAll('.accuracy-threshold-header').forEach((el) => {
         el.textContent = `的中率(±${data.thresholdMinutes}分)`;
@@ -959,7 +1135,7 @@
 
       const overall = data.overall;
       const tiles = [
-        { label: 'サンプル数（現在の絞り込み）', value: overall.sampleCount ?? 0 },
+        { label: 'サンプル数（現在の絞り込み）', value: (overall.sampleCount ?? 0).toLocaleString() },
         { label: '平均誤差(絶対値)', value: overall.meanAbsErrorMinutes !== null ? `${overall.meanAbsErrorMinutes}分` : '—' },
         { label: '平均誤差(符号あり・+は遅め予測)', value: overall.meanErrorMinutes !== null ? `${overall.meanErrorMinutes >= 0 ? '+' : ''}${overall.meanErrorMinutes}分` : '—' },
         { label: `的中率（±${data.thresholdMinutes}分以内）`, value: overall.withinThresholdRate !== null ? `${overall.withinThresholdRate}%` : '—' }
@@ -1021,18 +1197,22 @@
             </tr>
           `).join('')
         : '<tr><td colspan="9" class="px-3 py-6 text-center text-slate-400">データがありません。</td></tr>';
-
-      document.querySelectorAll('.accuracy-drill-btn').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const field = btn.dataset.drillField;
-          const value = btn.dataset.drillValue;
-          const selectId = field === 'lead' ? 'accuracy-lead' : 'accuracy-stops-before';
-          const select = document.getElementById(selectId);
-          select.value = select.value === value ? '' : value; // 同じ行を再クリックしたら解除
-          loadPredictionAccuracy().catch((err) => showStatus(err.message, 'error'));
-        });
-      });
     }
+
+    // ドリルダウン用のボタンは表を描き直すたびに作り直されるため、リスナは
+    // tbody側へ一度だけ委譲して張る（再描画のたびに張り直さない）。
+    ['accuracy-lead-tbody', 'accuracy-stops-before-tbody'].forEach((id) => {
+      document.getElementById(id).addEventListener('click', (event) => {
+        const btn = event.target.closest('.accuracy-drill-btn');
+        if (!btn) return;
+        const field = btn.dataset.drillField;
+        const value = btn.dataset.drillValue;
+        const selectId = field === 'lead' ? 'accuracy-lead' : 'accuracy-stops-before';
+        const select = document.getElementById(selectId);
+        select.value = select.value === value ? '' : value; // 同じ行を再クリックしたら解除
+        loadPredictionAccuracy().catch((err) => showStatus(err.message, 'error'));
+      });
+    });
 
     ['accuracy-days', 'accuracy-route', 'accuracy-threshold', 'accuracy-lead', 'accuracy-stops-before'].forEach((id) => {
       document.getElementById(id).addEventListener('change', () => loadPredictionAccuracy().catch((err) => showStatus(err.message, 'error')));
@@ -1178,7 +1358,7 @@
           </td>
           <td class="px-3 py-2 text-xs text-red-600">${escapeHtml(f.lastError || '')}</td>
           <td class="px-3 py-2">
-            <button data-refetch-feed="${escapeHtml(f.id)}" class="refetch-btn bg-slate-800 text-white font-bold rounded-lg px-3 py-1.5 text-xs">再取得</button>
+            <button data-refetch-feed="${escapeHtml(f.id)}" class="refetch-btn bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-lg px-3 py-1.5 text-xs">再取得</button>
           </td>
         </tr>
       `).join('');
@@ -1321,7 +1501,7 @@
         row.className = 'flex items-center justify-between px-3 py-2';
         row.innerHTML = `
           <span>${escapeHtml(h.date)}<span class="text-slate-500 ml-2">${escapeHtml(h.name || '')}</span></span>
-          <button data-date="${escapeHtml(h.date)}" class="delete-holiday-btn text-red-600 font-bold text-xs">削除</button>
+          <button data-date="${escapeHtml(h.date)}" class="delete-holiday-btn text-red-600 hover:text-red-800 hover:underline font-bold text-xs">削除</button>
         `;
         container.appendChild(row);
       });
@@ -1338,7 +1518,7 @@
       });
     }
 
-    document.getElementById('add-holiday-btn').addEventListener('click', async () => {
+    async function handleAddHoliday() {
       const date = document.getElementById('holiday-date').value;
       const name = document.getElementById('holiday-name').value.trim();
       if (!date) {
@@ -1354,6 +1534,11 @@
       } catch (err) {
         showStatus(err.message, 'error');
       }
+    }
+    document.getElementById('add-holiday-btn').addEventListener('click', handleAddHoliday);
+    // 日付・名称欄でEnterキーを押しても追加できるようにする
+    document.getElementById('holiday-name').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); handleAddHoliday(); }
     });
 
     // ==========================================================
@@ -1399,7 +1584,7 @@
                 <input type="checkbox" data-id="${s.spotId}" class="spot-enabled-toggle" ${s.enabled ? 'checked' : ''}>
                 表示する
               </label>
-              <button data-id="${s.spotId}" class="spot-delete-btn text-red-600 font-bold text-xs">削除</button>
+              <button data-id="${s.spotId}" class="spot-delete-btn text-red-600 hover:text-red-800 hover:underline font-bold text-xs">削除</button>
             </div>
           </div>
         </div>
@@ -1588,7 +1773,7 @@
     // ==========================================================
     // ログイン・ログアウト
     // ==========================================================
-    document.getElementById('login-btn').addEventListener('click', async () => {
+    async function handleLogin() {
       const username = document.getElementById('username').value.trim();
       const password = document.getElementById('password').value;
 
@@ -1597,6 +1782,8 @@
         return;
       }
 
+      const loginBtn = document.getElementById('login-btn');
+      loginBtn.disabled = true;
       setAuthToken(username, password);
       try {
         await api('/api/admin/settings'); // 認証確認を兼ねる
@@ -1608,7 +1795,20 @@
       } catch (err) {
         state.token = null;
         showLoginStatus(err.message, 'error');
+      } finally {
+        loginBtn.disabled = false;
       }
+    }
+
+    document.getElementById('login-btn').addEventListener('click', handleLogin);
+    // ユーザー名・パスワード欄でEnterキーを押してもログインできるようにする
+    ['username', 'password'].forEach((id) => {
+      document.getElementById(id).addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          handleLogin();
+        }
+      });
     });
 
     document.getElementById('logout-btn').addEventListener('click', () => {

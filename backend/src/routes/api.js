@@ -13,6 +13,7 @@ const {
   searchStops: searchTimetableStops,
   listStopsForMap,
   searchNearbyStops,
+  getStopSummariesByKeys,
   getStopTimetable,
   getTripDetail
 } = require('../services/gtfsTimetable');
@@ -657,11 +658,16 @@ router.get('/route-search/stops', async (req, res) => {
 });
 
 // GET /api/route-search -> 経路検索（乗換2回まで・徒歩接続あり・任意日付・運賃つき）
-// クエリ: fromStopKey|from / toStopKey|to / date=YYYY-MM-DD / time=HH:MM / limit
+// クエリ: fromStopKey|from / toStopKey|to / date=YYYY-MM-DD / time=HH:MM / timeMode / limit
 //   departureTime は旧APIの名前。time の別名として受け付ける。
+//   timeMode=arrival なら time を「到着時刻」として逆向きに探索する（未指定なら従来どおり出発時刻）。
+//   arrivalTime を渡した場合も到着時刻指定として扱う。
 //   fromSpotId|toSpotId は観光スポットIDを起点/終点にする場合（観光スポット情報_仕様書）。
+//   maxTransfers / allowWalkTransfer / minTransferMinutes は詳細設定。
+//   いずれも未指定なら従来どおりの条件（乗換2回まで・徒歩接続あり・乗換余裕1分）で検索する。
 router.get('/route-search', async (req, res) => {
   try {
+    const isArrival = req.query.timeMode === 'arrival' || Boolean(req.query.arrivalTime);
     const result = await searchJourneys({
       fromStopKey: req.query.fromStopKey || null,
       from: req.query.from || null,
@@ -670,17 +676,30 @@ router.get('/route-search', async (req, res) => {
       to: req.query.to || null,
       toSpotId: req.query.toSpotId || null,
       date: req.query.date || null,
-      time: req.query.time || req.query.departureTime || null,
+      time: req.query.arrivalTime || req.query.time || req.query.departureTime || null,
+      timeMode: isArrival ? 'arrival' : 'departure',
+      // 詳細設定（未指定・不正値はサービス側で既定＝従来の条件に落ちる）
+      maxTransfers: req.query.maxTransfers,
+      allowWalkTransfer: req.query.allowWalkTransfer,
+      minTransferMinutes: req.query.minTransferMinutes,
       limit: req.query.limit
     });
+
+    // 詳細設定を付けた検索だけログに条件を添える（既定の検索のログ形式は変えない）
+    const prefs = result.preferences;
+    const prefsLog = prefs && !prefs.isDefault
+      ? ` / 詳細設定: 乗換${prefs.maxTransfers === null ? '指定なし' : `${prefs.maxTransfers}回まで`}` +
+        `・徒歩乗継${prefs.allowWalkTransfer ? 'あり' : 'なし'}・余裕${prefs.minTransferMinutes}分`
+      : '';
 
     if (result.found) {
       console.log(
         `[api] 経路検索: ${result.from.name} → ${result.to.name} ` +
-        `(${result.date} ${result.baseTime}) → ${result.journeys.length}件 / ${result.relaxation}`
+        `(${result.date} ${result.baseTime}${result.timeMode === 'arrival' ? '着' : '発'}) ` +
+        `→ ${result.journeys.length}件 / ${result.relaxation}${prefsLog}`
       );
     } else {
-      console.log(`[api] 経路検索: 見つからず (${result.reason})`);
+      console.log(`[api] 経路検索: 見つからず (${result.reason})${prefsLog}`);
     }
     res.json(result);
   } catch (err) {
@@ -1553,6 +1572,23 @@ router.get('/busstop/nearby', async (req, res) => {
   }
 });
 
+// GET /api/busstop/by-keys?keys=a,b,c -> 指定したstopKey群のバス停サマリー（お気に入りバス停を
+// 検索・経路検索画面の候補に出す用途）。別名キー・標柱のstop_idどちらでも解決できる。
+router.get('/busstop/by-keys', async (req, res) => {
+  try {
+    const keys = String(req.query.keys || '')
+      .split(',')
+      .map((key) => key.trim())
+      .filter(Boolean);
+    if (keys.length === 0) return res.json({ stops: [] });
+    const stops = await getStopSummariesByKeys(keys.slice(0, 50));
+    res.json({ stops });
+  } catch (err) {
+    console.error('[api] /busstop/by-keys エラー:', err);
+    res.status(500).json({ error: 'バス停情報の取得に失敗しました。' });
+  }
+});
+
 // GET /api/busstop/:stopKey/approaching -> 現在時刻±30分以内に到着予定の便一覧（補完仕様書 3.5）
 // クエリ: date=YYYY-MM-DD（省略時は本日） / platform=標柱のstop_id（省略時は全標柱）
 router.get('/busstop/:stopKey/approaching', async (req, res) => {
@@ -1584,6 +1620,21 @@ router.get('/busstop/:stopKey/nearby-spots', async (req, res) => {
     res.json({ stopKey: data.stop.stopKey, stopName: data.stop.stopName, spots });
   } catch (err) {
     console.error('[api] /busstop/:stopKey/nearby-spots エラー:', err);
+    res.status(500).json({ error: '観光スポット情報の取得に失敗しました。' });
+  }
+});
+
+// GET /api/tourist-spots/:id -> 観光スポット1件の詳細（enabled=trueのみ）
+// 経路検索結果でスポット名をタップしたときの詳細ポップアップ表示用（観光スポット情報_仕様書）。
+router.get('/tourist-spots/:id', async (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: '不正なIDです。' });
+  try {
+    const spot = await touristSpots.getEnabledSpotById(id);
+    if (!spot) return res.status(404).json({ error: '指定の観光スポットが見つかりませんでした。' });
+    res.json({ spot });
+  } catch (err) {
+    console.error('[api] /tourist-spots/:id エラー:', err);
     res.status(500).json({ error: '観光スポット情報の取得に失敗しました。' });
   }
 });

@@ -71,6 +71,26 @@
     return true;
   }
 
+  /**
+   * お気に入り登録済みバス停のstopKey一覧（重複なし・登録が新しい順）。
+   * type 'busstop'（バス停検索）・'timetable'（時刻表検索）どちらも対象。
+   * id は "busstop|{stopKey}|{platformId}" 形式（platformIdは「すべての乗り場」なら空文字）
+   * なので、特定の乗り場のみお気に入りでもstopKey単位で1件にまとめる
+   * （経路検索・バス停検索の候補には常に「すべての乗り場」として出す）。
+   */
+  function favoriteBusStopKeys() {
+    const keys = [];
+    const seen = new Set();
+    list().forEach((item) => {
+      if (item.type !== 'busstop' && item.type !== 'timetable') return;
+      const stopKey = String(item.id).split('|')[1];
+      if (!stopKey || seen.has(stopKey)) return;
+      seen.add(stopKey);
+      keys.push(stopKey);
+    });
+    return keys;
+  }
+
   function starIconSvg(active) {
     const path = 'M12 3.5l2.6 5.4 5.9.7-4.3 4.1 1.1 5.9L12 16.9l-5.3 2.7 1.1-5.9-4.3-4.1 5.9-.7L12 3.5z';
     return active
@@ -116,5 +136,5 @@
     if (typeof window.onFavoritesChanged === 'function') window.onFavoritesChanged();
   });
 
-  window.Favorites = { list, get, add, remove, toggle, isFavorite, starButtonHtml };
+  window.Favorites = { list, get, add, remove, toggle, isFavorite, starButtonHtml, favoriteBusStopKeys };
 })();

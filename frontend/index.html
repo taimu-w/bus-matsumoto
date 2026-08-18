@@ -342,6 +342,19 @@
   </div>
 </div>
 
+<!-- 経路検索：観光スポット情報ポップアップ（routesearch.jsから使う。観光スポット情報_仕様書） -->
+<div id="rs-spot-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4" style="display:none;">
+  <div class="bg-white rounded-t-3xl sm:rounded-2xl w-full max-w-md shadow-2xl max-h-[85vh] overflow-y-auto">
+    <div class="flex justify-between items-start p-4 pb-0">
+      <p class="text-xs text-emerald-600 font-bold">観光スポット</p>
+      <button data-close="rs-spot-modal" class="text-gray-400">
+        <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+      </button>
+    </div>
+    <div id="rs-spot-modal-body" class="p-4 pt-2"></div>
+  </div>
+</div>
+
 
 <!-- favorites.js・timetable.js・stopmap.js・busstop.js・routesearch.js は app.js より先に読み込む（app.js の初回ルーティングから参照するため） -->
 <script src="/favorites.js"></script>

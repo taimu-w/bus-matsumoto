@@ -378,6 +378,13 @@ CREATE TABLE IF NOT EXISTS trip_arrival_prediction_log (
 );
 CREATE INDEX IF NOT EXISTS idx_prediction_log_assignment_stop ON trip_arrival_prediction_log(assignment_id, stop_id, computed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_prediction_log_route_time ON trip_arrival_prediction_log(route_id, computed_at DESC);
+-- 予測精度の監視（services/predictionAccuracy.js）は、まず「実績（source='actual'）」の
+-- 行を期間で絞り、そのあと同じ(assignment_id, stop_id)の予測履歴と突き合わせる。
+-- source='actual'の行はテーブル全体のごく一部でしかないため、部分インデックスで
+-- 「期間内の実績」だけを走査できるようにする（全件スキャン＋source条件のフィルタを避ける）。
+-- 路線絞り込みの有無で使われるインデックスが変わるため、2本用意している。
+CREATE INDEX IF NOT EXISTS idx_prediction_log_actual_time ON trip_arrival_prediction_log(computed_at DESC) WHERE source = 'actual';
+CREATE INDEX IF NOT EXISTS idx_prediction_log_actual_route_time ON trip_arrival_prediction_log(route_id, computed_at DESC) WHERE source = 'actual';
 
 -- アルピコ交通 公式サイトの運行状況ページをスクレイピングした結果のキャッシュ（1行のみ保持）
 CREATE TABLE IF NOT EXISTS service_status_cache (

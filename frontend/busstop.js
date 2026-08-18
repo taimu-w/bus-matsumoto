@@ -329,17 +329,43 @@
     return nearbyStopsCache;
   }
 
-  /** 検索欄が空のときの初期表示。自動フォーカスの代わりに近くのバス停を候補として出す（soft-fail：取得できなければ何も出さない）。 */
+  /**
+   * お気に入り登録済みバス停のサマリー（重複なし・登録が新しい順）。
+   * 特定の乗り場のみお気に入りでもバス停単位（すべての乗り場）で候補に出す。
+   */
+  async function getFavoriteStops() {
+    const keys = window.Favorites ? window.Favorites.favoriteBusStopKeys() : [];
+    if (keys.length === 0) return [];
+    try {
+      const query = new URLSearchParams({ keys: keys.join(',') });
+      const data = await fetchJson(`${API_BASE}/busstop/by-keys?${query.toString()}`);
+      return data.stops || [];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  /** 検索欄が空のときの初期表示。自動フォーカスの代わりにお気に入りバス停・近くのバス停を
+   *  候補として出す（お気に入りを一番上、その次に近い順。soft-fail：取得できなければ何も出さない）。 */
   async function showNearbyStops(container) {
     container.innerHTML = '<p class="text-sm font-bold text-gray-400 py-3 text-center">近くのバス停を確認中...</p>';
-    const stops = await getNearbyStops();
+    const [favoriteStops, nearbyStops] = await Promise.all([getFavoriteStops(), getNearbyStops()]);
     // 取得を待つ間に入力・画面遷移されていたら上書きしない
     if (searchQuery.trim() || document.getElementById('bs-search-results') !== container) return;
-    if (stops.length === 0) {
+    const favoriteKeys = new Set(favoriteStops.map((stop) => stop.stopKey));
+    const nearbyOnlyStops = nearbyStops.filter((stop) => !favoriteKeys.has(stop.stopKey));
+    if (favoriteStops.length === 0 && nearbyOnlyStops.length === 0) {
       container.innerHTML = '';
       return;
     }
-    container.innerHTML = `<p class="text-xs font-bold text-gray-500 px-1">現在地から近いバス停</p><div class="mt-2 space-y-2">${stops.map(stopCardHtml).join('')}</div>`;
+    const sections = [];
+    if (favoriteStops.length > 0) {
+      sections.push(`<p class="text-xs font-bold text-gray-500 px-1">お気に入りバス停</p><div class="mt-2 space-y-2">${favoriteStops.map(stopCardHtml).join('')}</div>`);
+    }
+    if (nearbyOnlyStops.length > 0) {
+      sections.push(`<p class="text-xs font-bold text-gray-500 px-1 ${favoriteStops.length > 0 ? 'mt-4' : ''}">現在地から近いバス停</p><div class="mt-2 space-y-2">${nearbyOnlyStops.map(stopCardHtml).join('')}</div>`);
+    }
+    container.innerHTML = sections.join('');
   }
 
   /* ---------- 画面: バス停詳細 ---------- */
@@ -871,7 +897,7 @@
     container.innerHTML = spots
       .map((spot) => `
         <div class="border-2 border-gray-200 rounded-xl overflow-hidden mb-2 last:mb-0">
-          ${spot.photoUrl ? `<img src="${esc(spot.photoUrl)}" alt="${esc(spot.name)}" class="w-full h-32 object-cover">` : ''}
+          ${spot.photoUrl ? `<img src="${esc(spot.photoUrl)}" alt="${esc(spot.name)}" class="w-full h-32 object-contain bg-gray-100">` : ''}
           <div class="p-3">
             <div class="flex items-start justify-between gap-2">
               <p class="font-bold text-gray-900">${esc(spot.name)}</p>

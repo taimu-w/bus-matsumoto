@@ -3,7 +3,14 @@
  *
  * 画面とURL（仕様書 6.1）:
  *   /routesearch                                              検索フォーム
- *   /routesearch?from=…&fromKey=…&to=…&toKey=…&date=…&time=…  検索結果
+ *   /routesearch?from=…&fromKey=…&to=…&toKey=…&date=…&time=…  検索結果（経路一覧）
+ *   /routesearch?…&journey=N                                  経路詳細（一覧のN番目）
+ *
+ * 経路一覧は「出発／到着時刻・所要時間・運賃・乗換回数・徒歩・路線カラーのバー」だけの
+ * シンプル表示にし、乗り換え時刻や通過バス停といった詳しい情報は詳細画面に置く。
+ * 詳細も検索条件と同じくURL（journey）で表現するので、リロード・共有・ブラウザの
+ * 戻るがそのまま効く（一覧→詳細はpushState、詳細内の「前後の経路」はreplaceStateで
+ * 移動するため、詳細のどこからでもブラウザの戻るで一覧に帰れる）。
  *
  * 時刻表検索（timetable.js）・バス停検索（busstop.js）と同じくHistory API
  * （パス）でルーティングする。検索条件をURLに持たせているので、結果から
@@ -25,7 +32,7 @@
   let suggestSeq = 0;
   // 確定済みのバス停（候補から選んだもの）。テキストを編集すると解除される。
   let selected = { from: null, to: null };
-  // 「近くのバス停」候補（出発地欄）。位置情報の許可ダイアログを毎回出さないよう使い回す。
+  // 「近くのバス停」候補（出発地・目的地欄で共用）。位置情報の許可ダイアログを毎回出さないよう使い回す。
   let nearbyStopsCache = null;
   let nearbyStopsPromise = null;
   // 「通過バス停」を開いている区間のキー（再描画をまたいで維持する）
@@ -174,9 +181,19 @@
   }
 
   /* ---------- 表示の小道具 ---------- */
+  // dayOffset が負になるのは到着時刻指定のとき（指定時刻までに着く便が前日の深夜便だった場合）。
   function timeWithDay(time, dayOffset) {
     if (!time) return '';
-    return dayOffset > 0 ? `翌日 ${time}` : time;
+    if (dayOffset > 0) return `翌日 ${time}`;
+    if (dayOffset < 0) return `前日 ${time}`;
+    return time;
+  }
+
+  /** 検索条件の説明文（出発時刻指定／到着時刻指定）。結果ヘッダーと「見つからない」表示で共用する。 */
+  function baseTimeLabel(result) {
+    return result.timeMode === 'arrival'
+      ? `${result.baseTime} までに到着`
+      : `${result.baseTime} 以降に出発`;
   }
 
   function yen(value) {
@@ -186,6 +203,56 @@
   function platformLabel(stop) {
     if (!stop || !stop.platformCode) return '';
     return /^\d+$/.test(stop.platformCode) ? `${stop.platformCode}番のりば` : stop.platformCode;
+  }
+
+  /* ---------- 観光スポット詳細ポップアップ（観光スポット情報_仕様書） ---------- */
+  // 出発地/目的地が観光スポットのとき、結果ヘッダーのスポット名をタップ可能にする。
+  function spotNameButtonHtml(spot) {
+    return `<button type="button" data-role="rs-spot-name" data-spot-id="${esc(spot.spotId)}"
+                    class="font-bold text-emerald-700 underline decoration-dotted underline-offset-2 hover:text-emerald-800">${esc(spot.name)}</button>`;
+  }
+
+  /** 生URLをそのまま出さず、ドメイン名のみを見せる表示ラベルにする（busstop.jsと同じ考え方）。 */
+  function spotLinkLabel(url) {
+    try {
+      const host = new URL(url).hostname.replace(/^www\./, '');
+      return `公式サイト（${host}）を見る`;
+    } catch {
+      return '公式サイトを見る';
+    }
+  }
+
+  function renderSpotModalBody(spot) {
+    return `
+      ${spot.photoUrl ? `<img src="${esc(spot.photoUrl)}" alt="${esc(spot.name)}" class="w-full h-40 object-contain bg-gray-100 rounded-xl mb-3">` : ''}
+      <p class="text-lg font-bold text-gray-900">${esc(spot.name)}</p>
+      ${spot.kana ? `<p class="text-xs text-gray-400 mt-0.5">${esc(spot.kana)}${spot.romaji ? ` / ${esc(spot.romaji)}` : ''}</p>` : ''}
+      ${spot.hours ? `<p class="text-xs text-gray-500 mt-2">営業時間：${esc(spot.hours)}</p>` : ''}
+      ${spot.stayDuration ? `<p class="text-xs text-gray-500">滞在目安：${esc(spot.stayDuration)}</p>` : ''}
+      ${spot.description ? `<p class="text-sm text-gray-700 mt-2 leading-relaxed">${esc(spot.description)}</p>` : ''}
+      ${spot.url ? `
+        <a href="${esc(spot.url)}" target="_blank" rel="noopener noreferrer"
+           class="inline-flex items-center gap-1 mt-3 text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-full px-3 py-1 hover:bg-indigo-100">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+          </svg>
+          ${esc(spotLinkLabel(spot.url))}
+        </a>` : ''}
+    `;
+  }
+
+  async function openSpotModal(spotId) {
+    const body = document.getElementById('rs-spot-modal-body');
+    if (!body || typeof window.openModal !== 'function') return;
+    body.innerHTML = '<p class="text-sm font-bold text-gray-400 py-6 text-center">読み込み中...</p>';
+    window.openModal('rs-spot-modal');
+    try {
+      const res = await fetchJson(`${API_BASE}/tourist-spots/${encodeURIComponent(spotId)}`);
+      body.innerHTML = renderSpotModalBody(res.spot);
+    } catch (err) {
+      // 取得失敗はポップアップ内にエラー文言を出すだけに留める（soft-fail）
+      body.innerHTML = '<p class="text-sm font-bold text-gray-400 py-6 text-center">観光スポット情報を取得できませんでした。</p>';
+    }
   }
 
   /* ---------- お気に入りルート（名前付きで登録する。日付・時刻はurlに含めず開いた時点で検索し直す） ---------- */
@@ -205,6 +272,9 @@
     if (state.toText) query.set('to', state.toText);
     if (state.toKey) query.set('toKey', state.toKey);
     if (state.toSpotId) query.set('toSpotId', state.toSpotId);
+    // 詳細設定は検索条件の一部なので保存する（日付・時刻と違い、開くたびに変わるものではない）。
+    // 既定のままなら何も付かないので、従来登録したお気に入りのURLと同じ形のままになる。
+    appendPreferenceParams(query, state);
     const qs = query.toString();
     return {
       id: routeSearchFavoriteId(state),
@@ -262,6 +332,90 @@
     }
   }
 
+  /* ==========================================================
+   * 詳細設定（乗り換えなしで探す、など）
+   *
+   * 既定値は「これまでどおり」の検索条件そのもの。既定のままなら
+   * URLにもAPIクエリにも載せないので、既存のURL・お気に入り・共有リンクの
+   * 挙動は一切変わらない（サーバー側も未指定は既定に落とす）。
+   * ========================================================== */
+  const PREFERENCE_DEFAULTS = { maxTransfers: null, allowWalkTransfer: true, minTransferMinutes: 1 };
+  // サーバー側（gtfsRouteSearch.js）の上限と揃える
+  const MAX_TRANSFERS_LIMIT = 3;
+  const TRANSFER_MARGIN_MIN_MINUTES = 1;
+  const TRANSFER_MARGIN_MAX_MINUTES = 15;
+
+  const MAX_TRANSFER_OPTIONS = [
+    { value: '', label: '指定なし' },
+    { value: '0', label: '乗り換えなし' },
+    { value: '1', label: '1回まで' },
+    { value: '2', label: '2回まで' }
+  ];
+  const WALK_TRANSFER_OPTIONS = [
+    { value: 'true', label: '使う' },
+    { value: 'false', label: '使わない' }
+  ];
+  const TRANSFER_MARGIN_OPTIONS = [
+    { value: '1', label: '標準' },
+    { value: '3', label: '3分' },
+    { value: '5', label: '5分' },
+    { value: '10', label: '10分' }
+  ];
+
+  // 詳細設定パネルの開閉。再描画（検索のたびに起きる）をまたいで維持する。
+  // null＝利用者がまだ触っていない（条件が入っていれば自動で開く）。
+  let advancedOpen = null;
+
+  /** 乗換回数の上限。null＝指定なし（＝従来どおり）。 */
+  function parseMaxTransfers(raw) {
+    if (raw === null || raw === undefined || String(raw).trim() === '') return null;
+    const parsed = parseInt(raw, 10);
+    if (!Number.isFinite(parsed)) return null;
+    return Math.min(Math.max(parsed, 0), MAX_TRANSFERS_LIMIT);
+  }
+
+  function parseTransferMargin(raw) {
+    const parsed = parseInt(raw, 10);
+    if (!Number.isFinite(parsed)) return PREFERENCE_DEFAULTS.minTransferMinutes;
+    return Math.min(Math.max(parsed, TRANSFER_MARGIN_MIN_MINUTES), TRANSFER_MARGIN_MAX_MINUTES);
+  }
+
+  /** state / APIレスポンスの preferences のどちらにも使える（フィールド名を揃えてある）。 */
+  function isDefaultPreferences(prefs) {
+    if (!prefs) return true;
+    return prefs.maxTransfers === null
+      && prefs.allowWalkTransfer !== false
+      && (prefs.minTransferMinutes || PREFERENCE_DEFAULTS.minTransferMinutes) === PREFERENCE_DEFAULTS.minTransferMinutes;
+  }
+
+  /** 適用中の条件を短い言葉にする（フォームの見出し・結果ヘッダーで共用）。 */
+  function preferenceLabels(prefs) {
+    if (!prefs) return [];
+    const labels = [];
+    if (prefs.maxTransfers === 0) labels.push('乗り換えなし');
+    else if (prefs.maxTransfers !== null && prefs.maxTransfers !== undefined) labels.push(`乗換${prefs.maxTransfers}回まで`);
+    if (prefs.allowWalkTransfer === false) labels.push('徒歩での乗り継ぎなし');
+    if (prefs.minTransferMinutes && prefs.minTransferMinutes !== PREFERENCE_DEFAULTS.minTransferMinutes) {
+      labels.push(`乗換余裕${prefs.minTransferMinutes}分`);
+    }
+    return labels;
+  }
+
+  /**
+   * 詳細設定をクエリへ載せる。**既定値のものは載せない**（URL・お気に入り・APIリクエストを
+   * 従来とまったく同じ形に保ち、旧いリンクとの往復で条件が増えないようにするため）。
+   * URLパラメータ名はAPIのクエリ名と同じにしてある。
+   */
+  function appendPreferenceParams(query, prefs) {
+    if (prefs.maxTransfers !== null && prefs.maxTransfers !== undefined) {
+      query.set('maxTransfers', String(prefs.maxTransfers));
+    }
+    if (prefs.allowWalkTransfer === false) query.set('allowWalkTransfer', 'false');
+    if (prefs.minTransferMinutes && prefs.minTransferMinutes !== PREFERENCE_DEFAULTS.minTransferMinutes) {
+      query.set('minTransferMinutes', String(prefs.minTransferMinutes));
+    }
+  }
+
   /* ---------- ルーティング ---------- */
   function isRouteSearchPath() {
     return window.location.pathname === '/routesearch' || window.location.pathname.startsWith('/routesearch/');
@@ -281,12 +435,25 @@
     if (state.toSpotId) query.set('toSpotId', state.toSpotId);
     if (state.date) query.set('date', state.date);
     if (state.time) query.set('time', state.time);
+    // 既定（出発時刻指定）のときはURLに載せない。従来のURL・お気に入りをそのまま活かすため。
+    if (state.timeMode === 'arrival') query.set('timeMode', 'arrival');
+    appendPreferenceParams(query, state);
+    // 経路詳細を開いているときだけ載せる（一覧のURLは従来と同じ形のまま）。
+    if (state.journeyIndex !== null && state.journeyIndex !== undefined && state.journeyIndex !== '') {
+      query.set('journey', String(state.journeyIndex));
+    }
     const qs = query.toString();
     return `/routesearch${qs ? `?${qs}` : ''}`;
   }
 
-  function navigate(url) {
-    window.history.pushState({}, '', url);
+  /**
+   * 画面遷移。既定はpushState（ブラウザの戻るで直前の画面に帰れる）。
+   * `replace:true`は経路詳細内での「前の経路／次の経路」用で、履歴を積まずに
+   * 現在のエントリを差し替える（詳細を何件たどっても戻る操作で一覧に帰れるようにする）。
+   */
+  function navigate(url, { replace = false } = {}) {
+    if (replace) window.history.replaceState({}, '', url);
+    else window.history.pushState({}, '', url);
     if (typeof window.renderCurrentRoute === 'function') window.renderCurrentRoute();
     else render();
     window.scrollTo(0, 0);
@@ -294,6 +461,7 @@
 
   function readState() {
     const params = currentParams();
+    const journeyParam = params.get('journey');
     return {
       fromText: params.get('from') || '',
       fromKey: params.get('fromKey') || '',
@@ -302,7 +470,15 @@
       toKey: params.get('toKey') || '',
       toSpotId: params.get('toSpotId') || '',
       date: params.get('date') || todayString(),
-      time: params.get('time') || nowHhmm()
+      time: params.get('time') || nowHhmm(),
+      // timeMode=arrival なら「この時刻までに到着」。未指定は従来どおり出発時刻指定。
+      timeMode: params.get('timeMode') === 'arrival' ? 'arrival' : 'departure',
+      // 詳細設定。いずれも未指定なら既定（＝これまでどおりの検索条件）。
+      maxTransfers: parseMaxTransfers(params.get('maxTransfers')),
+      allowWalkTransfer: params.get('allowWalkTransfer') !== 'false',
+      minTransferMinutes: parseTransferMargin(params.get('minTransferMinutes')),
+      // journey=N が付いていれば経路一覧のN件目（0始まり）の詳細画面。無ければ一覧。
+      journeyIndex: /^\d+$/.test(journeyParam || '') ? Number(journeyParam) : null
     };
   }
 
@@ -323,6 +499,29 @@
 
     const state = readState();
     setTitle('経路検索', 'Route Search');
+
+    const hasEndpoints = (state.fromKey || state.fromText) && (state.toKey || state.toText);
+
+    // 経路詳細（?journey=N）は検索フォームを出さず、その経路1件の情報に集中させる。
+    // 「経路一覧へ戻る」は読み込み中・エラー時にも押せるよう結果の外（root直下）に置く。
+    if (hasEndpoints && state.journeyIndex !== null) {
+      root().innerHTML = `
+        <div class="flex items-center justify-between mb-4">
+          <button type="button" data-role="rs-back-to-list" class="inline-flex items-center gap-1 text-sm font-bold text-purple-700">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path>
+            </svg>
+            経路一覧へ戻る
+          </button>
+          <a href="/" data-spa class="text-sm font-bold text-purple-700">メニューへ戻る</a>
+        </div>
+        <div id="rs-result"></div>
+      `;
+      bindBackToList(root(), state);
+      await runSearch(state, seq);
+      return;
+    }
+
     root().innerHTML = `
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-xl font-bold text-purple-900">経路検索</h2>
@@ -333,10 +532,31 @@
     `;
     bindFormEvents(state);
 
-    const hasEndpoints = (state.fromKey || state.fromText) && (state.toKey || state.toText);
     if (!hasEndpoints) return;
 
     await runSearch(state, seq);
+  }
+
+  /* ---------- 出発時刻指定／到着時刻指定の切り替え ---------- */
+  const TIME_MODES = [
+    { key: 'departure', label: '出発時刻', hint: '指定した時刻以降に出発する経路を探します。' },
+    { key: 'arrival', label: '到着時刻', hint: '指定した時刻までに到着する経路を、遅く出発できる順に探します。' }
+  ];
+
+  function timeModeButtonClass(active) {
+    return `px-3 py-2.5 rounded-xl text-sm font-bold border-2 transition-all ${
+      active ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-gray-700 border-gray-200'
+    }`;
+  }
+
+  function timeModeHint(timeMode) {
+    const mode = TIME_MODES.find((m) => m.key === timeMode) || TIME_MODES[0];
+    return mode.hint;
+  }
+
+  function currentTimeMode() {
+    const el = document.getElementById('rs-timemode');
+    return el && el.value === 'arrival' ? 'arrival' : 'departure';
   }
 
   function renderForm(state) {
@@ -392,7 +612,15 @@
         </div>
 
         <div class="pt-3">
-          <label class="block text-sm font-bold text-gray-700 mb-2" for="rs-time">出発時刻</label>
+          <label class="block text-sm font-bold text-gray-700 mb-2" for="rs-time">時刻</label>
+          <div class="grid grid-cols-2 gap-2 mb-2">
+            ${TIME_MODES.map((mode) => `
+              <button type="button" data-role="rs-timemode" data-mode="${esc(mode.key)}"
+                      class="${timeModeButtonClass(state.timeMode === mode.key)}">
+                ${esc(mode.label)}
+              </button>`).join('')}
+          </div>
+          <input type="hidden" id="rs-timemode" value="${esc(state.timeMode)}">
           <div class="flex gap-2">
             <input type="time" id="rs-time" value="${esc(state.time)}"
                    class="flex-1 min-w-0 px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-purple-500 focus:outline-none font-bold">
@@ -401,7 +629,10 @@
               現在時刻
             </button>
           </div>
+          <p id="rs-time-hint" class="text-xs text-gray-500 font-bold mt-1 px-1">${esc(timeModeHint(state.timeMode))}</p>
         </div>
+
+        ${renderAdvancedSettings(state)}
 
         <div id="rs-warning" class="text-sm font-bold text-red-700 bg-red-50 border-2 border-red-200 rounded-xl px-4 py-2 mt-3" style="display:none;"></div>
 
@@ -411,6 +642,137 @@
         </button>
       </div>
     `;
+  }
+
+  /* ---------- 詳細設定パネル ---------- */
+  function optionButtonClass(active) {
+    return `px-3 py-2 rounded-xl text-xs font-bold border-2 transition-all ${
+      active ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-gray-700 border-gray-200'
+    }`;
+  }
+
+  function optionButtonsHtml(role, options, currentValue) {
+    return options.map((option) => `
+      <button type="button" data-role="${esc(role)}" data-value="${esc(option.value)}"
+              class="${optionButtonClass(option.value === currentValue)}">${esc(option.label)}</button>`).join('');
+  }
+
+  /**
+   * 「乗り換えなし」などの条件を指定するパネル。既定では閉じており、既定値のままなら
+   * 検索条件はこれまでとまったく同じ（＝この機能を知らない利用者の体験は変わらない）。
+   * 条件を指定しているときは開いた状態で描画し、見出しにも要約を出す。
+   */
+  function renderAdvancedSettings(state) {
+    const labels = preferenceLabels(state);
+    const maxTransfersValue = state.maxTransfers === null ? '' : String(state.maxTransfers);
+    const walkValue = state.allowWalkTransfer ? 'true' : 'false';
+    const marginValue = String(state.minTransferMinutes);
+    // 条件が入っていれば既定で開く。ただし利用者が自分で閉じたならその意思を優先する。
+    const shouldOpen = advancedOpen === null ? labels.length > 0 : advancedOpen;
+
+    return `
+      <details id="rs-advanced" class="pt-3" ${shouldOpen ? 'open' : ''}>
+        <summary class="cursor-pointer list-none flex items-center gap-2 py-1 select-none">
+          <span class="text-sm font-bold text-purple-700">詳細設定</span>
+          ${labels.length > 0
+            ? `<span class="text-[11px] font-bold text-purple-900 bg-purple-100 border border-purple-200 px-2 py-0.5 rounded-full">${esc(labels.join('・'))}</span>`
+            : '<span class="text-[11px] font-bold text-gray-400">乗り換えなしで探す など</span>'}
+          <span class="rs-adv-open ml-auto text-xs font-bold text-purple-700">開く ▾</span>
+          <span class="rs-adv-close ml-auto text-xs font-bold text-purple-700">閉じる ▴</span>
+        </summary>
+        <div class="mt-2 bg-gray-50 border-2 border-gray-100 rounded-xl p-3 space-y-3">
+          <div>
+            <p class="text-xs font-bold text-gray-700 mb-1.5">乗り換え回数</p>
+            <div class="flex flex-wrap gap-2">${optionButtonsHtml('rs-maxtransfers', MAX_TRANSFER_OPTIONS, maxTransfersValue)}</div>
+            <p class="text-[11px] font-bold text-gray-500 mt-1">「乗り換えなし」は1本のバスで行ける経路だけを探します。</p>
+          </div>
+          <div>
+            <p class="text-xs font-bold text-gray-700 mb-1.5">徒歩での乗り継ぎ</p>
+            <div class="flex flex-wrap gap-2">${optionButtonsHtml('rs-walktransfer', WALK_TRANSFER_OPTIONS, walkValue)}</div>
+            <p class="text-[11px] font-bold text-gray-500 mt-1">近くの別のバス停まで歩いて乗り継ぐ経路を候補に入れるかどうかです。</p>
+          </div>
+          <div>
+            <p class="text-xs font-bold text-gray-700 mb-1.5">乗り換えの余裕時間</p>
+            <div class="flex flex-wrap gap-2">${optionButtonsHtml('rs-transfermargin', TRANSFER_MARGIN_OPTIONS, marginValue)}</div>
+            <p class="text-[11px] font-bold text-gray-500 mt-1">乗り継ぎに最低これだけの時間を空けた経路を探します。</p>
+          </div>
+          <input type="hidden" id="rs-maxtransfers" value="${esc(maxTransfersValue)}">
+          <input type="hidden" id="rs-walktransfer" value="${esc(walkValue)}">
+          <input type="hidden" id="rs-transfermargin" value="${esc(marginValue)}">
+          <button type="button" data-role="rs-reset-advanced"
+                  class="text-[11px] font-bold text-gray-600 underline ${labels.length > 0 ? '' : 'hidden'}">
+            詳細設定をリセット
+          </button>
+        </div>
+      </details>
+    `;
+  }
+
+  /** フォームの詳細設定パネルから現在値を読む（未描画なら既定値）。 */
+  function currentPreferences() {
+    const maxTransfersEl = document.getElementById('rs-maxtransfers');
+    const walkEl = document.getElementById('rs-walktransfer');
+    const marginEl = document.getElementById('rs-transfermargin');
+    if (!maxTransfersEl || !walkEl || !marginEl) return { ...PREFERENCE_DEFAULTS };
+    return {
+      maxTransfers: parseMaxTransfers(maxTransfersEl.value),
+      allowWalkTransfer: walkEl.value !== 'false',
+      minTransferMinutes: parseTransferMargin(marginEl.value)
+    };
+  }
+
+  /**
+   * 詳細設定の各ボタン・リセット・開閉状態を結び付ける。
+   * 値は hidden input に持たせ、選択状態のスタイルだけをその場で塗り替える
+   * （フォーム全体を描き直すと入力中のテキストや候補が消えてしまうため）。
+   */
+  function bindAdvancedSettings(container, onChange) {
+    const details = container.querySelector('#rs-advanced');
+    if (details) {
+      // 検索のたびに再描画されるので、開閉状態は自前で覚えておく
+      details.addEventListener('toggle', () => { advancedOpen = details.open; });
+    }
+
+    const groups = [
+      { role: 'rs-maxtransfers', inputId: 'rs-maxtransfers' },
+      { role: 'rs-walktransfer', inputId: 'rs-walktransfer' },
+      { role: 'rs-transfermargin', inputId: 'rs-transfermargin' }
+    ];
+    const repaint = () => {
+      groups.forEach(({ role, inputId }) => {
+        const input = document.getElementById(inputId);
+        if (!input) return;
+        container.querySelectorAll(`[data-role="${role}"]`).forEach((button) => {
+          button.className = optionButtonClass(button.dataset.value === input.value);
+        });
+      });
+      const reset = container.querySelector('[data-role="rs-reset-advanced"]');
+      if (reset) reset.classList.toggle('hidden', isDefaultPreferences(currentPreferences()));
+    };
+
+    groups.forEach(({ role, inputId }) => {
+      container.querySelectorAll(`[data-role="${role}"]`).forEach((button) => {
+        button.addEventListener('click', () => {
+          const input = document.getElementById(inputId);
+          if (!input || input.value === button.dataset.value) return;
+          input.value = button.dataset.value;
+          repaint();
+          onChange();
+        });
+      });
+    });
+
+    const reset = container.querySelector('[data-role="rs-reset-advanced"]');
+    if (reset) {
+      reset.addEventListener('click', () => {
+        if (isDefaultPreferences(currentPreferences())) return;
+        document.getElementById('rs-maxtransfers').value = '';
+        document.getElementById('rs-walktransfer').value = 'true';
+        document.getElementById('rs-transfermargin').value = String(PREFERENCE_DEFAULTS.minTransferMinutes);
+        repaint();
+        onChange();
+      });
+    }
   }
 
   /* ---------- フォームの操作 ---------- */
@@ -453,6 +815,25 @@
       });
     });
     document.getElementById('rs-date').addEventListener('change', resubmitIfReady);
+
+    // 出発時刻／到着時刻の切り替え。日付のクイックボタンと同じく、
+    // 出発地・目的地が入力済みならそのまま検索し直す。
+    container.querySelectorAll('[data-role="rs-timemode"]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const mode = button.dataset.mode === 'arrival' ? 'arrival' : 'departure';
+        document.getElementById('rs-timemode').value = mode;
+        container.querySelectorAll('[data-role="rs-timemode"]').forEach((other) => {
+          other.className = timeModeButtonClass(other.dataset.mode === mode);
+        });
+        const hint = document.getElementById('rs-time-hint');
+        if (hint) hint.textContent = timeModeHint(mode);
+        resubmitIfReady();
+      });
+    });
+
+    // 詳細設定。日付・時刻の切り替えと同じく、出発地・目的地が入力済みならその場で検索し直す。
+    bindAdvancedSettings(container, resubmitIfReady);
+
     document.getElementById('rs-now').addEventListener('click', () => {
       document.getElementById('rs-time').value = nowHhmm();
       document.getElementById('rs-date').value = todayString();
@@ -517,9 +898,9 @@
       box.innerHTML = '';
     };
 
-    // 入力欄への自動フォーカス（＝キーボードの自動表示）は廃止し、出発地が未入力のときは
-    // 代わりに近くのバス停を候補として出す（目的地は現在地との関連が薄いので対象外）。
-    if (side === 'from' && !input.value.trim()) showNearbyStopSuggestions(box, pick);
+    // 入力欄への自動フォーカス（＝キーボードの自動表示）は廃止し、未入力のときは代わりに
+    // お気に入りバス停・近くのバス停を候補として出す（出発地・目的地どちらも対象）。
+    if (!input.value.trim()) showNearbyStopSuggestions(box, pick);
 
     input.addEventListener('input', () => {
       // テキストを編集した時点で確定を解除する（自由文字列検索へ戻す）
@@ -529,7 +910,7 @@
       const query = input.value.trim();
       if (!query) {
         box.innerHTML = '';
-        if (side === 'from') showNearbyStopSuggestions(box, pick);
+        showNearbyStopSuggestions(box, pick);
         return;
       }
       suggestTimers[side] = setTimeout(async () => {
@@ -575,20 +956,46 @@
     return nearbyStopsCache;
   }
 
-  /** 出発地欄が空のときの初期候補（soft-fail：取得できなければ何も出さない）。 */
-  async function showNearbyStopSuggestions(box, onSelect) {
-    const stops = await getNearbyStops();
-    // 取得を待つ間に入力・フォーカス解除されていたら上書きしない
-    if (box.innerHTML !== '' || !box.isConnected) return;
-    if (stops.length === 0) return;
-    renderSuggestions(box, stops.map((stop) => ({
+  /**
+   * お気に入り登録済みバス停のサマリー（重複なし・登録が新しい順）。
+   * 特定の乗り場のみお気に入りでもバス停単位（すべての乗り場）で候補に出す。
+   */
+  async function getFavoriteStops() {
+    const keys = window.Favorites ? window.Favorites.favoriteBusStopKeys() : [];
+    if (keys.length === 0) return [];
+    try {
+      const query = new URLSearchParams({ keys: keys.join(',') });
+      const result = await fetchJson(`${API_BASE}/busstop/by-keys?${query.toString()}`);
+      return result.stops || [];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  function toSuggestStop(stop) {
+    return {
       stopKey: stop.stopKey,
       name: stop.stopName,
       kana: stop.nameHiragana,
       romaji: stop.nameRomaji,
       platformCount: stop.platformCount,
       routes: stop.routes
-    })), onSelect, { label: '近くのバス停' });
+    };
+  }
+
+  /** 出発地・目的地欄が空のときの初期候補（soft-fail：取得できなければ何も出さない）。
+   *  お気に入りバス停を一番上、次に現在地から近いバス停を出す。 */
+  async function showNearbyStopSuggestions(box, onSelect) {
+    const [favoriteStops, nearbyStops] = await Promise.all([getFavoriteStops(), getNearbyStops()]);
+    // 取得を待つ間に入力・フォーカス解除されていたら上書きしない
+    if (box.innerHTML !== '' || !box.isConnected) return;
+    const favoriteSuggestions = favoriteStops.map(toSuggestStop);
+    const favoriteKeys = new Set(favoriteSuggestions.map((stop) => stop.stopKey));
+    const nearbySuggestions = nearbyStops.filter((stop) => !favoriteKeys.has(stop.stopKey)).map(toSuggestStop);
+    renderCategorizedSuggestions(box, [
+      { label: 'お気に入りバス停', stops: favoriteSuggestions },
+      { label: '近くのバス停', stops: nearbySuggestions }
+    ], onSelect);
   }
 
   function stopSuggestionCardHtml(stop, index) {
@@ -623,16 +1030,26 @@
       </button>`;
   }
 
-  function renderSuggestions(box, stops, onSelect, { label = '' } = {}) {
-    if (stops.length === 0) {
-      box.innerHTML = label ? '' : '<p class="text-xs font-bold text-gray-500 px-1">一致するバス停がありません。</p>';
+  /** 複数グループ（お気に入り／近くのバス停など）に見出しを付けて描画する。空のグループは省く。 */
+  function renderCategorizedSuggestions(box, groups, onSelect) {
+    const nonEmpty = groups.filter((group) => group.stops.length > 0);
+    if (nonEmpty.length === 0) {
+      box.innerHTML = '';
       return;
     }
-    const header = label ? `<p class="text-[11px] font-bold text-gray-500 px-1 mb-1">${esc(label)}</p>` : '';
-    box.innerHTML = header + stops.map((stop, i) => stopSuggestionCardHtml(stop, i)).join('');
+    const allStops = [];
+    box.innerHTML = nonEmpty.map((group) => {
+      const header = `<p class="text-[11px] font-bold text-gray-500 px-1 mb-1">${esc(group.label)}</p>`;
+      const cards = group.stops.map((stop) => {
+        const html = stopSuggestionCardHtml(stop, allStops.length);
+        allStops.push(stop);
+        return html;
+      }).join('');
+      return header + cards;
+    }).join('');
     box.querySelectorAll('button[data-index]').forEach((button) => {
       button.addEventListener('mousedown', (event) => event.preventDefault());
-      button.addEventListener('click', () => onSelect(stops[Number(button.dataset.index)]));
+      button.addEventListener('click', () => onSelect(allStops[Number(button.dataset.index)]));
     });
   }
 
@@ -660,6 +1077,8 @@
     const toText = document.getElementById('rs-to').value.trim();
     const date = document.getElementById('rs-date').value || todayString();
     const time = document.getElementById('rs-time').value || nowHhmm();
+    const timeMode = currentTimeMode();
+    const preferences = currentPreferences();
 
     if (!fromText || !toText) {
       showWarning('出発地と目的地を入力してください。');
@@ -682,7 +1101,9 @@
       toKey: selected.to && selected.to.kind !== 'spot' ? selected.to.stopKey : '',
       toSpotId: selected.to && selected.to.kind === 'spot' ? selected.to.spotId : '',
       date,
-      time
+      time,
+      timeMode,
+      ...preferences
     }));
   }
 
@@ -700,6 +1121,8 @@
     else query.set('to', state.toText);
     query.set('date', state.date);
     query.set('time', state.time);
+    if (state.timeMode === 'arrival') query.set('timeMode', 'arrival');
+    appendPreferenceParams(query, state);
     return `${API_BASE}/route-search?${query.toString()}`;
   }
 
@@ -727,6 +1150,24 @@
     if (seq !== renderSeq) return;
 
     lastResult = result;
+
+    // 経路詳細（?journey=N）。一覧と同じAPIの結果からN件目を取り出して描くだけなので、
+    // 詳細専用のAPIは持たない（リアルタイムの重ね合わせも一覧とまったく同じ結果になる）。
+    if (state.journeyIndex !== null) {
+      const journey = result.found ? result.journeys[state.journeyIndex] : null;
+      if (!journey) {
+        // 件数が変わって指定の経路が無くなった場合（古いURLを開いた・リアルタイム更新で
+        // 経路が減った）は、履歴を増やさずに一覧へ戻す。
+        window.history.replaceState({}, '', buildUrl({ ...state, journeyIndex: null }));
+        await render();
+        return;
+      }
+      container.innerHTML = renderJourneyDetail(result, journey, state.journeyIndex);
+      bindResultEvents(container, state);
+      if (result.isToday) startRealtimePolling(state, seq);
+      return;
+    }
+
     container.innerHTML = result.found ? renderResults(result) : renderNotFound(result);
     bindResultEvents(container, state);
 
@@ -784,17 +1225,17 @@
 
     return `
       <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-100 p-4 mb-4">
-        <p class="text-sm font-bold text-gray-900">
-          ${esc(result.from.name)} <span class="text-gray-400">→</span> ${esc(result.to.name)}
-        </p>
+        <p class="text-sm font-bold text-gray-900">${endpointHeadingHtml(result)}</p>
         <p class="text-xs font-bold text-gray-500 mt-1">
-          ${esc(formatDateLabel(result.date))} ${esc(result.baseTime)} 以降に出発 ／ ${result.journeys.length}件
+          ${esc(formatDateLabel(result.date))} ${esc(baseTimeLabel(result))} ／ ${result.journeys.length}件
         </p>
+        ${preferenceNoticeHtml(result.preferences)}
         ${notes.map((note) => `<p class="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2">${esc(note)}</p>`).join('')}
       </div>
       <div id="rs-fav-row" class="mb-4"></div>
-      <div class="space-y-4">
-        ${result.journeys.map((journey, index) => renderJourneyCard(journey, index)).join('')}
+      <p class="text-[11px] font-bold text-gray-500 mb-2 px-1">経路をタップすると、乗り換え時刻や通過するバス停を表示します。</p>
+      <div class="space-y-3">
+        ${result.journeys.map((journey, index) => renderJourneyListItem(journey, index)).join('')}
       </div>
       <p class="text-[11px] text-gray-500 font-bold mt-4 px-1">
         運賃・時刻はGTFSデータに基づく目安です。実際の運賃・ダイヤは事業者にご確認ください。
@@ -802,7 +1243,28 @@
     `;
   }
 
-  function renderJourneyCard(journey, index) {
+  /**
+   * 詳細設定が効いていることを結果ヘッダーに明示する（一覧・詳細・見つからない表示で共用）。
+   * 「乗り換えなしで探したから候補が少ない」のか「そもそも便が無い」のかを取り違えないようにするため。
+   * 既定の条件なら何も出さない（従来の画面とまったく同じ見た目になる）。
+   */
+  function preferenceNoticeHtml(preferences) {
+    const labels = preferenceLabels(preferences);
+    if (labels.length === 0) return '';
+    return `<p class="text-xs font-bold text-purple-800 bg-purple-50 border border-purple-200 rounded-lg px-3 py-2 mt-2">
+              詳細設定：${esc(labels.join('・'))}
+            </p>`;
+  }
+
+  /** 結果ヘッダーの「出発地 → 目的地」。観光スポット起点のときはスポット名をタップ可能にする。 */
+  function endpointHeadingHtml(result) {
+    const fromHtml = result.viaSpotFrom ? spotNameButtonHtml(result.viaSpotFrom) : esc(result.from.name);
+    const toHtml = result.viaSpotTo ? spotNameButtonHtml(result.viaSpotTo) : esc(result.to.name);
+    return `${fromHtml} <span class="text-gray-400">→</span> ${toHtml}`;
+  }
+
+  /** 経路の性質を表すバッジ（一覧・詳細で共用。同じ経路が同じ見た目になるようにする）。 */
+  function journeyBadges(journey) {
     const badges = [];
     if (journey.isRecommended) {
       badges.push('<span class="text-[11px] font-bold text-amber-800 bg-amber-100 border border-amber-300 px-2 py-1 rounded">★ おすすめ</span>');
@@ -821,24 +1283,89 @@
     if (journey.arrivalDayOffset > 0) {
       badges.push('<span class="text-[11px] font-bold text-indigo-800 bg-indigo-100 border border-indigo-300 px-2 py-1 rounded">翌日着</span>');
     }
+    // 到着時刻指定では、指定時刻までに着く便が前日の深夜便になることがある
+    if (journey.departureDayOffset < 0) {
+      badges.push('<span class="text-[11px] font-bold text-indigo-800 bg-indigo-100 border border-indigo-300 px-2 py-1 rounded">前日発</span>');
+    }
     if (journey.transferAtRisk) {
       badges.push('<span class="text-[11px] font-bold text-red-800 bg-red-100 border border-red-300 px-2 py-1 rounded">⚠ 乗換に間に合わない可能性</span>');
     }
+    return badges;
+  }
 
-    const fareText = journey.fare.unknown
-      ? '運賃不明'
-      : `${yen(journey.fare.total)}${journey.fare.partial ? '〜（一部不明）' : ''}`;
+  function journeyFareText(journey) {
+    if (journey.fare.unknown) return '運賃不明';
+    return `${yen(journey.fare.total)}${journey.fare.partial ? '〜（一部不明）' : ''}`;
+  }
+
+  /** 一覧で乗車する路線をひと目で分かるようにするチップ列（路線カラー・徒歩は分数のみ）。 */
+  function journeyRouteChips(journey) {
+    return journey.legs
+      .map((leg) => (
+        leg.type === 'walk'
+          ? `<span class="text-[10px] font-bold text-gray-400 shrink-0">徒歩${leg.walkMinutes}分</span>`
+          : routeChip(leg)
+      ))
+      .join('<span class="text-[10px] text-gray-300 shrink-0">›</span>');
+  }
+
+  /**
+   * 経路一覧の1件。出発／到着時刻・所要時間・運賃・乗換回数・徒歩・おすすめ・直通と
+   * 路線カラーのバーだけのシンプル表示にして、タップで詳細（乗り換え時刻など）へ送る。
+   */
+  function renderJourneyListItem(journey, index) {
+    return `
+      <button type="button" data-role="rs-open-journey" data-index="${index}"
+              class="w-full text-left bg-white rounded-2xl shadow-sm border-2 ${journey.isRecommended ? 'border-amber-300' : 'border-gray-100'} p-4 hover:border-purple-300 active:scale-[0.99] transition-all">
+        <div class="flex flex-wrap gap-1 mb-2">${journeyBadges(journey).join(' ')}</div>
+        <div class="flex items-end flex-wrap gap-x-2 gap-y-1">
+          <span class="text-xl font-bold text-gray-900">${esc(timeWithDay(journey.departureTime, journey.departureDayOffset))}</span>
+          <span class="text-sm text-gray-400">→</span>
+          <span class="text-xl font-bold text-purple-700">${esc(timeWithDay(journey.arrivalTime, journey.arrivalDayOffset))}</span>
+          <span class="text-xs font-bold text-gray-500">${journey.durationMinutes}分</span>
+          <span class="ml-auto text-base font-bold text-gray-900">${esc(journeyFareText(journey))}</span>
+        </div>
+        ${renderDurationBar(journey)}
+        <div class="flex items-center flex-wrap gap-1.5 mt-2">
+          ${journeyRouteChips(journey)}
+          <span class="ml-auto text-[11px] font-bold text-purple-700 shrink-0">詳細 ›</span>
+        </div>
+      </button>
+    `;
+  }
+
+  /* ---------- 経路詳細（一覧でタップした1件） ---------- */
+  /** 乗り換え時刻・通過バス停・リアルタイム・便詳細への導線はこの画面に置く。 */
+  function renderJourneyDetail(result, journey, index) {
+    const total = result.journeys.length;
+    const prev = index > 0 ? result.journeys[index - 1] : null;
+    const next = index < total - 1 ? result.journeys[index + 1] : null;
+    const navButtonClass = 'flex-1 bg-white border-2 border-purple-200 text-purple-700 rounded-xl px-3 py-3 text-xs font-bold hover:bg-purple-50 active:scale-95 transition-all';
+
+    const navHtml = prev || next
+      ? `<div class="flex gap-2 mt-4">
+           ${prev ? `<button type="button" data-role="rs-open-journey" data-index="${index - 1}" class="${navButtonClass}">‹ 前の経路（${esc(timeWithDay(prev.departureTime, prev.departureDayOffset))}発）</button>` : ''}
+           ${next ? `<button type="button" data-role="rs-open-journey" data-index="${index + 1}" class="${navButtonClass}">次の経路（${esc(timeWithDay(next.departureTime, next.departureDayOffset))}発）›</button>` : ''}
+         </div>`
+      : '';
 
     return `
+      <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-100 p-4 mb-4">
+        <p class="text-sm font-bold text-gray-900">${endpointHeadingHtml(result)}</p>
+        <p class="text-xs font-bold text-gray-500 mt-1">
+          ${esc(formatDateLabel(result.date))} ${esc(baseTimeLabel(result))} ／ ${total}件中${index + 1}件目
+        </p>
+        ${preferenceNoticeHtml(result.preferences)}
+      </div>
       <article class="bg-white rounded-2xl shadow-sm border-2 ${journey.isRecommended ? 'border-amber-300' : 'border-gray-100'} overflow-hidden">
         <div class="px-4 pt-4 pb-3 border-b border-gray-100">
-          <div class="flex flex-wrap gap-1 mb-2">${badges.join(' ')}</div>
+          <div class="flex flex-wrap gap-1 mb-2">${journeyBadges(journey).join(' ')}</div>
           <div class="flex items-end flex-wrap gap-x-3 gap-y-1">
             <span class="text-2xl font-bold text-gray-900">${esc(timeWithDay(journey.departureTime, journey.departureDayOffset))}</span>
             <span class="text-gray-400">→</span>
             <span class="text-2xl font-bold text-purple-700">${esc(timeWithDay(journey.arrivalTime, journey.arrivalDayOffset))}</span>
             <span class="text-sm font-bold text-gray-500">${journey.durationMinutes}分</span>
-            <span class="ml-auto text-lg font-bold text-gray-900">${esc(fareText)}</span>
+            <span class="ml-auto text-lg font-bold text-gray-900">${esc(journeyFareText(journey))}</span>
           </div>
           ${renderDurationBar(journey)}
         </div>
@@ -846,6 +1373,10 @@
           ${renderTimeline(journey, index)}
         </div>
       </article>
+      ${navHtml}
+      <p class="text-[11px] text-gray-500 font-bold mt-4 px-1">
+        運賃・時刻はGTFSデータに基づく目安です。実際の運賃・ダイヤは事業者にご確認ください。
+      </p>
     `;
   }
 
@@ -1026,10 +1557,13 @@
   /* ---------- 見つからなかったとき（仕様書 6.6） ---------- */
   function renderNotFound(result) {
     // 日付表記（「8月13日（木）」）は画面側で組み立てる（サーバーの文言に日付を埋め込まない）
+    const suggestionLabels = {
+      'first-bus': (s) => `この日の始発（${s.time}）で検索`,
+      'first-arrival': (s) => `この日の最も早い到着（${s.time}）で検索`,
+      'next-service-day': (s) => `次の運行日（${formatDateLabel(s.date)}）で検索`
+    };
     const suggestionLabel = result.suggestion
-      ? (result.suggestion.kind === 'first-bus'
-        ? `この日の始発（${result.suggestion.time}）で検索`
-        : `次の運行日（${formatDateLabel(result.suggestion.date)}）で検索`)
+      ? (suggestionLabels[result.suggestion.kind] || suggestionLabels['next-service-day'])(result.suggestion)
       : '';
     const suggestionButton = result.suggestion
       ? `<button type="button" data-role="rs-apply-suggestion"
@@ -1065,10 +1599,21 @@
          </div>`
       : '';
 
+    // 詳細設定が原因で0件だったとき（サーバー側で「設定を外せば見つかる」と判定済み）。
+    // 日付・時刻を変えさせるより、設定を外す導線を出す方が正しい案内になる。
+    const clearPreferencesButton = result.canRelaxPreferences
+      ? `<button type="button" data-role="rs-clear-preferences"
+                 class="mt-3 w-full bg-purple-600 text-white py-3 rounded-xl font-bold shadow hover:bg-purple-700 active:scale-95 transition-all">
+           詳細設定を解除して検索
+         </button>`
+      : '';
+
     return `
       <div class="bg-yellow-50 border-2 border-yellow-300 rounded-2xl p-5">
         <p class="text-sm font-bold text-yellow-900">${esc(result.message || '経路が見つかりませんでした。')}</p>
-        ${result.from && result.to ? `<p class="text-xs font-bold text-yellow-800 mt-2">${esc(result.from.name)} → ${esc(result.to.name)}（${esc(formatDateLabel(result.date))} ${esc(result.baseTime)} 以降）</p>` : ''}
+        ${result.from && result.to ? `<p class="text-xs font-bold text-yellow-800 mt-2">${esc(result.from.name)} → ${esc(result.to.name)}（${esc(formatDateLabel(result.date))} ${esc(baseTimeLabel(result))}）</p>` : ''}
+        ${preferenceNoticeHtml(result.preferences)}
+        ${clearPreferencesButton}
         ${suggestionButton}
         ${alternatives}
         ${suggestions}
@@ -1076,9 +1621,39 @@
     `;
   }
 
+  /**
+   * 経路詳細の「経路一覧へ戻る」。一覧→詳細はpushStateなので、通常はブラウザの戻ると
+   * 同じ動き（一覧のスクロール位置・検索フォームの入力がそのまま戻る）にする。
+   * 詳細URLを直接開いた・リロードした場合だけ一覧URLへ遷移する（smartBackの判定）。
+   */
+  function bindBackToList(scope, state) {
+    const button = scope.querySelector('[data-role="rs-back-to-list"]');
+    if (!button) return;
+    button.addEventListener('click', () => {
+      const listUrl = buildUrl({ ...state, journeyIndex: null });
+      if (typeof window.smartBack === 'function') window.smartBack(listUrl);
+      else navigate(listUrl);
+    });
+  }
+
   /* ---------- 結果内の操作 ---------- */
   function bindResultEvents(container, state) {
     paintFavRow(state);
+
+    container.querySelectorAll('[data-role="rs-spot-name"]').forEach((button) => {
+      button.addEventListener('click', () => openSpotModal(button.dataset.spotId));
+    });
+
+    // 一覧のカード（＝詳細を開く）と、詳細内の「前の経路／次の経路」。
+    // 詳細から詳細への移動だけは履歴を積まない（戻るで必ず一覧に帰れるようにする）。
+    container.querySelectorAll('[data-role="rs-open-journey"]').forEach((button) => {
+      button.addEventListener('click', () => {
+        navigate(
+          buildUrl({ ...state, journeyIndex: Number(button.dataset.index) }),
+          { replace: state.journeyIndex !== null }
+        );
+      });
+    });
 
     container.querySelectorAll('[data-role="rs-toggle-stops"]').forEach((button) => {
       button.addEventListener('click', () => {
@@ -1093,17 +1668,27 @@
       });
     });
 
+    const clearPreferencesButton = container.querySelector('[data-role="rs-clear-preferences"]');
+    if (clearPreferencesButton) {
+      clearPreferencesButton.addEventListener('click', () => {
+        navigate(buildUrl({ ...state, journeyIndex: null, ...PREFERENCE_DEFAULTS }));
+      });
+    }
+
     const suggestionButton = container.querySelector('[data-role="rs-apply-suggestion"]');
     if (suggestionButton) {
       suggestionButton.addEventListener('click', () => {
-        navigate(buildUrl({ ...state, date: suggestionButton.dataset.date, time: suggestionButton.dataset.time }));
+        // 条件を変えた再検索なので、開いていた経路（journey）は必ず外して一覧から始める
+        navigate(buildUrl({
+          ...state, journeyIndex: null, date: suggestionButton.dataset.date, time: suggestionButton.dataset.time
+        }));
       });
     }
 
     container.querySelectorAll('[data-role="rs-use-stop"]').forEach((button) => {
       button.addEventListener('click', () => {
         // 見つからなかった側（目的地優先）を、提示したバス停に置き換えて再検索する
-        const next = { ...state };
+        const next = { ...state, journeyIndex: null };
         if (lastResult && lastResult.reason === 'stop-not-found' && !state.fromKey) {
           next.fromText = button.dataset.name;
           next.fromKey = button.dataset.key;
