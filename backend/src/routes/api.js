@@ -186,23 +186,26 @@ router.put('/admin/settings', requireAdminAuth, async (req, res) => {
     ['operator_name', operatorName ?? '']
   ];
 
+  const client = await pool.connect();
   try {
-    await pool.query('BEGIN');
+    await client.query('BEGIN');
     for (const [key, value] of settingsToSave) {
-      await pool.query(
+      await client.query(
         `INSERT INTO system_settings (key, value) VALUES ($1, $2)
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
         [key, value]
       );
     }
-    await pool.query('COMMIT');
+    await client.query('COMMIT');
 
     const settings = await loadSystemSettings();
     res.json(settings);
   } catch (err) {
-    await pool.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined);
     console.error('[api] /admin/settings 更新エラー:', err);
     res.status(500).json({ error: '管理設定の更新に失敗しました。' });
+  } finally {
+    client.release();
   }
 });
 
@@ -419,13 +422,16 @@ async function readTimetableFromSchedule(routeId) {
      ORDER BY direction_id ASC, trip_index ASC`,
     [routeId, activeServiceIds]
   );
+  // 順序はst.stop_sequence（便自身の中での0始まりの連番）を使う。s.seq_orderは
+  // 路線内の表示順専用（service_idグループ横断の共有値）であり、枝分かれ・逆回りの
+  // ある便ではこの便自身の実際の停車順と一致しないため使わない（点検所見 C-1 参照）。
   const times = await pool.query(
-    `SELECT st.trip_id, s.seq_order, s.name AS stop_name, st.scheduled_time, st.is_through
+    `SELECT st.trip_id, st.stop_sequence AS seq_order, s.name AS stop_name, st.scheduled_time, st.is_through
      FROM schedule_stop_times st
      JOIN stops s ON s.id = st.stop_id
      JOIN schedule_trips stp ON stp.id = st.trip_id
      WHERE stp.route_id = $1 AND stp.service_id = ANY($2::text[])
-     ORDER BY st.trip_id ASC, s.seq_order ASC`,
+     ORDER BY st.trip_id ASC, st.stop_sequence ASC`,
     [routeId, activeServiceIds]
   );
 

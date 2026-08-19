@@ -39,11 +39,21 @@ CREATE TABLE IF NOT EXISTS feeds (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- バス停マスタ。物理バス停（GTFSのstop_id）+ occurrence（同一route_id・direction_id内で
+-- その物理バス停を何回目の通過として登録したか。循環路線で1便が同じ停留所を複数回通る
+-- ケースの識別に使う。0始まり）で一意化する。この2列が実体キーであり、
+-- service_id（平日/土休日等）をまたいでも同じ物理バス停・同じ通過回目なら同じ行を共有する
+-- （service_idごとに行を分けると、同じ物理停留所の実績が区間統計上で無用に分裂するため）。
+-- seq_orderは路線内の表示順専用（一覧表示・バス停マップの並び替えにのみ使う）。
+-- 便ごとの実際の停車順（枝分かれ・逆回りで異なりうる）はschedule_stop_times.stop_sequenceを
+-- 参照すること。seq_orderをその用途に使わないこと（旧設計の欠陥。docs参照）。
 CREATE TABLE IF NOT EXISTS stops (
   id            SERIAL PRIMARY KEY,
   route_id      TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
   direction_id  INTEGER NOT NULL DEFAULT 0,
-  seq_order     INTEGER NOT NULL,              -- 路線内の停留所順序（0始まり）
+  gtfs_stop_id  TEXT NOT NULL,                 -- GTFS stops.txt の stop_id（物理バス停の実体識別）
+  occurrence    INTEGER NOT NULL DEFAULT 0,    -- 同一route_id・direction_id内でこの物理バス停が何回目の通過かの通し番号（0始まり）
+  seq_order     INTEGER NOT NULL,              -- 路線内の表示順専用（0始まり）。便ごとの順序には使わない
   name          TEXT NOT NULL,
   name_kana     TEXT,
   name_en       TEXT,
@@ -51,7 +61,7 @@ CREATE TABLE IF NOT EXISTS stops (
   lon           DOUBLE PRECISION NOT NULL,
   notice        TEXT,
   timetable_link TEXT,
-  UNIQUE (route_id, direction_id, seq_order)
+  UNIQUE (route_id, direction_id, gtfs_stop_id, occurrence)
 );
 
 -- 時刻表: 便（トリップ）ごと・停留所ごとの定刻。
@@ -81,6 +91,10 @@ CREATE TABLE IF NOT EXISTS schedule_trip_frequencies (
 CREATE TABLE IF NOT EXISTS schedule_stop_times (
   trip_id       INTEGER NOT NULL REFERENCES schedule_trips(id) ON DELETE CASCADE,
   stop_id       INTEGER NOT NULL REFERENCES stops(id) ON DELETE CASCADE,
+  stop_sequence INTEGER NOT NULL,               -- この便自身の中での停車順（0始まりの連番）。
+                                                 -- stops.seq_orderは路線内の表示順（service_idグループ
+                                                 -- 横断の共有値）であり便ごとの実際の順序とは一致しないため、
+                                                 -- 順序に依存する判定はこちらを正として参照する
   scheduled_time TEXT,                          -- "H:mm" 形式。NULLは非停車(↓)
   is_through    BOOLEAN NOT NULL DEFAULT FALSE,
   stop_headsign TEXT,                           -- GTFS stop_times.txt の stop_headsign（枝分かれ路線の停留所別行先）

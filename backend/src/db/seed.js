@@ -63,20 +63,29 @@ function toClockTime(value) {
 
 /**
  * 便のstop_times行（stop_sequence昇順）に「同一stop_idが同じ便の中で何回目の通過か」
- * （0始まりの通過回数）を付与する。循環路線の折返しなどで同じ物理停留所を1便の中で
- * 複数回通る場合、stop_idだけをキーにすると2回目以降の通過がstopsテーブル上で
- * 1回目と同一行に潰れてしまう（定刻・進捗が上書きされる）ため、occurrenceKey
- * （`${stop_id}#${通過回数}`）を停留所行の識別キーとして使う。
- * seedStopsAndTimetable内の2つのループ（stops構築／schedule_stop_times構築）で
- * 同じ並び・同じロジックを使うことで、同じ便の同じ通過には必ず同じoccurrenceKeyが付く。
+ * （0始まりの通過回数=occurrence）を付与する。循環路線の折返しなどで同じ物理停留所を
+ * 1便の中で複数回通る場合、stop_idだけをキーにすると2回目以降の通過がstopsテーブル上で
+ * 1回目と同一行に潰れてしまう（定刻・進捗が上書きされる）ため、(gtfsStopId, occurrence)
+ * の組を停留所行の識別キーとして使う。
+ *
+ * occurrenceは「その便自身の中で何回目の通過か」という便に閉じた概念なので、
+ * 呼び出しは必ず「1便ぶんのstop_times行（tripStopRows）」を渡すこと。この前提のもと、
+ * 同じ物理停留所への同じ順番の通過には、どのservice_idグループ・どの便から見ても
+ * 必ず同じ(gtfsStopId, occurrence)が付く。seedStopsAndTimetable内の複数箇所
+ * （stops構築／schedule_stop_times構築）で同じ並び・同じロジックを使うことで、
+ * それらの間でも一貫したキーになる。
  */
 function withOccurrenceKeys(sortedStopRows) {
   const seenCounts = new Map();
   return sortedStopRows.map((row) => {
-    const count = seenCounts.get(row.stop_id) || 0;
-    seenCounts.set(row.stop_id, count + 1);
-    return { row, occurrenceKey: `${row.stop_id}#${count}` };
+    const occurrence = seenCounts.get(row.stop_id) || 0;
+    seenCounts.set(row.stop_id, occurrence + 1);
+    return { row, gtfsStopId: row.stop_id, occurrence, occurrenceKey: `${row.stop_id}#${occurrence}` };
   });
+}
+
+function sortByStopSequence(rows) {
+  return rows.slice().sort((a, b) => Number.parseInt(a.stop_sequence, 10) - Number.parseInt(b.stop_sequence, 10));
 }
 
 /**
@@ -245,53 +254,70 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
 
     if (directionServiceTrips.length === 0) continue;
 
-    for (const { directionId, serviceId, trips: routeTrips } of directionServiceTrips) {
-      if (routeTrips.length === 0) continue;
+    // stopsは(route_id, direction_id)単位で共有するマスタなので、同じ方向に属する
+    // service_idグループ（平日／土休日など）をまとめて扱う。下のstops構築ループで
+    // 全service_idの全便を横断して1回だけ行うことで、平日グループが書いたstops行を
+    // 土休日グループが（別の物理バス停のデータで）上書きする事故を構造的に防ぐ
+    // （旧設計はservice_idごとにseq_orderを0から振り直しており、UNIQUE制約に
+    // service_idが入っていなかったため、この上書きが起きていた）。
+    const groupsByDirection = new Map();
+    for (const group of directionServiceTrips) {
+      if (group.trips.length === 0) continue;
+      if (!groupsByDirection.has(group.directionId)) groupsByDirection.set(group.directionId, []);
+      groupsByDirection.get(group.directionId).push(group);
+    }
 
-      // occurrenceKey（`${stop_id}#${便内の通過回数}`）ごとに、停留所テーブル行を1つ持つ。
-      // 循環路線の折返しで同じ物理停留所を1便の中で複数回通っても、通過回数ごとに
-      // 別行になるため、2回目以降の定刻・進捗が1回目の行に潰れて上書きされることがない。
-      const routeStopIdByOccurrence = new Map();
-      const stopSeqByOccurrence = new Map();
+    for (const [directionId, serviceGroups] of groupsByDirection.entries()) {
+      // ==== stops構築（この方向に属する全service_idの全便を横断して1回だけ行う）====
+      // (gtfsStopId, occurrence) の組ごとに停留所テーブル行を1つ持つ。occurrenceは
+      // 「便自身の中で何回目にその物理停留所を通るか」という便に閉じた概念なので、
+      // service_idグループが違っても同じ意味になる（withOccurrenceKeys参照）。
+      // これにより、平日グループと土休日グループが同じ物理停留所を通る便を持つ場合、
+      // 同じstops行を安全に共有できる（区間統計等が無用に分裂しない）。
+      const gtfsStopIdByOccurrence = new Map(); // occurrenceKey -> GTFS stop_id
+      const occurrenceByKey = new Map();        // occurrenceKey -> occurrence
+      const stopSeqByOccurrence = new Map();    // occurrenceKey -> 表示順算出用の最小stop_sequence
 
-      for (const trip of routeTrips) {
-        const tripStopRows = (stopTimesByTrip.get(trip.trip_id) || [])
-          .slice()
-          .sort((a, b) => Number.parseInt(a.stop_sequence, 10) - Number.parseInt(b.stop_sequence, 10));
+      for (const { trips: routeTrips } of serviceGroups) {
+        for (const trip of routeTrips) {
+          const tripStopRows = sortByStopSequence(stopTimesByTrip.get(trip.trip_id) || []);
 
-        for (const { row, occurrenceKey } of withOccurrenceKeys(tripStopRows)) {
-          const stopMeta = stopMetaById.get(row.stop_id);
-          if (!stopMeta) continue;
-          const seq = Number.parseInt(row.stop_sequence, 10);
-          if (Number.isNaN(seq)) continue;
+          for (const { row, occurrenceKey, gtfsStopId, occurrence } of withOccurrenceKeys(tripStopRows)) {
+            const stopMeta = stopMetaById.get(row.stop_id);
+            if (!stopMeta) continue;
+            const seq = Number.parseInt(row.stop_sequence, 10);
+            if (Number.isNaN(seq)) continue;
 
-          if (!stopSeqByOccurrence.has(occurrenceKey) || seq < stopSeqByOccurrence.get(occurrenceKey)) {
-            stopSeqByOccurrence.set(occurrenceKey, seq);
+            if (!stopSeqByOccurrence.has(occurrenceKey) || seq < stopSeqByOccurrence.get(occurrenceKey)) {
+              stopSeqByOccurrence.set(occurrenceKey, seq);
+            }
+            gtfsStopIdByOccurrence.set(occurrenceKey, gtfsStopId);
+            occurrenceByKey.set(occurrenceKey, occurrence);
           }
-          routeStopIdByOccurrence.set(occurrenceKey, row.stop_id);
         }
       }
 
-      const occurrenceKeys = Array.from(routeStopIdByOccurrence.keys()).sort((a, b) => {
+      const occurrenceKeys = Array.from(gtfsStopIdByOccurrence.keys()).sort((a, b) => {
         const aSeq = stopSeqByOccurrence.get(a) ?? Number.MAX_SAFE_INTEGER;
         const bSeq = stopSeqByOccurrence.get(b) ?? Number.MAX_SAFE_INTEGER;
         return aSeq - bSeq;
       });
 
-      // seq_orderは表示順のためだけの値なので、（複数の異なる物理停留所が同じ最小
-      // stop_sequenceを持ち得る=衝突し得る）生のstop_sequenceをそのまま使わず、
-      // ソート後に0始まりで詰め直す。
+      // seq_orderは表示順専用の値（一覧表示・バス停マップの並び替えにのみ使う）。
+      // 便ごとの実際の停車順はこのあと別途 schedule_stop_times.stop_sequence に持たせる。
       const stopRowIdByOccurrence = new Map();
       let seqOrder = 0;
       for (const occurrenceKey of occurrenceKeys) {
-        const stopId = routeStopIdByOccurrence.get(occurrenceKey);
-        const meta = stopMetaById.get(stopId);
+        const gtfsStopId = gtfsStopIdByOccurrence.get(occurrenceKey);
+        const occurrence = occurrenceByKey.get(occurrenceKey);
+        const meta = stopMetaById.get(gtfsStopId);
         if (!meta) continue;
         const result = await client.query(
-          `INSERT INTO stops (route_id, direction_id, seq_order, name, name_kana, name_en, lat, lon, notice, timetable_link)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-           ON CONFLICT (route_id, direction_id, seq_order) DO UPDATE
-             SET name = EXCLUDED.name,
+          `INSERT INTO stops (route_id, direction_id, gtfs_stop_id, occurrence, seq_order, name, name_kana, name_en, lat, lon, notice, timetable_link)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           ON CONFLICT (route_id, direction_id, gtfs_stop_id, occurrence) DO UPDATE
+             SET seq_order = EXCLUDED.seq_order,
+                 name = EXCLUDED.name,
                  name_kana = EXCLUDED.name_kana,
                  name_en = EXCLUDED.name_en,
                  lat = EXCLUDED.lat,
@@ -299,92 +325,94 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
                  notice = EXCLUDED.notice,
                  timetable_link = EXCLUDED.timetable_link
            RETURNING id`,
-          [routeId, directionId, seqOrder, meta.stop_name, '', '', parseFloat(meta.stop_lat), parseFloat(meta.stop_lon), '', '']
+          [routeId, directionId, gtfsStopId, occurrence, seqOrder, meta.stop_name, '', '', parseFloat(meta.stop_lat), parseFloat(meta.stop_lon), '', '']
         );
         stopRowIdByOccurrence.set(occurrenceKey, result.rows[0].id);
         seqOrder += 1;
         totalStops++;
       }
 
-      const routeTripIds = [];
-      for (const [tripIndex, trip] of routeTrips.entries()) {
-        const firstStop = (stopTimesByTrip.get(trip.trip_id) || [])
-          .slice()
-          .sort((a, b) => Number.parseInt(a.stop_sequence, 10) - Number.parseInt(b.stop_sequence, 10))[0];
-        // 仕様書 4.3 の始発時刻の定義（departure_time優先、片方のみなら記載のある方）は
-        // この `departure_time || arrival_time` が既に満たしている。
-        const firstStopTime = firstStop ? toClockTime(firstStop.departure_time || firstStop.arrival_time) : null;
-        const headsign = trip.trip_headsign || null;
-        const tripInsert = await client.query(
-          `INSERT INTO schedule_trips (route_id, direction_id, service_id, trip_index, gtfs_trip_id, first_stop_time, headsign)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (route_id, direction_id, service_id, trip_index) DO UPDATE
-             SET gtfs_trip_id = EXCLUDED.gtfs_trip_id,
-                 first_stop_time = EXCLUDED.first_stop_time,
-                 headsign = EXCLUDED.headsign
-           RETURNING id`,
-          [routeId, directionId, serviceId, tripIndex, trip.trip_id, firstStopTime, headsign]
-        );
-        routeTripIds.push(tripInsert.rows[0].id);
-        totalTrips++;
+      // ==== schedule_trips / schedule_stop_times構築（service_idグループごと）====
+      for (const { serviceId, trips: routeTrips } of serviceGroups) {
+        const routeTripIds = [];
+        for (const [tripIndex, trip] of routeTrips.entries()) {
+          const firstStop = sortByStopSequence(stopTimesByTrip.get(trip.trip_id) || [])[0];
+          // 仕様書 4.3 の始発時刻の定義（departure_time優先、片方のみなら記載のある方）は
+          // この `departure_time || arrival_time` が既に満たしている。
+          const firstStopTime = firstStop ? toClockTime(firstStop.departure_time || firstStop.arrival_time) : null;
+          const headsign = trip.trip_headsign || null;
+          const tripInsert = await client.query(
+            `INSERT INTO schedule_trips (route_id, direction_id, service_id, trip_index, gtfs_trip_id, first_stop_time, headsign)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (route_id, direction_id, service_id, trip_index) DO UPDATE
+               SET gtfs_trip_id = EXCLUDED.gtfs_trip_id,
+                   first_stop_time = EXCLUDED.first_stop_time,
+                   headsign = EXCLUDED.headsign
+             RETURNING id`,
+            [routeId, directionId, serviceId, tripIndex, trip.trip_id, firstStopTime, headsign]
+          );
+          routeTripIds.push(tripInsert.rows[0].id);
+          totalTrips++;
 
-        // frequencies.txt（任意ファイル）に定義があれば取り込む。
-        // 当日便生成時に仮想便へ展開される（仕様書 3.4）。
-        const frequencyRows = frequenciesByTripId.get(trip.trip_id) || [];
-        if (frequencyRows.length > 0) {
-          await client.query(`DELETE FROM schedule_trip_frequencies WHERE trip_id = $1`, [
-            tripInsert.rows[0].id
-          ]);
-          for (const freq of frequencyRows) {
-            await client.query(
-              `INSERT INTO schedule_trip_frequencies (trip_id, start_time, end_time, headway_secs, exact_times)
-               VALUES ($1, $2, $3, $4, $5)
-               ON CONFLICT (trip_id, start_time) DO UPDATE
-                 SET end_time = EXCLUDED.end_time,
-                     headway_secs = EXCLUDED.headway_secs,
-                     exact_times = EXCLUDED.exact_times`,
-              [tripInsert.rows[0].id, freq.start_time, freq.end_time, freq.headway_secs, freq.exact_times]
-            );
-            totalFrequencies++;
+          // frequencies.txt（任意ファイル）に定義があれば取り込む。
+          // 当日便生成時に仮想便へ展開される（仕様書 3.4）。
+          const frequencyRows = frequenciesByTripId.get(trip.trip_id) || [];
+          if (frequencyRows.length > 0) {
+            await client.query(`DELETE FROM schedule_trip_frequencies WHERE trip_id = $1`, [
+              tripInsert.rows[0].id
+            ]);
+            for (const freq of frequencyRows) {
+              await client.query(
+                `INSERT INTO schedule_trip_frequencies (trip_id, start_time, end_time, headway_secs, exact_times)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (trip_id, start_time) DO UPDATE
+                   SET end_time = EXCLUDED.end_time,
+                       headway_secs = EXCLUDED.headway_secs,
+                       exact_times = EXCLUDED.exact_times`,
+                [tripInsert.rows[0].id, freq.start_time, freq.end_time, freq.headway_secs, freq.exact_times]
+              );
+              totalFrequencies++;
+            }
           }
         }
-      }
 
-      for (const [tripIndex, trip] of routeTrips.entries()) {
-        const tripStopRows = (stopTimesByTrip.get(trip.trip_id) || [])
-          .slice()
-          .sort((a, b) => Number.parseInt(a.stop_sequence, 10) - Number.parseInt(b.stop_sequence, 10));
+        for (const [tripIndex, trip] of routeTrips.entries()) {
+          const tripStopRows = sortByStopSequence(stopTimesByTrip.get(trip.trip_id) || []);
 
-        // この便の全停車駅の最小・最大シーケンス番号を求める（始発・終点の通過誤判定防止）
-        const allSeqs = tripStopRows.map(row => Number.parseInt(row.stop_sequence, 10)).filter(n => !Number.isNaN(n));
-        const minSeq = Math.min(...allSeqs);
-        const maxSeq = Math.max(...allSeqs);
+          // この便の全停車駅の最小・最大シーケンス番号を求める（始発・終点の通過誤判定防止）
+          const allSeqs = tripStopRows.map(row => Number.parseInt(row.stop_sequence, 10)).filter(n => !Number.isNaN(n));
+          const minSeq = Math.min(...allSeqs);
+          const maxSeq = Math.max(...allSeqs);
 
-        // occurrenceKeyの算出は上のstops構築ループと同じ並び・同じロジックで行う必要がある
-        // （同じ便の同じ通過には必ず同じoccurrenceKeyが付くようにするため）。
-        for (const { row, occurrenceKey } of withOccurrenceKeys(tripStopRows)) {
-          const stopMeta = stopMetaById.get(row.stop_id);
-          if (!stopMeta) continue;
-          const stopSeq = Number.parseInt(row.stop_sequence, 10);
-          const stopRowId = stopRowIdByOccurrence.get(occurrenceKey);
-          if (!stopRowId) continue;
+          // occurrenceKeyの算出は上のstops構築ループと同じ並び・同じロジックで行う必要がある
+          // （同じ便の同じ通過には必ず同じoccurrenceKeyが付くようにするため）。
+          // localSeq（withOccurrenceKeysが返す配列でのインデックス、0始まり）が、
+          // この便自身の中での実際の停車順＝schedule_stop_times.stop_sequenceになる。
+          for (const [localSeq, { row, occurrenceKey }] of withOccurrenceKeys(tripStopRows).entries()) {
+            const stopMeta = stopMetaById.get(row.stop_id);
+            if (!stopMeta) continue;
+            const stopSeq = Number.parseInt(row.stop_sequence, 10);
+            const stopRowId = stopRowIdByOccurrence.get(occurrenceKey);
+            if (!stopRowId) continue;
 
-          // 始発バス停（最小シーケンス）と終点バス停（最大シーケンス）は、
-          // pickup_type/drop_off_type が 1 でも通過扱いにしない（時刻を正しく表示するため）
-          const isFirst = stopSeq === minSeq;
-          const isLast = stopSeq === maxSeq;
-          const isThrough = !isFirst && !isLast && (row.pickup_type === '1' || row.drop_off_type === '1');
-          const scheduledTime = isThrough ? null : toClockTime(row.departure_time || row.arrival_time);
-          const stopHeadsign = (row.stop_headsign || '').trim() || null;
-          await client.query(
-            `INSERT INTO schedule_stop_times (trip_id, stop_id, scheduled_time, is_through, stop_headsign)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (trip_id, stop_id) DO UPDATE
-               SET scheduled_time = EXCLUDED.scheduled_time,
-                   is_through = EXCLUDED.is_through,
-                   stop_headsign = EXCLUDED.stop_headsign`,
-            [routeTripIds[tripIndex], stopRowId, scheduledTime, isThrough, stopHeadsign]
-          );
+            // 始発バス停（最小シーケンス）と終点バス停（最大シーケンス）は、
+            // pickup_type/drop_off_type が 1 でも通過扱いにしない（時刻を正しく表示するため）
+            const isFirst = stopSeq === minSeq;
+            const isLast = stopSeq === maxSeq;
+            const isThrough = !isFirst && !isLast && (row.pickup_type === '1' || row.drop_off_type === '1');
+            const scheduledTime = isThrough ? null : toClockTime(row.departure_time || row.arrival_time);
+            const stopHeadsign = (row.stop_headsign || '').trim() || null;
+            await client.query(
+              `INSERT INTO schedule_stop_times (trip_id, stop_id, stop_sequence, scheduled_time, is_through, stop_headsign)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT (trip_id, stop_id) DO UPDATE
+                 SET stop_sequence = EXCLUDED.stop_sequence,
+                     scheduled_time = EXCLUDED.scheduled_time,
+                     is_through = EXCLUDED.is_through,
+                     stop_headsign = EXCLUDED.stop_headsign`,
+              [routeTripIds[tripIndex], stopRowId, localSeq, scheduledTime, isThrough, stopHeadsign]
+            );
+          }
         }
       }
     }

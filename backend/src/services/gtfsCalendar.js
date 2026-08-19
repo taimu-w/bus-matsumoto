@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { getGtfsDir } = require('./gtfsFeedManager');
 const { getEnabledGtfsFeedIds } = require('../config/feeds');
+const { getServiceDateString, getDayOfWeek: getDayOfWeekJST } = require('../utils/time');
 
 function parseCsvLine(line) {
   const values = [];
@@ -127,19 +128,20 @@ function isServiceActiveOnDayOfWeek(calRow, dayOfWeek) {
   return dayMap[dayOfWeek] === true;
 }
 
+// 曜日・日付はサーバのローカルタイムゾーンに関わらずAsia/Tokyo(JST)で判定する
+// （utils/time.jsの実装に委譲）。コンテナがUTCで動く場合、ローカル系メソッド
+// （getDay()・getFullYear()等）だとJST 00:00〜09:00に前日の曜日・日付を返し、
+// 運行日判定が丸ごと1日ずれていた（点検所見 H-8）。
 function getDayOfWeek(date) {
-  const d = new Date(date);
-  return d.getDay();
+  return getDayOfWeekJST(date);
 }
 
 function formatDate(date) {
-  const d = new Date(date);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}${month}${day}`;
+  return getServiceDateString(date).replace(/-/g, '');
 }
 
 module.exports = {
-  getActiveServiceIds
+  getActiveServiceIds,
+  getDayOfWeek,
+  formatDate
 };

@@ -15,6 +15,28 @@ const { qualifyRouteId } = require('./gtfsFeedManager');
 const { nowInTokyo } = require('../utils/time');
 
 const APPROACH_WINDOW_SECONDS = 30 * 60;
+// 定刻を過ぎた遅延便も候補として拾うための下限（H-7）。定刻だけで絞ると、
+// 遅れて向かっている途中のバスが定刻を過ぎた瞬間に一覧から消えてしまう。
+const MAX_DELAY_LOOKBACK_SECONDS = 30 * 60;
+
+/**
+ * 発車時刻(departureSeconds)が接近中バス一覧の候補ウィンドウに入るかどうか。
+ * 下限を定刻ではなく「定刻 - MAX_DELAY_LOOKBACK_SECONDS」まで広げているのは、
+ * 大幅遅延中のバスをここで落とさず、リアルタイム突合後の判定（computeEtaSeconds）に
+ * 委ねるため（H-7）。
+ */
+function isWithinApproachWindow(departureSeconds, nowSeconds) {
+  return departureSeconds >= nowSeconds - MAX_DELAY_LOOKBACK_SECONDS
+    && departureSeconds <= nowSeconds + APPROACH_WINDOW_SECONDS;
+}
+
+/**
+ * 実質の到着予測秒。リアルタイムが取れた便は定刻+遅延分、取れない便は定刻そのもの
+ * （soft-fail方針の維持）。
+ */
+function computeEtaSeconds(departureSeconds, entry) {
+  return departureSeconds + (entry.hasRealtime ? (entry.delayMinutes || 0) * 60 : 0);
+}
 
 /**
  * @param {string} stopKey バス停検索のstopKey（/busstop/{stopKey}と同じ）
@@ -35,24 +57,23 @@ async function getApproachingBuses(stopKey, { date, platform } = {}) {
 
     const departures = timetable.hours
       .flatMap((block) => block.departures)
-      .filter((d) => d.seconds >= nowSeconds && d.seconds <= nowSeconds + APPROACH_WINDOW_SECONDS)
+      .filter((d) => isWithinApproachWindow(d.seconds, nowSeconds))
       .sort((a, b) => a.seconds - b.seconds);
 
     const built = [];
     for (const departure of departures) {
       const entry = await buildApproachingEntry(departure, timetable.stop.stopName);
-      built.push({ entry, departureSeconds: departure.seconds });
+      const etaSeconds = computeEtaSeconds(departure.seconds, entry);
+      // 予測到着が現在時刻より前になった便は「もう来た」とみなして落とす（H-7）。
+      if (etaSeconds < nowSeconds) continue;
+      built.push({ entry, etaSeconds });
     }
 
     // 一覧は「接近時間が速い順」に並べる。リアルタイム情報がある便は定刻+遅延分（delayMinutesは
     // computeDelayMinutes()により0以上のみ）を実質の到着予測とみなし、無い便は定刻のまま比較する。
     // predictedArrivalTimeの文字列同士を比較しないのは、minutesToTimeStr()が24時で巻き戻るため
-    // 日付跨ぎの便で誤った順序になり得るため（定刻ベースのdepartureSecondsは巻き戻らない）。
-    built.sort((a, b) => {
-      const etaA = a.departureSeconds + (a.entry.hasRealtime ? (a.entry.delayMinutes || 0) * 60 : 0);
-      const etaB = b.departureSeconds + (b.entry.hasRealtime ? (b.entry.delayMinutes || 0) * 60 : 0);
-      return etaA - etaB;
-    });
+    // 日付跨ぎの便で誤った順序になり得るため（定刻ベースのetaSecondsは巻き戻らない）。
+    built.sort((a, b) => a.etaSeconds - b.etaSeconds);
 
     approachingBuses.push(...built.map((b) => b.entry));
   }
@@ -123,4 +144,4 @@ async function buildApproachingEntry(departure, targetStopName) {
   return entry;
 }
 
-module.exports = { getApproachingBuses };
+module.exports = { getApproachingBuses, isWithinApproachWindow, computeEtaSeconds };

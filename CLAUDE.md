@@ -38,7 +38,7 @@ docker compose up --build
 ```
 `docker-entrypoint.sh`がコンテナ起動のたびに、DB接続待機 → `migrate.js` → `seed.js` → `server.js`起動、を実行します。利用者向け画面：`http://localhost:3000`、管理画面：`http://localhost:3000/admin`。
 
-`backend/test/`に、DBやネットワークを必要としない純粋関数（`utils/time.js`・`utils/geo.js`・`utils/kana.js`・`services/gtfsFrequencies.js`・`config/directionMapping.js`）の現在の挙動を固定する軽量な回帰テストがあります。追加依存なしでNode組み込みの`node --test`（Node 18+）で実行します。`npm test`で実行できます。lint設定は存在しません。テスト・lintのnpmスクリプトを追加する際は、既存の挙動を変えない範囲であることを確認した上で行ってください。
+`backend/test/`に、DBやネットワークを必要としない純粋関数（`utils/time.js`・`utils/geo.js`・`utils/kana.js`・`services/gtfsFrequencies.js`・`config/directionMapping.js`、および`services/busStopApproaching.js`・`services/gtfsCalendar.js`のうちDB/ファイルI/Oを伴わない部分だけを切り出した関数）の現在の挙動を固定する軽量な回帰テストがあります。追加依存なしでNode組み込みの`node --test`（Node 18+）で実行します。`npm test`で実行できます。lint設定は存在しません。テスト・lintのnpmスクリプトを追加する際は、既存の挙動を変えない範囲であることを確認した上で行ってください。
 
 PostgreSQL接続は`DATABASE_URL`（ホスティング環境向け、SSL接続前提）または`PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD`（ローカル向け）で設定します。調整可能な環境変数（判定半径・タイムアウト閾値・ポーリング間隔など）は`backend/.env.example`を参照してください。位置情報フィードやGTFS ZIPフィードのURLは環境変数**でもDBでもなく**、`backend/src/config/feeds.js`（コード）で管理されています。外部ID⇔GTFS route_idの対応も同じくコード（`backend/src/config/routeExternalIdMapping.js`）です。
 

@@ -34,6 +34,10 @@ async function loadActiveServiceIds(serviceDate) {
 
 /**
  * 対象service_idの全便と、その停車時刻を1クエリでまとめて読み込む。
+ *
+ * 順序はsst.stop_sequence（便自身の中での0始まりの連番）を使う。stops.seq_orderは
+ * 路線内の表示順専用（service_idグループ横断の共有値）であり、枝分かれ・逆回りの
+ * ある便ではこの便自身の実際の停車順と一致しないため使わない（点検所見 C-1 参照）。
  */
 async function loadScheduleTrips(client, activeServiceIds) {
   const res = await client.query(
@@ -43,15 +47,14 @@ async function loadScheduleTrips(client, activeServiceIds) {
             st.service_id,
             st.headsign,
             sst.stop_id,
-            s.seq_order,
+            sst.stop_sequence AS seq_order,
             sst.scheduled_time,
             sst.is_through,
             sst.stop_headsign
      FROM schedule_trips st
      JOIN schedule_stop_times sst ON sst.trip_id = st.id
-     JOIN stops s ON s.id = sst.stop_id
      WHERE st.service_id = ANY($1::text[])
-     ORDER BY st.id ASC, s.seq_order ASC`,
+     ORDER BY st.id ASC, sst.stop_sequence ASC`,
     [activeServiceIds]
   );
 

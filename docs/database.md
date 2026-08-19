@@ -6,9 +6,9 @@
 |---|---|
 | `routes` | 路線マスタ（`feed_id`でどのGTFSフィード由来かを追跡） |
 | `feeds` | **フィードの稼働状態**（`last_fetched_at` / `last_status` / `last_error`）。構成（`feed_type` / `url` / `enabled` 等）は`config/feeds.js`が正で、行は`seed.js`がそこからUPSERTする |
-| `stops` | バス停マスタ（路線・方向・順序・座標・名称（かな/英語）・お知らせ・時刻表リンク） |
+| `stops` | バス停マスタ（路線・方向・座標・名称（かな/英語）・お知らせ・時刻表リンク）。物理バス停（`gtfs_stop_id`）＋通過回数（`occurrence`。循環路線で1便が同じ停留所を複数回通るケースの識別用）で一意化する。`seq_order`は路線内の表示順専用で、便ごとの実際の停車順には使わない（`schedule_stop_times.stop_sequence`を参照） |
 | `schedule_trips` | 時刻表の「便」（`service_id`＝曜日区分ごと、`gtfs_trip_id`＝GTFS原文のtrip_id、`headsign`＝行先表示） |
-| `schedule_stop_times` | 便ごとのバス停定刻（`scheduled_time`がNULLかつ`is_through=true`は非停車＝`↓`） |
+| `schedule_stop_times` | 便ごとのバス停定刻（`scheduled_time`がNULLかつ`is_through=true`は非停車＝`↓`）。`stop_sequence`が便自身の中での実際の停車順（0始まりの連番）で、`daily_trip_stop_times`以降の`seq_order`列はこれを引き継ぐ |
 | `schedule_trip_frequencies` | GTFS `frequencies.txt`（頻度ベース運行の定義。当日便生成時に仮想便へ展開する） |
 | `system_settings` | お知らせ文言など管理画面から編集する設定値 |
 | `holidays` | 祝日カレンダー（`holiday_date`が主キー）。`getDayType()`の休日判定に使う。`seed.js`が国民の祝日を初期投入、以降は管理画面から追加・削除可能 |

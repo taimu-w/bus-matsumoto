@@ -272,6 +272,107 @@ async function migrate() {
       ON trip_arrival_prediction_log(route_id, computed_at DESC) WHERE source = 'actual'
     `);
 
+    // ==========================================================
+    // 19. C-1/C-2 修正: stops.seq_order を「路線×方向で共有される、単一の
+    //     直線順序」として便の実際の停車順や物理バス停の一意キーに使っていたのを
+    //     やめる（点検所見 バス運行システム点検所見.md 参照）。
+    //
+    //     - stops は物理バス停(gtfs_stop_id) + 通過回数(occurrence) で一意化する
+    //       （旧: route_id, direction_id, seq_order。service_idを含まないため、
+    //       停車パターンの異なるservice_idグループが同じseq_orderの行を
+    //       別の物理バス停のデータで上書きしていた＝C-2）。
+    //     - 便ごとの実際の停車順は schedule_stop_times.stop_sequence
+    //       （新規列、便内0始まりの連番）に持たせる。stops.seq_order は
+    //       表示順専用に格下げする（旧: 路線内の便パターンの和集合を
+    //       擬似的な順序として使っていた＝C-1・C-3・H-3・H-4の根本原因）。
+    //
+    //     stops.id の意味が変わるため、依存する統計・履歴・進捗データは
+    //     作り直す方針とし、いったん空にしてseed()で正しい構造として再構築する
+    //     （既存のsegment_travel_stats等を引き継ぐ必要はないと判断）。
+    //
+    //     ⚠️ migrate.js はコンテナ起動のたびに実行される（docker-entrypoint.sh）。
+    //     このステップはTRUNCATE/DELETEを伴う一度きりの移行なので、他のステップと
+    //     違って「ALTER自体がIF NOT EXISTSで冪等」なだけでは不十分で、ブロック全体を
+    //     「stops.gtfs_stop_id列がまだ無い（＝このマイグレーション未実施）」で
+    //     ガードし、2回目以降の起動では丸ごとスキップする。これを怠ると
+    //     再起動のたびに当日便・進捗・統計が消し飛ぶ。
+    // ==========================================================
+    const stopsGtfsStopIdColumn = await client.query(`
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'stops' AND column_name = 'gtfs_stop_id'
+    `);
+
+    if (stopsGtfsStopIdColumn.rows.length === 0) {
+      // 19.1 stops.id / schedule_trips.id を参照している列のうち、便の実行に
+      //      無関係な「未使用列」を先にクリアする。vehicles.trip_id と
+      //      vehicle_gps_log.matched_stop_id / matched_label は旧・車両起点方式の
+      //      名残で、現行コードのどこからも読み書きされていない
+      //      （docs/database.md「未使用列・旧方式の名残」参照）。
+      //      ⚠️ TRUNCATEはFK制約の"存在"だけでも拒否される（対象行が無くても、
+      //      その制約自体を持つ他テーブルを道連れにする必要がある）ため、
+      //      19.2は素のDELETEを使う。DELETEは実データの参照有無で判定されるため、
+      //      ここで先にNULL化しておけばvehicles/vehicle_gps_log本体は
+      //      道連れにせずに済む。
+      await client.query(`UPDATE vehicles SET trip_id = NULL WHERE trip_id IS NOT NULL`);
+      await client.query(`UPDATE vehicle_gps_log SET matched_stop_id = NULL WHERE matched_stop_id IS NOT NULL`);
+
+      // 19.2 stops.id の意味が変わるため、GTFSマスタ・当日便・進捗・実績・統計・
+      //      ETA予測を一括で空にする。次回起動時の seed()／パイプラインが
+      //      正しいキーで再構築する。FK依存の子→親の順でDELETEする。
+      await client.query(`DELETE FROM trip_arrival_prediction_log`);
+      await client.query(`DELETE FROM trip_arrival_predictions`);
+      await client.query(`DELETE FROM trip_gps_matches`);
+      await client.query(`DELETE FROM trip_stop_progress`);
+      await client.query(`DELETE FROM completed_trip_stop_times`);
+      await client.query(`DELETE FROM completed_trips`);
+      await client.query(`DELETE FROM segment_travel_stats`);
+      await client.query(`DELETE FROM daily_trip_stop_times`);
+      await client.query(`DELETE FROM trip_vehicle_assignments`);
+      await client.query(`DELETE FROM daily_trips`);
+      await client.query(`DELETE FROM schedule_stop_times`);
+      await client.query(`DELETE FROM schedule_trip_frequencies`);
+      await client.query(`DELETE FROM schedule_trips`);
+      await client.query(`DELETE FROM vehicle_stop_status`);
+      await client.query(`DELETE FROM stops`);
+
+      // 19.3 stops: 物理バス停(gtfs_stop_id) + 通過回数(occurrence) で一意化する
+      await client.query(`ALTER TABLE stops DROP CONSTRAINT IF EXISTS stops_route_id_seq_order_key`);
+      await client.query(`ALTER TABLE stops DROP CONSTRAINT IF EXISTS stops_route_direction_seq_key`);
+      await client.query(`ALTER TABLE stops DROP CONSTRAINT IF EXISTS stops_route_id_direction_id_seq_order_key`);
+      await client.query(`ALTER TABLE stops ADD COLUMN IF NOT EXISTS gtfs_stop_id TEXT`);
+      await client.query(`ALTER TABLE stops ADD COLUMN IF NOT EXISTS occurrence INTEGER NOT NULL DEFAULT 0`);
+      // 直前の19.2でstopsは空になっているため、NOT NULL化してもデータ違反は起きない
+      await client.query(`ALTER TABLE stops ALTER COLUMN gtfs_stop_id SET NOT NULL`);
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'stops_route_direction_gtfsstop_occurrence_key'
+          ) THEN
+            ALTER TABLE stops
+            ADD CONSTRAINT stops_route_direction_gtfsstop_occurrence_key
+            UNIQUE (route_id, direction_id, gtfs_stop_id, occurrence);
+          END IF;
+        END $$;
+      `);
+
+      // 19.4 schedule_stop_times: 便自身の中での停車順（0始まりの連番）を持つ列を追加する
+      await client.query(`ALTER TABLE schedule_stop_times ADD COLUMN IF NOT EXISTS stop_sequence INTEGER`);
+      // 直前の19.2でschedule_stop_timesは空になっているため、NOT NULL化してもデータ違反は起きない
+      await client.query(`ALTER TABLE schedule_stop_times ALTER COLUMN stop_sequence SET NOT NULL`);
+
+      console.log('[migrate] ステップ19完了: stops/schedule_stop_timesを物理バス停単位の一意キーへ移行し、依存データを再構築対象としてクリアしました。');
+    }
+
+    // 19.5 ステップ4が作った stops_route_direction_seq_key（UNIQUE (route_id, direction_id,
+    //      seq_order)）は、seq_orderが表示順専用に格下げされた今では意味を持たない
+    //      過去の制約なので、19.1-19.4のガード対象かどうかによらず常に削除しておく
+    //      （新規DBではschema.sqlの旧CREATE TABLEを経由せず作られないが、ステップ4は
+    //      無条件に毎回このUNIQUE制約を再作成するため、ここで打ち消す必要がある）。
+    //      IF EXISTSなので存在しない場合は無害。
+    await client.query(`ALTER TABLE stops DROP CONSTRAINT IF EXISTS stops_route_direction_seq_key`);
+
     await client.query('COMMIT');
     console.log('[migrate] 複数事業者対応・便起点割り当てマイグレーション完了');
   } catch (err) {
