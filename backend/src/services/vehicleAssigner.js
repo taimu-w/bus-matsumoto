@@ -5,6 +5,7 @@
 // 1台の車両が複数便の候補になり得るため、運行終了しても行は削除せず
 // status = 'inactive' にして再利用する。
 const pool = require('../config/db');
+const { getRuntimeSetting } = require('./runtimeSettings');
 
 async function getOrCreateVehicle(client, row) {
   const existing = await client.query(
@@ -87,7 +88,7 @@ async function sortCarId() {
 /**
  * 古いGPSログを掃除する。車両行を削除しなくなったため、明示的な保持期間が必要。
  */
-async function purgeOldGpsLogs(retentionHours = parseInt(process.env.GPS_LOG_RETENTION_HOURS || '48', 10)) {
+async function purgeOldGpsLogs(retentionHours = getRuntimeSetting('GPS_LOG_RETENTION_HOURS')) {
   const client = await pool.connect();
   try {
     const res = await client.query(

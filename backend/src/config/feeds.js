@@ -42,9 +42,9 @@ const LOCATION_FEEDS = [
     name: 'アルピコ交通',
     url: 'https://dashboard.wakoticket.net/information/alpicokotsu/latlon.csv',
     enabled: true,
-    // 旧: 1と2が同値 confidence 0.5 で、どちらが選ばれるか不定だった（仕様書 問題E）。
+    // 旧: 1と2が同値 confidence 0.5 で、どちらが選ばれるか不定だった（仕様書「経緯（アーカイブ）」参照）。
     // 実際は両方にまたがるため、両方を明示する。これは推測ではなく
-    // 「絞り込みで落とさない」という安全側の明示である（仕様書 4.3.1）。
+    // 「絞り込みで落とさない」という安全側の明示である。
     gtfsFeedIds: ['guruttomatsumotobus1', 'guruttomatsumotobus2']
   },
   {
@@ -122,7 +122,7 @@ function getAllFeedsForDb() {
 }
 
 /**
- * フィード構成の整合性を検証する（仕様書 4.4）。
+ * フィード構成の整合性を検証する（docs/外部IDマッピングのコード化_仕様書.md 参照）。
  *
  * 起動を止めないのは意図的である。GTFS更新でフィード側の route_id が一時的に
  * 消えたときに、システム全体が起動不能になることを避けるため

@@ -5,6 +5,7 @@ const cors = require('cors');
 const apiRouter = require('./routes/api');
 const scheduler = require('./jobs/scheduler');
 const serviceStatusJob = require('./jobs/serviceStatusJob');
+const { refreshRuntimeSettingsCache } = require('./services/runtimeSettings');
 
 const app = express();
 app.use(cors());
@@ -33,8 +34,14 @@ app.get('*', (req, res, next) => {
 });
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`[server] 横田信大循環線リアルタイム運行管理システム起動: http://localhost:${PORT}`);
+
+  // 管理画面から上書きされた運用パラメータ（POLL_INTERVAL_SECONDS等、起動時にしか
+  // 読まれない設定を含む）をscheduler/serviceStatusJob起動前に読み込んでおく。
+  // 失敗しても環境変数/コード既定値で起動を継続する（runtimeSettings.js内でcatchずみ）。
+  await refreshRuntimeSettingsCache(true);
+
   scheduler.start();
   serviceStatusJob.start();
   // 時刻表検索のインデックスを先に作っておく（初回リクエストを待たせないため）。

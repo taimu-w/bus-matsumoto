@@ -44,7 +44,9 @@
 | メソッド | パス | 概要 |
 |---|---|---|
 | GET / PUT | `/api/admin/settings` | 配信お知らせ設定の取得・更新 |
+| GET / PUT / DELETE | `/api/admin/runtime-settings`（`/:key`） | 運用パラメータ（判定半径・タイムアウト・しきい値等）の取得・上書き保存・上書き解除（既定値へ戻す）。定義一覧は[backend/src/config/runtimeSettingsCatalog.js](../backend/src/config/runtimeSettingsCatalog.js) |
 | GET / POST / DELETE | `/api/admin/holidays`（`/:date`） | 祝日カレンダーの取得・追加・削除（ETA統計の曜日区分に使用） |
+| GET / POST / DELETE | `/api/admin/route-mappings`（`/:externalId`） | 外部ID⇔GTFS route_id対応の取得・追加更新（UPSERT）・削除。`route_id`は`routes`テーブルへの実在チェックあり（路線名による解決はしない） |
 | GET / PUT / DELETE | `/api/admin/tourist-spots`（`/:id`） | 観光スポット情報の一覧・テキスト一括登録（全件洗い替え）・1件削除 |
 | GET | `/api/admin/bus-positions` | 直近3分以内のバス位置情報（Yahoo!リバースジオコーダによる住所付き） |
 | GET | `/api/admin/dashboard-summary` | 運行ダッシュボード（稼働車両数・未割当便数・遅延便数・GPS途絶車両数・GTFSフィード状態） |
@@ -66,4 +68,4 @@
 
 応答には集計値のほかに`totalSampleCount`（絞り込み前の総サンプル数）・`generatedAt`・`computeMs`・`cached`が含まれます。同一条件の結果は`POLL_INTERVAL_SECONDS`と同じ長さ（既定60秒）だけメモリにキャッシュされます。ログに行が増えるのはパイプラインが走ったときだけなので、絞り込み条件を切り替えて見比べる操作が即応になります。
 
-> 旧`GET/PUT /api/admin/route-mappings`（外部ID⇔route_id対応の編集）・`GET/PUT /api/admin/route-data`（バス停座標・時刻表の直接編集）は、対応関係をコード（`config/routeExternalIdMapping.js`）へ、バス停座標・時刻表をGTFSフィード側の更新へ、それぞれ一本化したため削除済みです。同種のルートを追加する際は、`router`が`/api`配下にマウント済みであることに注意してください（先頭に`/api`を重ねない）。
+> 旧`GET/PUT /api/admin/route-data`（バス停座標・時刻表の直接編集）は、バス停座標・時刻表をGTFSフィード側の更新へ一本化したため削除済みです。`GET/PUT /api/admin/route-mappings`（外部ID⇔route_id対応の編集）は一時期同様に削除していましたが、上表のとおり`GET/POST/DELETE`として復活しています。同種のルートを追加する際は、`router`が`/api`配下にマウント済みであることに注意してください（先頭に`/api`を重ねない）。

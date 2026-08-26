@@ -24,19 +24,36 @@ function serializeRow(row) {
     hours: row.hours,
     stayDuration: row.stay_duration,
     description: row.description,
+    hoursEn: row.hours_en,
+    stayDurationEn: row.stay_duration_en,
+    descriptionEn: row.description_en,
     photoUrl: row.photo_url,
+    category: row.category,
+    displayTag: row.display_tag,
     enabled: row.enabled
   };
 }
 
 /**
- * バス停ページ用の近接検索。enabled=trueのみ対象、半径内・距離昇順で最大limit件。
+ * バス停ページの周辺観光スポット表示（findNearbySpots）にだけ効く判定。
+ * display_tagが空欄、または「観光」を含まない値（例：学校・病院など経路検索の地点としては
+ * 使うが観光スポットではない登録）は対象外とする。地点名検索・詳細ポップアップ取得は
+ * この判定を通さない（観光スポット情報_仕様書のカテゴリ/表示タグの方針）。
+ */
+function isVisibleOnBusStopPage(row) {
+  const tag = (row.display_tag || '').trim();
+  return tag.includes('観光');
+}
+
+/**
+ * バス停ページ用の近接検索。enabled=trueかつisVisibleOnBusStopPageのみ対象、半径内・距離昇順で最大limit件。
  * 各要素に最寄りバス停までの徒歩距離の概算（distanceMeters・walkMinutes）を付与する。
  */
 async function findNearbySpots(lat, lon, { radiusMeters = DEFAULT_NEARBY_RADIUS_METERS, limit = DEFAULT_NEARBY_LIMIT } = {}) {
   const result = await pool.query('SELECT * FROM tourist_spots WHERE enabled = TRUE');
   const candidates = [];
   for (const row of result.rows) {
+    if (!isVisibleOnBusStopPage(row)) continue;
     const distanceMeters = haversineDistanceMeters(lat, lon, Number(row.lat), Number(row.lng));
     if (distanceMeters > radiusMeters) continue;
     candidates.push({ row, distanceMeters });
@@ -94,7 +111,10 @@ async function listTouristSpots({ includeDisabled = false } = {}) {
 
 function splitLine(line) {
   const cols = line.split('\t');
-  const [name, kana, romaji, latStr, lngStr, url, hours, stayDuration, description, photoUrl] = cols;
+  const [
+    name, kana, romaji, latStr, lngStr, url, hours, stayDuration, description,
+    hoursEn, stayDurationEn, descriptionEn, photoUrl, category, displayTag
+  ] = cols;
   return {
     colCount: cols.length,
     name: (name || '').trim(),
@@ -106,7 +126,12 @@ function splitLine(line) {
     hours: (hours || '').trim(),
     stayDuration: (stayDuration || '').trim(),
     description: (description || '').trim(),
-    photoUrl: (photoUrl || '').trim()
+    hoursEn: (hoursEn || '').trim(),
+    stayDurationEn: (stayDurationEn || '').trim(),
+    descriptionEn: (descriptionEn || '').trim(),
+    photoUrl: (photoUrl || '').trim(),
+    category: (category || '').trim(),
+    displayTag: (displayTag || '').trim()
   };
 }
 
@@ -115,8 +140,13 @@ function isHttpsUrl(value) {
 }
 
 /**
- * タブ区切りテキスト（1行1件、10列）をパース・バリデーションする純粋関数（DBアクセスなし）。
+ * タブ区切りテキスト（1行1件、15列）をパース・バリデーションする純粋関数（DBアクセスなし）。
  * ローマ字が空欄でkanaが入力されていれば自動生成する。
+ * 英語版の営業時間・滞在時間目安・説明（hoursEn/stayDurationEn/descriptionEn）は
+ * 利用者画面の英語表示には未使用（項目の登録のみに対応。将来対応時のための先行追加）。
+ * category（カテゴリ）は情報のみで検索/表示のフィルタには未使用。
+ * displayTag（表示）は空欄または「観光」を含まない値のとき、バス停ページの周辺観光スポット
+ * 表示（isVisibleOnBusStopPage）からのみ除外される（地点名検索・詳細ポップアップは対象外）。
  * 1件でもエラーがあれば全エラーを集約して ok:false で返す（部分成功はしない）。
  */
 function parseTouristSpotsText(text) {
@@ -132,8 +162,8 @@ function parseTouristSpotsText(text) {
 
     const parsed = splitLine(rawLine);
 
-    if (parsed.colCount > 10) {
-      errors.push({ line: lineNo, reason: '列数が多すぎます（10列を超えています）。' });
+    if (parsed.colCount > 15) {
+      errors.push({ line: lineNo, reason: '列数が多すぎます（15列を超えています）。' });
       return;
     }
     if (!parsed.name) {
@@ -180,7 +210,12 @@ function parseTouristSpotsText(text) {
       hours: parsed.hours || null,
       stayDuration: parsed.stayDuration || null,
       description: parsed.description || null,
-      photoUrl: parsed.photoUrl || null
+      hoursEn: parsed.hoursEn || null,
+      stayDurationEn: parsed.stayDurationEn || null,
+      descriptionEn: parsed.descriptionEn || null,
+      photoUrl: parsed.photoUrl || null,
+      category: parsed.category || null,
+      displayTag: parsed.displayTag || null
     });
   });
 
@@ -208,8 +243,11 @@ async function replaceAllTouristSpots(text) {
     await client.query('BEGIN');
     for (const spot of parsed.spots) {
       await client.query(
-        `INSERT INTO tourist_spots (name, kana, romaji, lat, lng, url, hours, stay_duration, description, photo_url, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+        `INSERT INTO tourist_spots (
+           name, kana, romaji, lat, lng, url, hours, stay_duration, description,
+           hours_en, stay_duration_en, description_en, photo_url, category, display_tag, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
          ON CONFLICT (name) DO UPDATE SET
            kana = EXCLUDED.kana,
            romaji = EXCLUDED.romaji,
@@ -219,9 +257,17 @@ async function replaceAllTouristSpots(text) {
            hours = EXCLUDED.hours,
            stay_duration = EXCLUDED.stay_duration,
            description = EXCLUDED.description,
+           hours_en = EXCLUDED.hours_en,
+           stay_duration_en = EXCLUDED.stay_duration_en,
+           description_en = EXCLUDED.description_en,
            photo_url = EXCLUDED.photo_url,
+           category = EXCLUDED.category,
+           display_tag = EXCLUDED.display_tag,
            updated_at = now()`,
-        [spot.name, spot.kana, spot.romaji, spot.lat, spot.lng, spot.url, spot.hours, spot.stayDuration, spot.description, spot.photoUrl]
+        [
+          spot.name, spot.kana, spot.romaji, spot.lat, spot.lng, spot.url, spot.hours, spot.stayDuration, spot.description,
+          spot.hoursEn, spot.stayDurationEn, spot.descriptionEn, spot.photoUrl, spot.category, spot.displayTag
+        ]
       );
     }
     const names = parsed.spots.map((s) => s.name);

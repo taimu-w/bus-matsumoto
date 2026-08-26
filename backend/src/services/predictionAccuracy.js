@@ -51,8 +51,8 @@ const DAY_TYPE_ORDER = ['weekday', 'saturday', 'holiday'];
 
 /**
  * "H:mm"（utils/time.js の minutesToTimeStr が生成する形式）を0時起点の分数に
- * 変換するSQL式。timeStrToMinutes() と同じ扱いになるよう、'↓'・'通過'・NULL など
- * 時刻として読めない値はNULLになる（＝そのサンプルは集計から落ちる）。
+ * 変換するSQL式。timeStrToMinutes() と同じ扱いになるよう、NULLなど時刻として
+ * 読めない値はNULLになる（＝そのサンプルは集計から落ちる）。
  *
  * ⚠️ 抽出に substring(col from '正規表現') を使わないこと。キャプチャ付きの正規表現
  * 抽出はPostgreSQLでは1回あたり25マイクロ秒程度かかり、10万件規模では数秒〜十数秒に

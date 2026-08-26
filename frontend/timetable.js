@@ -921,6 +921,32 @@
     return idx;
   }
 
+  /**
+   * "H:mm"文字列を分単位に変換する（不正値・未設定はNaN）。
+   * backend/src/utils/time.js の timeStrToMinutes と同じ考え方（フロントとバックエンドで
+   * モジュールを共有していないため、この程度の小さなヘルパーは各ファイルで持つ）。
+   */
+  function timeStrToMinutesLocal(timeStr) {
+    if (!timeStr) return NaN;
+    const parts = String(timeStr).split(':');
+    if (parts.length < 2) return NaN;
+    const h = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10);
+    if (Number.isNaN(h) || Number.isNaN(m)) return NaN;
+    return h * 60 + m;
+  }
+
+  /**
+   * 2つの"H:mm"由来の分数の差(a-b)を日跨ぎ考慮で正規化する
+   * （backend/src/services/passDetection.js の diffMinutesSigned と同じ考え方）。
+   */
+  function diffMinutesSignedLocal(aMin, bMin) {
+    let diff = aMin - bMin;
+    if (diff < -720) diff += 24 * 60;
+    else if (diff > 720) diff -= 24 * 60;
+    return diff;
+  }
+
   /* ---------- 画面: 便詳細（通過時刻一覧・リアルタイム表示） ---------- */
   async function renderTripView(state) {
     const seq = ++renderSeq;
@@ -1014,15 +1040,71 @@
         .join('');
     }
 
-    /** リアルタイム表示中の停車行。定刻/予測/実績と遅延を表示する（app.jsのrenderStopRow相当）。 */
+    /**
+     * リアルタイム表示中の停車行。定刻/予測/実績と遅延を表示する（app.jsのrenderStopRow相当）。
+     *
+     * 【バス停到着判定およびフロントエンド表示改善案】「次は」バッジは廃止した。既に通過して
+     * いるのに到着済判定だけがまだ行われていない場合があり、利用者に誤解を与えるため。
+     * 代わりに、より実態に近い3つの表示を導入する:
+     *   ・「付近」バッジ: status==='付近'（バックエンドが2段階到着判定で新設した中間状態）。
+     *     複数バス停に同時に付与され得る（付近入り後、到着確定前にGPS更新が途切れて次の
+     *     バス停が先に付近入りすることがあるため）。
+     *   ・「まもなく」バッジ: ETA到着予測時刻の2分前〜1分後（未満）の間だけ表示する。
+     *   ・現在走行中区間の薄い青背景: 最後に到着済みとなったバス停から2停留所先までの
+     *     うちETA5分以内の区間。ただし遅延で既にETAを過ぎている停留所が3停留所先より
+     *     先にある場合は、そこまで（最大5停留所先まで）拡張する。
+     * 同一バス停に「付近」「まもなく」の両方が該当する場合は「付近」を優先し「まもなく」は
+     * 出さない（バッジのみの優先順位。背景の青帯とは独立）。
+     */
     function renderRealtimeRows(bus) {
       const stops = bus.stops || [];
       const lastIdx = findLastArrivedIndex(stops);
+
+      // 同一描画内で使うnowは1回だけ計算し、バッジ・青帯の判定で一貫させる。
+      const nowDate = new Date();
+      const nowMinutes = nowDate.getHours() * 60 + nowDate.getMinutes();
+
+      /** ETAまでの残り分（ETA-now）。ETAが無い/不正な場合はNaN。 */
+      function etaRemainingMin(stop) {
+        const etaStr = stop.predictedTime || stop.scheduledTime;
+        const etaMin = timeStrToMinutesLocal(etaStr);
+        if (Number.isNaN(etaMin)) return NaN;
+        return diffMinutesSignedLocal(etaMin, nowMinutes);
+      }
+
+      // 【青帯】現在走行中と考えられる範囲を算出する。
+      // 基本: lastIdx+1・lastIdx+2のうちETA5分以内。延長: 3停留所先より先にETAが
+      // 既に経過（remain<=0）した停留所があれば、そこまで（最大lastIdx+5まで）拡張する。
+      let bandEnd = lastIdx + 2;
+      while (bandEnd < lastIdx + 5 && bandEnd + 1 < stops.length) {
+        const remain = etaRemainingMin(stops[bandEnd + 1]);
+        if (Number.isNaN(remain) || remain > 0) break;
+        bandEnd++;
+      }
+      const bandIndices = new Set();
+      for (let i = Math.max(lastIdx + 1, 0); i <= Math.min(bandEnd, stops.length - 1); i++) {
+        const remain = etaRemainingMin(stops[i]);
+        if (!Number.isNaN(remain) && remain <= 5) bandIndices.add(i);
+      }
+
       return stops
         .map((stop, index) => {
           const isArrived = stop.status === '到着済';
           const isThrough = stop.status === '通過';
-          const isNext = index === lastIdx + 1;
+          const isNearby = stop.status === '付近';
+          const pending = !isArrived && !isThrough;
+          const remain = pending ? etaRemainingMin(stop) : NaN;
+          // 「まもなく」: ETA-2分 〜 ETA+1分未満。付近バッジがある場合は出さない（優先順位）。
+          const isSoon = pending && !isNearby && !Number.isNaN(remain) && remain >= 0 && remain <= 2;
+          const isInBand = pending && bandIndices.has(index);
+
+          // リアルタイム表示の停車行は便詳細の静的データ（data.stops）と同じ並び・件数になる
+          // （どちらも同じ便のGTFS stop_times由来のため）。始発/終点/降車のみ/乗車のみといった
+          // 表示用メタデータはリアルタイム側(trip_stop_progress)には持たせていないため、
+          // 同じ便の静的データ側（常に正しい値を持つ）から補って表示する。
+          const staticStop = data.stops[index] || null;
+          const staticFallbackTime = staticStop ? (staticStop.departureTime || staticStop.arrivalTime) : null;
+          const staticThrough = Boolean(staticStop && staticStop.isThrough);
 
           let timeLabel = '--';
           let delayLabel = '';
@@ -1032,24 +1114,26 @@
             timeLabel = stop.actualTime || '--';
             delayLabel = formatDelayLabel(stop.delayMinutes);
           } else {
-            timeLabel = stop.predictedTime || stop.scheduledTime || '--';
+            timeLabel = stop.predictedTime || stop.scheduledTime || staticFallbackTime || '--';
             delayLabel = formatDelayLabel(stop.predictedDelayMinutes);
           }
           const isDelayedPred = !isArrived && !isThrough && (stop.predictedDelayMinutes || 0) > 1;
           const base = isArrived || isThrough
             ? 'bg-gray-50 border-gray-200 opacity-70'
-            : isNext
-              ? 'bg-blue-50 border-blue-300'
+            : isInBand
+              ? 'bg-sky-50 border-sky-200'
               : 'bg-white border-gray-200';
           const tags = [
-            isNext ? '<span class="text-[10px] font-bold text-white bg-blue-600 rounded px-1.5 py-0.5">次は</span>' : '',
+            isNearby ? '<span class="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5">付近</span>' : '',
+            isSoon ? '<span class="text-[10px] font-bold text-white bg-blue-600 rounded px-1.5 py-0.5">まもなく</span>' : '',
+            index === 0 ? '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5">始発</span>' : '',
+            index === stops.length - 1 ? '<span class="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-1.5 py-0.5">終点</span>' : '',
             isArrived ? '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">到着済</span>' : '',
-            isThrough ? '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">通過</span>' : ''
+            isThrough ? '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">通過</span>' : '',
+            !staticThrough && staticStop && staticStop.noPickup && index !== stops.length - 1 ? '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">降車のみ</span>' : '',
+            !staticThrough && staticStop && staticStop.noDropOff && index !== 0 ? '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">乗車のみ</span>' : ''
           ].filter(Boolean).join(' ');
 
-          // リアルタイム表示の停車行は便詳細の静的データ（data.stops）と同じ並び・件数になる
-          // （どちらも同じ便のGTFS stop_times由来のため）。これを使ってバス停ページのURLを組み立てる。
-          const staticStop = data.stops[index] || null;
           return `
             <div class="flex items-center gap-3 border rounded-xl px-3 py-2.5 cursor-pointer active:opacity-70 ${base}"
                  data-role="tt-rt-stop" data-stop-key="${esc(staticStop ? staticStop.stopKey : '')}" data-platform-key="${esc(staticStop ? staticStop.platformKey : '')}">
@@ -1061,7 +1145,7 @@
               <div class="text-right shrink-0">
                 <span class="text-lg font-bold ${isDelayedPred ? 'text-red-600' : 'text-gray-900'}">${esc(timeLabel)}</span>
                 ${delayLabel ? `<span class="block text-[10px] font-bold text-gray-500">${esc(delayLabel)}</span>` : ''}
-                <span class="block text-[10px] text-gray-400">定刻 ${esc(stop.scheduledTime || '--')}</span>
+                <span class="block text-[10px] text-gray-400">定刻 ${esc(stop.scheduledTime || staticFallbackTime || '--')}</span>
               </div>
             </div>`;
         })

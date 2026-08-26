@@ -30,10 +30,9 @@
 
 ## `openAssignment()` — 停車予定の展開
 
-担当・候補の区別なく、`daily_trip_stop_times`から`trip_stop_progress`を展開します。ルールは旧`planMaking.js`からそのまま移植しています。
+担当・候補の区別なく、`daily_trip_stop_times`から`trip_stop_progress`を展開します。ルールは旧`planMaking.js`からの移植だったが、2026年8月にGTFSのデータ構造に合わせて簡素化しました（詳細は[pass-detection.md](pass-detection.md)）。
 
-- 便の中で「実際に定刻を持つ最後のバス停（＝実質的な終点）」を`lastValidSeq`として計算する。
-- 経由・非停車（`is_through`）扱いのバス停のうち、`lastValidSeq`より**手前**にあるものだけを`status = '通過'`とする（`lastValidSeq`より先にある「経由フラグ付き」バス停は、単に終点より先で未確定なだけなので通過扱いにしない＝これが`delayCalc.js`のコメントで触れているバグ修正の背景。詳細は[pass-detection.md](pass-detection.md)）。
+- `is_through`（GTFSの`pickup_type = 1` かつ `drop_off_type = 1`＝真の通過）のバス停はそのまま`status = '通過'`とする。以前は「便の中で実際に定刻を持つ最後のバス停（`lastValidSeq`）より手前にあるかどうか」という位置ベースの判定を挟んでいたが、これは当時`is_through`のバス停の`scheduled_time`をNULLにしていたことに起因する代償的な措置だった。`scheduled_time`が`is_through`にかかわらず常に実際のGTFS時刻を保持するようになった今は、この判定は不要（`is_through`をそのまま使えば`lastValidSeq`を計算した場合と常に同じ結果になる）。
 - 始発バス停は`status = '到着済'`とし、`actual_time`に**判定に使ったGPSの時刻**を入れる。旧方式の「出発時刻」に相当し、ETAの起点・ペース算出がここから機能する。
 
 ## `reassignOrphanTrips()` — 再割り当て（パイプライン⑤）

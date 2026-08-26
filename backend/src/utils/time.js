@@ -32,12 +32,19 @@ function parseHHMM(str) {
 }
 
 /**
- * 深夜帯判定。.envのNIGHT_START〜NIGHT_ENDの範囲(日をまたぐ)で判定する。
+ * 深夜帯判定。NIGHT_START〜NIGHT_ENDの範囲(日をまたぐ)で判定する。
  * 既定値は23:00〜5:00。
+ *
+ * 引数を省略した場合は従来どおり環境変数（未設定ならコード既定値）を見る。
+ * 呼び出し側が管理画面での上書き値（services/runtimeSettings.js の
+ * getRuntimeSetting('NIGHT_START'/'NIGHT_END')）を渡したい場合は、
+ * その解決済みの値を引数で渡すこと。このファイル自体はDBアクセスを持たない
+ * 純粋関数のままにしてある（CLAUDE.mdの「pure function」テスト方針、
+ * および他の曜日区分ロジックと同じ「呼び出し側が外部データを渡す」設計に合わせるため）。
  */
-function isNightTime() {
-  const nightStart = parseHHMM(process.env.NIGHT_START || '23:00');
-  const nightEnd = parseHHMM(process.env.NIGHT_END || '05:00');
+function isNightTime(nightStartOverride, nightEndOverride) {
+  const nightStart = parseHHMM(nightStartOverride || process.env.NIGHT_START || '23:00');
+  const nightEnd = parseHHMM(nightEndOverride || process.env.NIGHT_END || '05:00');
   const startInt = nightStart.h * 100 + nightStart.m;
   const endInt = nightEnd.h * 100 + nightEnd.m;
   const t = getNowTimeInt();
@@ -74,7 +81,7 @@ function formatTimeNoFormat(date) {
 function timeStrToMinutes(timeStr) {
   if (timeStr === null || timeStr === undefined) return NaN;
   const s = String(timeStr).trim();
-  if (!s || s === '↓' || s === '通過') return NaN;
+  if (!s) return NaN;
   const parts = s.split(':');
   if (parts.length < 2) return NaN;
   const h = parseInt(parts[0], 10);

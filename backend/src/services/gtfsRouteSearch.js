@@ -1543,7 +1543,8 @@ function serializeSpotRef(spot) {
     platformCode: '',
     lat: spot.lat,
     lon: spot.lng,
-    busstopUrl: null
+    busstopUrl: null,
+    spotId: spot.spotId
   };
 }
 

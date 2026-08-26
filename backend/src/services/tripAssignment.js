@@ -14,21 +14,22 @@ const pool = require('../config/db');
 const { haversineDistanceMeters } = require('../utils/geo');
 const { computeDelayMinutes, getServiceDateString } = require('../utils/time');
 const { isDirectionIgnored } = require('../config/directionMapping');
+const { getRuntimeSetting } = require('./runtimeSettings');
 
 function assignRadiusMeters() {
-  return parseFloat(process.env.ASSIGN_RADIUS_METERS || '100');
+  return getRuntimeSetting('ASSIGN_RADIUS_METERS');
 }
 function gpsWindowMinutes() {
-  return parseFloat(process.env.ASSIGN_GPS_WINDOW_MIN || '3');
+  return getRuntimeSetting('ASSIGN_GPS_WINDOW_MIN');
 }
 function assignDelaySeconds() {
-  return parseInt(process.env.ASSIGN_DELAY_SEC || '60', 10);
+  return getRuntimeSetting('ASSIGN_DELAY_SEC');
 }
 // 「同時刻帯」＝始発時刻の差がこの分数以内（仕様書 8.1）。
 // この範囲の便どうしでは同じ車両を担当車両として重複させない。
 // 逆に言うと、8:00便の担当車両を 8:11便の担当にすることは許される。
 function samePeriodMinutes() {
-  return parseFloat(process.env.ASSIGN_SAME_PERIOD_MIN || '10');
+  return getRuntimeSetting('ASSIGN_SAME_PERIOD_MIN');
 }
 
 /**
@@ -133,10 +134,22 @@ async function findCandidates(client, trip, startStop) {
 /**
  * 割り当てを1件作成し、その便の停車予定を進捗テーブルへ展開する。
  *
- * 停車予定の展開ルールは旧 planMaking.js からそのまま移植している（仕様書 14）。
- * とくに「経由・非停車(is_through)のバス停を通過扱いにするのは、その便で実際に
- * 定刻を持つ最後のバス停(lastValidSeq)より手前にある場合だけ」というルールは
- * 過去に実バグを生んだ箇所なので変更しないこと。
+ * 停車予定の展開ルールは旧 planMaking.js からの移植だったが、2026年8月にGTFSの
+ * データ構造に合わせて設計し直した（docs/pass-detection.md参照）。
+ *
+ * 旧ルールは「経由・非停車(is_through)のバス停を通過扱いにするのは、その便で
+ * 実際に定刻を持つ最後のバス停(lastValidSeq)より手前にある場合だけ」という
+ * 位置ベースの判定だった。これは、当時のis_through判定がpickup_type/drop_off_type
+ * のどちらか一方が1なら通過とみなしscheduled_timeをNULLにしていたため、「真の通過」
+ * と「単に終点より先でまだ実績が確定していないだけの停車（scheduled_timeはあるのに
+ * 見た目上NULLになっていた）」を区別する必要があったことによる代償的な措置だった。
+ * 今はis_through自体がGTFS本来の意味（pickup_type=1 かつ drop_off_type=1の場合のみ
+ * 真の通過）に修正され、scheduled_timeも常に実時刻が入るため、この位置による
+ * 区別は不要になった。is_throughをそのままstatus='通過'に対応させれば足りる。
+ *
+ * 【2段階到着判定】ON CONFLICTのCASE式は、既存行が'到着済'だけでなく'付近'（GTFS再取得
+ * によるGTFS更新・reseed時に進行中の追跡状態を巻き戻さないため）の場合も上書きしない。
+ * nearby_min_distance_* 列はSET句に含めていないため、reseedでも常に保持される。
  */
 async function openAssignment(client, trip, candidate, role) {
   const inserted = await client.query(
@@ -172,18 +185,12 @@ async function openAssignment(client, trip, candidate, role) {
   );
   if (stopTimes.rows.length === 0) return assignmentId;
 
-  // この便が実際に定刻を持つ最後のバス停（＝この便の実質的な終点）
-  let lastValidSeq = -1;
-  for (const st of stopTimes.rows) {
-    if (!st.is_through) lastValidSeq = st.seq_order;
-  }
   const originSeq = stopTimes.rows[0].seq_order;
 
   for (const st of stopTimes.rows) {
     const isOrigin = st.seq_order === originSeq;
-    const isGenuineThroughStop = st.is_through && st.seq_order < lastValidSeq;
 
-    let status = isGenuineThroughStop ? '通過' : '';
+    let status = st.is_through ? '通過' : '';
     let actualTime = null;
     let delayMinutes = null;
 
@@ -201,15 +208,15 @@ async function openAssignment(client, trip, candidate, role) {
        ON CONFLICT (assignment_id, stop_id) DO UPDATE
          SET scheduled_time = EXCLUDED.scheduled_time,
              status = CASE
-               WHEN trip_stop_progress.status = '到着済' THEN trip_stop_progress.status
+               WHEN trip_stop_progress.status IN ('到着済', '付近') THEN trip_stop_progress.status
                ELSE EXCLUDED.status
              END,
              actual_time = CASE
-               WHEN trip_stop_progress.status = '到着済' THEN trip_stop_progress.actual_time
+               WHEN trip_stop_progress.status IN ('到着済', '付近') THEN trip_stop_progress.actual_time
                ELSE EXCLUDED.actual_time
              END,
              delay_minutes = CASE
-               WHEN trip_stop_progress.status = '到着済' THEN trip_stop_progress.delay_minutes
+               WHEN trip_stop_progress.status IN ('到着済', '付近') THEN trip_stop_progress.delay_minutes
                ELSE EXCLUDED.delay_minutes
              END`,
       [assignmentId, st.stop_id, st.seq_order, st.scheduled_time, status, actualTime, delayMinutes]

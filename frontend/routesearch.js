@@ -206,7 +206,7 @@
   }
 
   /* ---------- 観光スポット詳細ポップアップ（観光スポット情報_仕様書） ---------- */
-  // 出発地/目的地が観光スポットのとき、結果ヘッダーのスポット名をタップ可能にする。
+  // 出発地/目的地が観光スポットのとき、タイムライン側のスポット名をタップ可能にする。
   function spotNameButtonHtml(spot) {
     return `<button type="button" data-role="rs-spot-name" data-spot-id="${esc(spot.spotId)}"
                     class="font-bold text-emerald-700 underline decoration-dotted underline-offset-2 hover:text-emerald-800">${esc(spot.name)}</button>`;
@@ -1256,11 +1256,9 @@
             </p>`;
   }
 
-  /** 結果ヘッダーの「出発地 → 目的地」。観光スポット起点のときはスポット名をタップ可能にする。 */
+  /** 結果ヘッダーの「出発地 → 目的地」。観光スポット詳細ポップアップはタイムライン側のスポット名から開く。 */
   function endpointHeadingHtml(result) {
-    const fromHtml = result.viaSpotFrom ? spotNameButtonHtml(result.viaSpotFrom) : esc(result.from.name);
-    const toHtml = result.viaSpotTo ? spotNameButtonHtml(result.viaSpotTo) : esc(result.to.name);
-    return `${fromHtml} <span class="text-gray-400">→</span> ${toHtml}`;
+    return `${esc(result.from.name)} <span class="text-gray-400">→</span> ${esc(result.to.name)}`;
   }
 
   /** 経路の性質を表すバッジ（一覧・詳細で共用。同じ経路が同じ見た目になるようにする）。 */
@@ -1440,9 +1438,12 @@
       timeLines.push(`<div><span class="font-bold text-green-700">予測 ${esc(options.predicted)}</span></div>`);
     }
 
-    const link = stop.busstopUrl
-      ? `<a href="${esc(stop.busstopUrl)}" data-spa class="font-bold text-gray-900 underline decoration-dotted underline-offset-2 hover:text-purple-700">${esc(stop.name)}</a>`
-      : `<span class="font-bold text-gray-900">${esc(stop.name)}</span>`;
+    // 出発地/目的地が観光スポットのとき、タイムライン側のスポット名をタップ可能にする（観光スポット情報_仕様書）。
+    const link = stop.spotId
+      ? spotNameButtonHtml(stop)
+      : stop.busstopUrl
+        ? `<a href="${esc(stop.busstopUrl)}" data-spa class="font-bold text-gray-900 underline decoration-dotted underline-offset-2 hover:text-purple-700">${esc(stop.name)}</a>`
+        : `<span class="font-bold text-gray-900">${esc(stop.name)}</span>`;
 
     return `
       <div class="flex items-start gap-3">

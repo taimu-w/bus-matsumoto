@@ -1,9 +1,10 @@
 // 位置情報CSVの方向列の値 → GTFS direction_id の対応を、路線ごとにコードで管理する。
 //
 // 以前は管理画面から route_external_ids.direction_mapping を編集する方式だったが、
-// 仕様書 6.1 によりこれを廃止し、コード上の設定に一本化した。
-// （route_external_ids テーブル自体も、外部ID⇔route_id の対応を
-//   config/routeExternalIdMapping.js へ移した際に削除済み）
+// 仕様書 6.1 によりこれを廃止し、コード上の設定に一本化した（ここは今も変わらない）。
+// ⚠️ route_external_ids テーブルは、外部ID⇔route_id の対応を管理画面編集に戻すため
+// 2026-08-21に再作成されているが、direction_mapping列は持たない。このファイルの
+// 対象（方向の対応）とは無関係なので混同しないこと（docs/外部IDマッピングのコード化_仕様書.md）。
 //
 //   mode: 'map'    … map で変換した direction_id を便判定に使う
 //   mode: 'ignore' … 方向値を便判定に使わない（路線一致＋始発バス停100m以内のみで候補とする。仕様書 6.3）

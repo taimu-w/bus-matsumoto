@@ -1,0 +1,57 @@
+body { font-family: 'Noto Sans JP', sans-serif; }
+
+/* サイドナビ */
+.nav-btn {
+  color: #bfdbfe;
+  display: flex; align-items: center; gap: 0.6rem;
+  border-left: 3px solid transparent;
+  transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+}
+.nav-btn svg { opacity: .85; }
+.nav-btn:hover { background-color: rgba(255,255,255,0.08); color: #fff; }
+.nav-btn.active { background-color: rgba(255,255,255,0.16); color: #fff; border-left-color: #60a5fa; }
+.nav-btn.active svg { opacity: 1; }
+
+/* スクロールバー */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 6px; }
+
+/* カード（白背景・枠線・角丸のブロック）にホバーで軽い立体感を付ける */
+.bg-white.rounded-xl.border { transition: box-shadow .15s ease, border-color .15s ease; }
+.bg-white.rounded-xl.border:hover { box-shadow: 0 4px 14px rgba(15, 23, 42, 0.07); }
+
+/* テーブル：見出し固定・行の可読性向上
+   overflow-x-auto なコンテナはブラウザ仕様上 overflow-y も auto 扱いになり、
+   それ自体が独立したスクロールコンテナになる（= sticky の基準が main ではなくこの div になる）。
+   そのため高さを明示的に持たせ、コンテナ自身がスクロールする形にして sticky を機能させる。 */
+.bg-white.rounded-xl.border.overflow-x-auto {
+  max-height: min(32rem, 70vh);
+  overflow-y: auto;
+}
+table.w-full thead th {
+  position: sticky; top: 0; z-index: 1;
+  box-shadow: 0 1px 0 0 #e2e8f0;
+}
+table.w-full tbody tr:hover { background-color: #f1f5f9; }
+table.w-full tbody tr:nth-child(even) { background-color: #fafbfc; }
+table.w-full tbody tr:nth-child(even):hover { background-color: #f1f5f9; }
+table.w-full td, table.w-full th { transition: background-color .1s ease; }
+
+/* ボタン共通の押下フィードバックとフォーカス表示 */
+button { transition: background-color .15s ease, box-shadow .15s ease, opacity .15s ease, transform .05s ease; }
+button:not(:disabled):active { transform: translateY(1px); }
+button:disabled { opacity: .6; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
+  outline: 2px solid #2563eb; outline-offset: 2px; border-radius: 4px;
+}
+
+/* フォーム部品 */
+input, select, textarea { transition: border-color .15s ease, box-shadow .15s ease; }
+input:hover, select:hover, textarea:hover { border-color: #94a3b8; }
+input:focus, select:focus, textarea:focus {
+  border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); outline: none;
+}
+
+/* セクション切替時に軽いフェードで表示 */
+.section:not(.hidden) { animation: section-fade .18s ease; }
+@keyframes section-fade { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: translateY(0); } }

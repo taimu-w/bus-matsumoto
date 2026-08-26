@@ -10,9 +10,9 @@
 const pool = require('../config/db');
 const { timeStrToMinutes, minutesToTimeStr, getDayType, computeDelayMinutes } = require('../utils/time');
 const { loadHolidaySet } = require('./holidayCalendar');
+const { getRuntimeSetting } = require('./runtimeSettings');
 
 const MIN_SAMPLES_FOR_TRUST = 3;
-const BLEND_WEIGHT = parseFloat(process.env.ETA_BLEND_WEIGHT || '0.55'); // 過去統計への信頼度(0-1)
 const LIVE_SEGMENTS_FOR_PACE = 3; // 直近何区間の実績からペースを算出するか
 
 // 遅延予測の暴走防止（仕様③、docs参照なし・口頭仕様）: 統計・ペース補正だけに
@@ -30,8 +30,11 @@ const DELAY_RECOVERY_BOOST = 1.15;
 
 /**
  * scheduled_time が実際の時刻情報として使える値かどうかを判定する。
- * NULL・空文字・「↓」「通過」などの非時刻データはすべて無効(false)。
- * （timeStrToMinutesはこれらに対して既にNaNを返す実装になっているため、それを利用する）
+ * GTFSのstop_times.txtに載る行には必ず実時刻が入るため、通常のデータでは
+ * 常にtrueになる。NULL・空文字などになるのは、元GTFSフィード側の時刻欠損・
+ * 不正値といった、こちらでは制御できない入力不備のときだけ（＝システムの
+ * 境界にある外部データの保険的なチェックであり、「通過バス停」を判定する
+ * ためのものではない）。
  */
 function isValidTime(t) {
   return !Number.isNaN(timeStrToMinutes(t));
@@ -70,70 +73,79 @@ function capPredictedDelay(rawDelay, currentDelay) {
  * completed_trips のうち未集計のものを segment_travel_stats へインクリメンタル反映する。
  */
 async function updateSegmentStats(client) {
-  // is_official = TRUE（＝その便の実績として正とみなす、最後に担当車両だった記録）だけを
-  // 集計する。候補車両止まりの記録を混ぜると、別経路をたまたま走っていた車両の所要時間で
-  // 区間統計が汚染される。また担当が切り替わった便で同じ区間を二重計上することも防げる。
-  const pending = await client.query(
-    `SELECT id, day_of_week, day_type FROM completed_trips
-     WHERE aggregated = FALSE AND is_official = TRUE
-     ORDER BY id ASC LIMIT 200`
-  );
-  if (pending.rows.length === 0) return { aggregated: 0 };
-
-  for (const trip of pending.rows) {
-    const stopTimes = await client.query(
-      `SELECT stop_id, seq_order, actual_minutes FROM completed_trip_stop_times
-       WHERE completed_trip_id = $1 AND actual_minutes IS NOT NULL
-       ORDER BY seq_order ASC`,
-      [trip.id]
+  // finishTrips()の運行日終了掃除と、パイプラインのreassignOrphanTrips()の両方から
+  // 呼ばれるため、2つの独立したDB接続が同時にこの関数を実行しうる（点検所見 C-5）。
+  // 対策として、この関数全体を1トランザクションにまとめ、対象行の取得を
+  // FOR UPDATE SKIP LOCKEDにする。これにより「もう一方が処理中の行」を
+  // 互いに読み飛ばすため、同じ completed_trips 行を二重集計することがなくなる。
+  await client.query('BEGIN');
+  try {
+    // is_official = TRUE（＝その便の実績として正とみなす、最後に担当車両だった記録）だけを
+    // 集計する。候補車両止まりの記録を混ぜると、別経路をたまたま走っていた車両の所要時間で
+    // 区間統計が汚染される。また担当が切り替わった便で同じ区間を二重計上することも防げる。
+    const pending = await client.query(
+      `SELECT id, day_of_week, day_type FROM completed_trips
+       WHERE aggregated = FALSE AND is_official = TRUE
+       ORDER BY id ASC LIMIT 200
+       FOR UPDATE SKIP LOCKED`
     );
-    const rows = stopTimes.rows;
-    // day_type は祝日カレンダー反映済み（finishService.jsのarchiveAssignment()参照）。
-    // 祝日カレンダー導入前にアーカイブされ day_type が未設定の行のみ、
-    // 従来ロジック（日曜のみholiday扱い）にフォールバックする。
-    const dayType = trip.day_type || (trip.day_of_week === 0 ? 'holiday' : trip.day_of_week === 6 ? 'saturday' : 'weekday');
-
-    for (let i = 0; i < rows.length - 1; i++) {
-      const from = rows[i];
-      const to = rows[i + 1];
-      if (to.seq_order - from.seq_order !== 1) continue; // 隣接区間のみ統計対象にする
-
-      let diffMin = to.actual_minutes - from.actual_minutes;
-      if (diffMin < 0) diffMin += 24 * 60;
-      if (diffMin <= 0 || diffMin > 60) continue; // 異常値除外（1区間60分超は測定誤りとみなす）
-
-      const seconds = diffMin * 60;
-      const hourBucket = Math.floor(to.actual_minutes / 60) % 24;
-
-      const existing = await client.query(
-        `SELECT sample_count, avg_seconds FROM segment_travel_stats
-         WHERE from_stop_id = $1 AND to_stop_id = $2 AND day_type = $3 AND hour_bucket = $4`,
-        [from.stop_id, to.stop_id, dayType, hourBucket]
-      );
-
-      if (existing.rows.length === 0) {
-        await client.query(
-          `INSERT INTO segment_travel_stats (from_stop_id, to_stop_id, day_type, hour_bucket, sample_count, avg_seconds, updated_at)
-           VALUES ($1, $2, $3, $4, 1, $5, now())`,
-          [from.stop_id, to.stop_id, dayType, hourBucket, seconds]
-        );
-      } else {
-        const { sample_count: n, avg_seconds: avg } = existing.rows[0];
-        const newCount = n + 1;
-        const newAvg = (avg * n + seconds) / newCount;
-        await client.query(
-          `UPDATE segment_travel_stats
-           SET sample_count = $1, avg_seconds = $2, updated_at = now()
-           WHERE from_stop_id = $3 AND to_stop_id = $4 AND day_type = $5 AND hour_bucket = $6`,
-          [newCount, newAvg, from.stop_id, to.stop_id, dayType, hourBucket]
-        );
-      }
+    if (pending.rows.length === 0) {
+      await client.query('COMMIT');
+      return { aggregated: 0 };
     }
 
-    await client.query(`UPDATE completed_trips SET aggregated = TRUE WHERE id = $1`, [trip.id]);
-  }
+    for (const trip of pending.rows) {
+      const stopTimes = await client.query(
+        `SELECT stop_id, seq_order, actual_minutes FROM completed_trip_stop_times
+         WHERE completed_trip_id = $1 AND actual_minutes IS NOT NULL
+         ORDER BY seq_order ASC`,
+        [trip.id]
+      );
+      const rows = stopTimes.rows;
+      // day_type は祝日カレンダー反映済み（finishService.jsのarchiveAssignment()参照）。
+      // 祝日カレンダー導入前にアーカイブされ day_type が未設定の行のみ、
+      // 従来ロジック（日曜のみholiday扱い）にフォールバックする。
+      const dayType = trip.day_type || (trip.day_of_week === 0 ? 'holiday' : trip.day_of_week === 6 ? 'saturday' : 'weekday');
 
-  return { aggregated: pending.rows.length };
+      for (let i = 0; i < rows.length - 1; i++) {
+        const from = rows[i];
+        const to = rows[i + 1];
+        if (to.seq_order - from.seq_order !== 1) continue; // 隣接区間のみ統計対象にする
+
+        let diffMin = to.actual_minutes - from.actual_minutes;
+        if (diffMin < 0) diffMin += 24 * 60;
+        if (diffMin <= 0 || diffMin > 60) continue; // 異常値除外（1区間60分超は測定誤りとみなす）
+
+        const seconds = diffMin * 60;
+        const hourBucket = Math.floor(to.actual_minutes / 60) % 24;
+
+        // 読み取り→加算→書き込みをJS側で行うと、異なる便の区間が同じキーに
+        // 集約されるときにロストアップデートが起きる（FOR UPDATE SKIP LOCKEDは
+        // completed_trips行の奪い合いは防ぐが、segment_travel_stats側の行までは
+        // 保護しない）。ON CONFLICT DO UPDATEで加算そのものをSQL側の1文に
+        // 閉じ込め、行ロックで直列化する。
+        await client.query(
+          `INSERT INTO segment_travel_stats (from_stop_id, to_stop_id, day_type, hour_bucket, sample_count, avg_seconds, updated_at)
+           VALUES ($1, $2, $3, $4, 1, $5, now())
+           ON CONFLICT (from_stop_id, to_stop_id, day_type, hour_bucket) DO UPDATE SET
+             avg_seconds = (segment_travel_stats.avg_seconds * segment_travel_stats.sample_count + EXCLUDED.avg_seconds)
+                            / (segment_travel_stats.sample_count + 1),
+             sample_count = segment_travel_stats.sample_count + 1,
+             updated_at = now()`,
+          [from.stop_id, to.stop_id, dayType, hourBucket, seconds]
+        );
+      }
+
+      await client.query(`UPDATE completed_trips SET aggregated = TRUE WHERE id = $1`, [trip.id]);
+    }
+
+    await client.query('COMMIT');
+    return { aggregated: pending.rows.length };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[etaPredictor] updateSegmentStats に失敗しました:', err.message);
+    return { aggregated: 0 };
+  }
 }
 
 async function getSegmentStat(client, fromStopId, toStopId, dayType, hourBucket) {
@@ -149,28 +161,41 @@ async function getSegmentStat(client, fromStopId, toStopId, dayType, hourBucket)
 /**
  * 指定した便への割り当て（assignment）の、残り各バス停に対する予測到着時刻を算出する。
  * 便起点方式では進捗が (便 × 車両) 単位になったため、車両IDではなく割り当てIDを受け取る。
- * 予測アルゴリズムそのものは従来から一切変更していない。
  * 戻り値: [{ stopId, seqOrder, predictedTime, predictedDelayMinutes, source, stopsBefore }]
  *   source: 'historical'（統計採用） | 'schedule_paced'（時刻表所要時間×ペース補正）
- *         | 'naive_anchored'（通過区間を基準駅からの定刻差分で算出） | 'through_skip'（通過駅本体・時間を進めない）
+ *         | 'naive_anchored'（scheduled_time欠損区間を基準駅からの定刻差分で算出）
+ *         | 'through_skip'（scheduled_time欠損駅本体・時間を進めない）
  *         | 'naive'（統計・基準駅とも不明な異常系の最終フォールバック）
  *   stopsBefore: 予測時点で対象停留所の何停留所手前に居たか（cursorSeqとの差。
  *     予測精度監視で「何停留所前に出した予測か」の軸に使う。算出アルゴリズムの
  *     判定には一切使わない、付随メタデータ）
  *
+ * 【2026年8月・GTFSデータ構造の見直しに伴う位置づけの変更】
+ * naive_anchored/through_skipは、元は「通過バス停（旧GASの『↓』相当）」を処理する
+ * ためのロジックだった。当時はis_through（経由・非停車）のバス停はscheduled_timeが
+ * NULLになる設計だったため、通過区間をまたぐたびにこのロジックが起動していた。
+ * その後、is_through判定をGTFS本来の意味（pickup_type=1 かつ drop_off_type=1の
+ * 場合のみ真の通過）に修正し、scheduled_timeは常に実際のGTFS時刻を保持するように
+ * なった（GTFSのstop_times.txtには元々「時刻を持たない行」は存在しないため）。
+ * そのため、このロジックが実際に起動するのは「元GTFSフィード側の時刻データが
+ * 欠損・不正である」という、こちらでは制御できない外部データ不備のときだけになった
+ * （現行の実データでは一度も発生しない）。削除も検討したが、外部フィードの不備で
+ * scheduled_timeがNULLになる区間が連続した場合に「5分固定を連鎖加算して予測が
+ * 大暴走する」という過去に実際に発生した不具合を再発させないための保険として、
+ * あえて残している。
+ *
  * 仕様書 第9項 追加修正:
- *   ①通過バス停を跨ぐ区間は、データ汚染防止のため統計/ペース補正を使わない。
- *     ただし通過駅の scheduled_time はNULLや「↓」など非時刻データのため、
- *     単純に前駅との差分を取ると5分固定フォールバックが連鎖し予測が大暴走する。
- *     そのため「最後に有効な時刻表を持っていた通常停車駅(lastValidStop)」を
- *     基準に、有効な定刻同士の差分のみで絶対時刻を算出する。
+ *   ①scheduled_timeが欠損している区間は、データ汚染防止のため統計/ペース補正を
+ *     使わない。単純に前駅との差分を取ると5分固定フォールバックが連鎖し予測が
+ *     大暴走するため、「最後に有効な時刻表を持っていた通常停車駅(lastValidStop)」
+ *     を基準に、有効な定刻同士の差分のみで絶対時刻を算出する。
  *   ②通常停車バス停（有効な時刻表を持つ駅）で予測が定刻を下回る場合は、
- *     早発防止のため定刻まで床打ちする。通過駅は対象外。
+ *     早発防止のため定刻まで床打ちする。scheduled_time欠損駅は対象外。
  *   ③現在の遅れ(currentDelay)を基準に、以降の予測遅延に上限を設ける
  *     （resolveDelayCeiling）。統計・ペース補正だけでは誤差が連鎖的に積み
  *     上がり、起点はわずかな遅れでも終点では非現実的な大遅延になってしまう
  *     ことがあったための対策。遅れ解消方向の予測はさらにやや強調する
- *     （capPredictedDelay／DELAY_RECOVERY_BOOST）。通過駅は対象外。
+ *     （capPredictedDelay／DELAY_RECOVERY_BOOST）。scheduled_time欠損駅は対象外。
  */
 async function predictArrivals(client, assignmentId) {
   const rows = await client.query(
@@ -251,7 +276,7 @@ async function predictArrivals(client, assignmentId) {
   const results = [];
   let prevStop = lastArrived;
   // 「最後に有効な時刻表を持っていた通常停車駅」を基準駅として保持する。
-  // 通過区間(↓)を跨ぐ際は、直前駅(prevStop)ではなく必ずこの基準駅からの
+  // scheduled_time欠損区間を跨ぐ際は、直前駅(prevStop)ではなく必ずこの基準駅からの
   // 定刻差分で絶対時刻を算出することで、5分固定フォールバックの連鎖（大暴走）を防ぐ。
   let lastValidStop = prevStop;
 
@@ -270,21 +295,18 @@ async function predictArrivals(client, assignmentId) {
       continue;
     }
 
-    // 【仕様①】通過（＝定刻が不明な）区間を跨ぐ場合の一括フォールバック
+    // 【仕様①】scheduled_timeが欠損している区間を跨ぐ場合の一括フォールバック
     // 予測対象(s)または直前(prevStop)のいずれかの scheduled_time が無効
-    // （NULL・「↓」など）な場合、その区間は統計データが歪んでいたり
-    // 存在しなかったりするため、過去統計(historical)やペース補正
-    // (schedule_paced)を一切使わない。
-    // 判定はステータス('通過')ではなく scheduled_time の有効性(isValidTime)で
-    // 行う。これは、"本来の経由・非停車駅（通過）"だけでなく、"その便の終点より
-    // 先でまだ運行終了と確定していないだけのバス停（status=''のまま）"も
-    // 同じく scheduled_time が無いため、どちらも同じ安全な計算に乗せる必要が
-    // あるため（statusだけで判定すると後者が5分固定フォールバックの連鎖で
-    // 予測時刻が大暴走してしまう）。
+    // （NULL等）な場合、その区間は統計データが歪んでいたり存在しなかったり
+    // するため、過去統計(historical)やペース補正(schedule_paced)を一切使わない。
+    // GTFSのstop_times.txtに載る行には本来必ず実時刻が入るため、通常のデータでは
+    // このisThroughSegmentがtrueになることはない。ここに入るのは元GTFSフィード側の
+    // 時刻欠損・不正値など、外部データの不備によるものだけ（＝もう「通過バス停」の
+    // 処理ではなく、外部データ不備に対する保険的なフォールバック）。
     // 「最後に有効な時刻表を持っていた通常停車駅(lastValidStop)」を基準に、
-    // 有効な定刻同士の差分だけで絶対時刻を算出し直すことで、これを防ぐ。
-    // 前後とも有効な時刻表を持つ駅に戻った時点で、自動的に本来の高度な予測
-    // （historical/schedule_paced）へ復帰する。
+    // 有効な定刻同士の差分だけで絶対時刻を算出し直すことで、5分固定フォールバックの
+    // 連鎖による予測の大暴走を防ぐ。前後とも有効な時刻表を持つ駅に戻った時点で、
+    // 自動的に本来の高度な予測（historical/schedule_paced）へ復帰する。
     const isThroughSegment = !isValidTime(s.scheduled_time) || !isValidTime(prevStop.scheduled_time);
 
     let segmentMinutes;
@@ -295,7 +317,7 @@ async function predictArrivals(client, assignmentId) {
       const anchorHasValidTime = lastValidStop && isValidTime(lastValidStop.scheduled_time);
 
       if (!sHasValidTime) {
-        // 計算対象の駅自体が「↓」等で有効な時刻表を持たない（通過駅本体）
+        // 計算対象の駅自体が有効な時刻表を持たない（元GTFSフィードの時刻欠損）
         // → 時間は進めずスキップ処理する。
         segmentMinutes = 0;
         source = 'through_skip';
@@ -320,7 +342,8 @@ async function predictArrivals(client, assignmentId) {
 
       if (stat && stat.sample_count >= MIN_SAMPLES_FOR_TRUST) {
         const historicalMinutes = stat.avg_seconds / 60;
-        segmentMinutes = historicalMinutes * (BLEND_WEIGHT + (1 - BLEND_WEIGHT) * liveFactor);
+        const blendWeight = getRuntimeSetting('ETA_BLEND_WEIGHT');
+        segmentMinutes = historicalMinutes * (blendWeight + (1 - blendWeight) * liveFactor);
         source = 'historical';
       } else if (prevStop.scheduled_time && s.scheduled_time) {
         const s1 = timeStrToMinutes(prevStop.scheduled_time);
@@ -347,9 +370,9 @@ async function predictArrivals(client, assignmentId) {
     // 【仕様②】早発防止ロジック
     // 有効な時刻表(isValidTime)を持つ通常停車バス停に限り、予測時刻が定刻を
     // 下回った場合は、バス停での時間調整（定刻までの待機）をシミュレートし、
-    // 定刻まで床打ちする。通過駅（isValidTimeがfalse）はそもそも定刻が
-    // 存在しないため対象外とする。補正後の時刻は次区間の出発基準時刻として
-    // そのまま引き継がれる。
+    // 定刻まで床打ちする。scheduled_timeが欠損している駅（isValidTimeがfalse。
+    // 通常発生しない）はそもそも定刻が存在しないため対象外とする。補正後の時刻は
+    // 次区間の出発基準時刻としてそのまま引き継がれる。
     const sHasValidScheduledTime = isValidTime(s.scheduled_time);
     const schedMin = sHasValidScheduledTime ? timeStrToMinutes(s.scheduled_time) : null;
     if (sHasValidScheduledTime && cursorMinutes < schedMin) {
@@ -361,7 +384,7 @@ async function predictArrivals(client, assignmentId) {
       ? (computeDelayMinutes(s.scheduled_time, predictedTime) ?? currentDelay)
       : currentDelay;
 
-    // 【仕様③】遅延予測の上限キャップ／短縮強調。通過駅(scheduled_timeが無効)は
+    // 【仕様③】遅延予測の上限キャップ／短縮強調。scheduled_timeが欠損している駅は
     // currentDelayをそのまま使っているだけなので対象外（上限を跨ぐことはない）。
     if (sHasValidScheduledTime) {
       const cappedDelay = capPredictedDelay(predictedDelay, currentDelay);
@@ -554,12 +577,15 @@ async function getArrivalsForAssignment(client, assignmentId) {
 // 予測根拠(source)の管理画面向け日本語説明。値の一覧はpredictArrivals()のJSDoc参照。
 // category は「時刻表 / 過去統計 / 直近走行ペース」のどれを根拠にしたかの大分類
 // （管理画面の根拠表示で使う。仕様: ETA予測の根拠表示）。
+// naive_anchored/through_skipは、元GTFSフィードの時刻欠損という外部データ不備が
+// あったときだけ現れる（通常のデータでは発生しない）。過去に記録された
+// trip_arrival_prediction_log の古い行にラベルを付けるためだけに残してある。
 const SOURCE_INFO = {
   schedule: { category: 'schedule', label: '時刻表（始発前・実績なし）' },
   historical: { category: 'historical', label: '過去統計＋直近走行ペース補正' },
   schedule_paced: { category: 'pace', label: '時刻表所要時間×直近走行ペース補正' },
-  naive_anchored: { category: 'schedule', label: '時刻表（通過区間・基準駅からの差分）' },
-  through_skip: { category: 'schedule', label: '通過駅（時刻表上非停車）' },
+  naive_anchored: { category: 'schedule', label: '時刻表（元データ時刻欠損・基準駅からの差分）' },
+  through_skip: { category: 'schedule', label: '元データ時刻欠損（時間を進めず据え置き）' },
   naive: { category: 'fallback', label: 'フォールバック（統計・時刻表とも参照不可）' },
   actual: { category: 'actual', label: '実績到着' }
 };

@@ -2,8 +2,10 @@ const fs = require('fs');
 const path = require('path');
 
 // マイグレーション: service_id対応 + 複数事業者対応（feeds）
-// フィード構成・外部ID対応はコード（config/feeds.js / config/routeExternalIdMapping.js）へ移し、
-// 旧 route_external_ids / feed_mappings テーブルはステップ8で削除する。
+// フィード構成はコード（config/feeds.js）へ移し、旧 feed_mappings テーブルはステップ8で削除する。
+// 外部ID⇔route_idの対応（route_external_ids）は、一時期コードへ移した後、
+// 表記ゆれの心配がない厳格な検証を維持したままDB管理・管理画面編集に戻した
+// （2026-08-21。schema.sqlのCREATE TABLE IF NOT EXISTSで新規・既存どちらにも保証される）。
 async function migrate() {
   const pool = require('../config/db');
   const client = await pool.connect();
@@ -95,13 +97,12 @@ async function migrate() {
       ADD COLUMN IF NOT EXISTS feed_id TEXT
     `);
     
-    // 8. 旧 route_external_ids / feed_mappings テーブルの削除
-    //    外部ID⇔route_id の対応は config/routeExternalIdMapping.js、
+    // 8. 旧 feed_mappings テーブルの削除
     //    位置情報フィード⇔GTFSフィードの対応は config/feeds.js へ移した。
-    //    どちらも他テーブルから参照される側ではない（routes / feeds を参照する側）ため
+    //    他テーブルから参照される側ではない（routes / feeds を参照する側）ため
     //    CASCADE は不要で、他テーブルへの波及もない。
-    //    ⚠️ feeds は DROP しない。稼働状態の記録先として残す（仕様書 3.3）。
-    await client.query(`DROP TABLE IF EXISTS route_external_ids`);
+    //    ⚠️ feeds は DROP しない。稼働状態の記録先として残す（docs/外部IDマッピングのコード化_仕様書.md参照）。
+    //    route_external_ids は DROP しない。DB管理・管理画面編集に戻したため（2026-08-21）。
     await client.query(`DROP TABLE IF EXISTS feed_mappings`);
 
     // 9. schedule_trips に headsign を追加（GTFS trip_headsign。行先表示のハードコード解消のため）
@@ -372,6 +373,133 @@ async function migrate() {
     //      無条件に毎回このUNIQUE制約を再作成するため、ここで打ち消す必要がある）。
     //      IF EXISTSなので存在しない場合は無害。
     await client.query(`ALTER TABLE stops DROP CONSTRAINT IF EXISTS stops_route_direction_seq_key`);
+
+    // ==========================================================
+    // 20. C-5 対策: 便クローズの二重実行防止（点検所見 バス運行システム点検所見.md参照）
+    //
+    //     finishTrips()の運行日終了掃除とパイプラインのreassignOrphanTrips()が、
+    //     それぞれ独立したタイマー・DB接続から同じ便を同時にcloseDailyTrip()して
+    //     いたため、completed_trips に同一 (daily_trip_id, assignment_id) の行が
+    //     二重に入り、その行がupdateSegmentStats()で二重集計されてsegment_travel_stats
+    //     まで汚染されうる状態だった。コード側の一次対策（closeDailyTripの行ロック、
+    //     updateSegmentStatsのFOR UPDATE SKIP LOCKED化）に加え、DB制約でも
+    //     二重挿入を防ぐ。
+    //
+    //     制約追加に先立ち、既存データの重複を確認する（対応時の検証環境で実際に
+    //     6組・12行の重複が見つかっている＝この競合が理論上ではなく実際に発生して
+    //     いたことの裏付け）。重複がある状態でUNIQUE制約を追加しようとすると
+    //     ALTER TABLEそのものが失敗するため、事前にdaily_trip_id/assignment_idの
+    //     組ごとに最小id（先にアーカイブされた側）だけを残して重複行を削除する
+    //     （completed_trip_stop_timesはON DELETE CASCADEで追従する）。
+    //
+    //     重複を含む行は二重集計された可能性があるため、segment_travel_statsの
+    //     sample_count・avg_secondsは既に汚染されている。C-1/C-2対応時と同じく
+    //     過去の統計値をそのまま維持する前提は置かず、completed_trips.aggregated を
+    //     全行FALSEへ戻してTRUNCATEし、重複排除後の（＝正しい件数の）completed_trips
+    //     からupdateSegmentStats()に作り直させる。
+    //
+    //     ⚠️ このクリーンアップは一度だけでよいため、制約がまだ存在しないことを
+    //     ガードにする（ステップ19と同じ考え方）。2回目以降の起動では、通常運用で
+    //     生じるはずのない重複を誤って掃除しないよう丸ごとスキップする。
+    // ==========================================================
+    const completedTripsUniqueConstraint = await client.query(`
+      SELECT 1 FROM pg_constraint WHERE conname = 'completed_trips_daily_trip_id_assignment_id_key'
+    `);
+
+    if (completedTripsUniqueConstraint.rows.length === 0) {
+      const dupGroups = await client.query(`
+        SELECT daily_trip_id, assignment_id, count(*) AS n
+        FROM completed_trips
+        WHERE daily_trip_id IS NOT NULL AND assignment_id IS NOT NULL
+        GROUP BY daily_trip_id, assignment_id
+        HAVING count(*) > 1
+      `);
+
+      if (dupGroups.rows.length > 0) {
+        console.log(`[migrate] C-5対策: completed_trips に (daily_trip_id, assignment_id) の重複を ${dupGroups.rows.length}組 検出しました。重複を排除し、統計を作り直します。`);
+        // 各組で最小id（先にアーカイブされた側）だけを残す
+        await client.query(`
+          DELETE FROM completed_trips a
+          USING completed_trips b
+          WHERE a.daily_trip_id = b.daily_trip_id
+            AND a.assignment_id = b.assignment_id
+            AND a.id > b.id
+        `);
+        await client.query(`TRUNCATE segment_travel_stats`);
+        await client.query(`UPDATE completed_trips SET aggregated = FALSE`);
+      }
+
+      await client.query(`
+        ALTER TABLE completed_trips
+        ADD CONSTRAINT completed_trips_daily_trip_id_assignment_id_key UNIQUE (daily_trip_id, assignment_id)
+      `);
+      console.log('[migrate] ステップ20完了: completed_trips (daily_trip_id, assignment_id) にUNIQUE制約を追加しました。');
+    }
+
+    // 21. schedule_stop_times / daily_trip_stop_times に no_pickup / no_drop_off を追加
+    //     is_through（乗車も降車もできない真の通過）は既に持っていたが、乗車のみ・降車のみ
+    //     （pickup_type/drop_off_typeのどちらか一方だけが1）を個別に区別する列が無く、
+    //     リアルタイム運行状況側（trip_stop_progressの元になるdaily_trip_stop_times経由）
+    //     では「降車のみ」「乗車のみ」バッジを表示できなかった。表示用メタデータとして
+    //     is_throughと同じ扱いで追加する。
+    await client.query(`
+      ALTER TABLE schedule_stop_times ADD COLUMN IF NOT EXISTS no_pickup BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+    await client.query(`
+      ALTER TABLE schedule_stop_times ADD COLUMN IF NOT EXISTS no_drop_off BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+    await client.query(`
+      ALTER TABLE daily_trip_stop_times ADD COLUMN IF NOT EXISTS no_pickup BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+    await client.query(`
+      ALTER TABLE daily_trip_stop_times ADD COLUMN IF NOT EXISTS no_drop_off BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+
+    // ==========================================================
+    // 22. tourist_spots に英語版の入力欄（hours_en/stay_duration_en/description_en）を追加
+    //     （観光スポット情報_仕様書）。名称・かな・ローマ字・写真URLは言語非依存のため対象外。
+    //     新規環境ではschema.sqlのCREATE TABLEに既に含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`
+      ALTER TABLE tourist_spots ADD COLUMN IF NOT EXISTS hours_en TEXT
+    `);
+    await client.query(`
+      ALTER TABLE tourist_spots ADD COLUMN IF NOT EXISTS stay_duration_en TEXT
+    `);
+    await client.query(`
+      ALTER TABLE tourist_spots ADD COLUMN IF NOT EXISTS description_en TEXT
+    `);
+
+    // ==========================================================
+    // 23. tourist_spots に category（カテゴリ、フリーテキスト・情報のみで現時点は検索/表示に未使用）と
+    //     display_tag（表示。空欄、または「観光」「観光スポット」を含まない値のときは
+    //     バス停ページの周辺観光スポット表示からのみ除外する）を追加。
+    //     地点名検索・詳細ポップアップ取得は display_tag の影響を受けない
+    //     （経路検索の地点としては使うが観光スポットではない登録＝学校・病院等への対策）。
+    //     新規環境ではschema.sqlのCREATE TABLEに既に含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`
+      ALTER TABLE tourist_spots ADD COLUMN IF NOT EXISTS category TEXT
+    `);
+    await client.query(`
+      ALTER TABLE tourist_spots ADD COLUMN IF NOT EXISTS display_tag TEXT
+    `);
+
+    // ==========================================================
+    // 24. trip_stop_progress に「付近」状態（STOP_RADIUS_METERS以内に入ったが
+    //     まだ離脱=到着確定していない）の最小距離・観測時刻を追加。2段階到着判定
+    //     （バス停到着判定およびフロントエンド表示改善案）のため。
+    //     新規環境ではschema.sqlのCREATE TABLEに既に含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`
+      ALTER TABLE trip_stop_progress ADD COLUMN IF NOT EXISTS nearby_min_distance_meters DOUBLE PRECISION
+    `);
+    await client.query(`
+      ALTER TABLE trip_stop_progress ADD COLUMN IF NOT EXISTS nearby_min_distance_gps_time TEXT
+    `);
+    await client.query(`
+      ALTER TABLE trip_stop_progress ADD COLUMN IF NOT EXISTS nearby_min_distance_gps_time_ts TIMESTAMPTZ
+    `);
 
     await client.query('COMMIT');
     console.log('[migrate] 複数事業者対応・便起点割り当てマイグレーション完了');

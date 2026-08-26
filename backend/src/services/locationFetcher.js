@@ -2,15 +2,19 @@
 // 複数の位置情報CSVフィード（事業者ごと）をすべて取得し、それぞれのバス位置情報を
 // vehicle_positions_raw に追記する。
 // 各フィードは独立したtry/catchで処理され、1つの事業者の取得失敗が他に影響しない。
-// 位置情報フィードの一覧とGTFSフィードとの対応は config/feeds.js、
-// 外部ID→route_idの対応は config/routeExternalIdMapping.js がそれぞれ唯一の情報源である。
-// （旧: feeds / feed_mappings / route_external_ids テーブルによるDB管理・confidence推測は廃止）
+// 位置情報フィードの一覧とGTFSフィードとの対応は config/feeds.js（コード）が唯一の情報源。
+// 外部ID→route_idの対応は route_external_ids（DB）を services/routeExternalIdMapping.js が
+// TTLキャッシュ付きで読む。管理画面から編集した際はキャッシュを即時破棄するため、
+// 反映まで最大60秒（次回ポーリング）で済む。
+// （旧: feed_mappings テーブルによるconfidence推測は廃止。route_external_idsは
+//   一時期コード管理化したが、厳格な検証を維持したままDB管理・管理画面編集に戻した）
 const fetch = require('cross-fetch');
 const pool = require('../config/db');
 const { formatNowNoFormat, formatTimeNoFormat } = require('../utils/time');
 const { resolveDirectionId } = require('../config/directionMapping');
 const { getEnabledLocationFeeds, getGtfsFeedIdsFor } = require('../config/feeds');
-const { getExternalIdsForFeeds } = require('../config/routeExternalIdMapping');
+const { getExternalIdsForFeeds } = require('./routeExternalIdMapping');
+const { getRuntimeSetting } = require('./runtimeSettings');
 
 function parseCsvLine(line) {
   // 単純なCSVパーサ（ダブルクォート囲みに簡易対応）。フィードはシンプルなCSVのため十分。
@@ -51,7 +55,7 @@ async function fetchLocationFeed(client, feed, freshnessMin, now, timeLimit, now
   // 旧実装は feed_mappings から confidence 降順で**1件だけ**選んでいたため、
   // 同値の場合に採用フィードが不定になり、またがる事業者の片方が落ちていた。
   // 対応が未設定（空配列）の場合、getExternalIdsForFeeds は絞り込まず全件を返す。
-  const effectiveExternalIdMap = getExternalIdsForFeeds(getGtfsFeedIdsFor(feedId));
+  const effectiveExternalIdMap = await getExternalIdsForFeeds(getGtfsFeedIdsFor(feedId));
 
   let response;
   try {
@@ -229,9 +233,9 @@ async function fetchLocationFeed(client, feed, freshnessMin, now, timeLimit, now
 }
 
 async function fetchLocation() {
-  const freshnessMin = parseInt(process.env.GPS_FRESHNESS_MIN || '15', 10);
+  const freshnessMin = getRuntimeSetting('GPS_FRESHNESS_MIN');
 
-  // フィード一覧・外部IDマッピングはいずれもコード上の設定なのでDBを引かない。
+  // フィード一覧はコード上の設定（config/feeds.js）から取得する。
   const locationFeeds = getEnabledLocationFeeds();
 
   if (locationFeeds.length === 0) {

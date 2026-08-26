@@ -4,8 +4,60 @@ const pool = require('../config/db');
 const { getGtfsDir, qualifyRouteId, unqualifyRouteId, ensureGtfsFilesPresent } = require('../services/gtfsFeedManager');
 const { readFrequenciesByTripId } = require('../services/gtfsFrequencies');
 const { getEnabledGtfsFeeds, getAllFeedsForDb, validateFeedConfig } = require('../config/feeds');
-const { validateRouteExternalIdMap } = require('../config/routeExternalIdMapping');
 const { getNationalHolidays } = require('../utils/japaneseHolidays');
+
+// 外部ID（位置情報CSVの系統ID）→ GTFS route_id の初期値。
+// 新規DB（route_external_idsが空）のときだけ投入する（seedRouteExternalIds参照）。
+// 管理画面での追加・変更・削除を上書きしないよう、2回目以降の起動では何もしない。
+//
+// route_id が null の3件は、対応するGTFS路線がまだ存在しない外部ID
+// （第一高校スクール／南松本・平田線／平田・村井線）。noteに理由を残す。
+// 消してしまうと、後で該当路線がGTFSに追加された際に外部IDを再調査する羽目になる。
+const DEFAULT_ROUTE_EXTERNAL_IDS = [
+  // --- guruttomatsumotobus1 ---
+  { externalId: '01h9j04qf5pfg6za7eg0c4wqea', routeId: 'guruttomatsumotobus1:10', note: '信大横田循環線' },
+  { externalId: '01h9j06f82mw3wvnddsbs4z7fs', routeId: 'guruttomatsumotobus1:11', note: '横田信大循環線' },
+  { externalId: '01h9j07mcq8yvmvcepyyetchhh', routeId: 'guruttomatsumotobus1:12', note: '浅間線' },
+  { externalId: '01h9j099yhcqm8h414kwmenm5p', routeId: 'guruttomatsumotobus1:13', note: '新浅間線' },
+  { externalId: '01h9j0aq0jnyqd6bnce5tdshsx', routeId: 'guruttomatsumotobus1:14', note: '美ヶ原温泉線' },
+  { externalId: '01h9j0bk8t8qxpk23m4bqmeaqf', routeId: 'guruttomatsumotobus1:15', note: '北市内線' },
+  { externalId: '01h9j0cgk3qvw6t8j9z5kp50bg', routeId: 'guruttomatsumotobus1:16', note: '岡田線' },
+  { externalId: '01h9j0dfrkbgq5srqsstmb87zr', routeId: 'guruttomatsumotobus1:17', note: 'アルプス公園線' },
+  { externalId: '01h9j0eaxbqfgeapy0wcyff5cg', routeId: 'guruttomatsumotobus1:18', note: '鹿教湯温泉線' },
+  { externalId: '01h9j0f842rq9nvmc1f0hr615a', routeId: 'guruttomatsumotobus1:19', note: '空港今井線' },
+  { externalId: '01h9j0g3wfs5j4jnfm0w3q0mq9', routeId: 'guruttomatsumotobus1:20', note: '大久保工場団地・神林線' },
+  { externalId: '01h9pfrv7rm8dwfb97y4nptdxv', routeId: 'guruttomatsumotobus1:20', note: '大久保工場団地・神林線（系統違いの別ID）' },
+  { externalId: '01h9j0h2f2zey9px0ek9brh1m6', routeId: 'guruttomatsumotobus1:21', note: '山形線' },
+  { externalId: '01h9j0hym391fkbt20ffchkame', routeId: 'guruttomatsumotobus1:22', note: '寿台線' },
+  { externalId: '01h9j0jyc4x4nrc0y859nxpkhy', routeId: 'guruttomatsumotobus1:23', note: '松原線' },
+  { externalId: '01h9j0kxkm4x90ffdxsk0mbznh', routeId: 'guruttomatsumotobus1:24', note: '内田線' },
+  { externalId: '01gtk2gfphyzgzm7mb0pwn8eqp', routeId: 'guruttomatsumotobus1:25', note: '並柳団地線' },
+  { externalId: '01ha922g5tvbnnkmmcvna9524w', routeId: 'guruttomatsumotobus1:25', note: '並柳団地線（系統違いの別ID）' },
+  { externalId: '01h9j0msfjw147rc5ky4thtrt7', routeId: 'guruttomatsumotobus1:26', note: '四賀線' },
+
+  // --- guruttomatsumotobus2 ---
+  { externalId: '01fsp3daby2y055rwgx9w1nk5j', routeId: 'guruttomatsumotobus2:10', note: 'タウンスニーカー北コース' },
+  { externalId: '01fsp3dym3e1mhg5wpze8ykbmn', routeId: 'guruttomatsumotobus2:11', note: 'タウンスニーカー東コース' },
+  { externalId: '01fsp3ee248pz8pgmaq32x639a', routeId: 'guruttomatsumotobus2:12', note: 'タウンスニーカー南コース' },
+  { externalId: '01ft4y663269mwmtjft8bb2gc6', routeId: 'guruttomatsumotobus2:13', note: '南部循環線' },
+  { externalId: '01gtx3caern3gv4z2rhkzba9f4', routeId: 'guruttomatsumotobus2:14', note: '合庁ライナー' },
+  { externalId: '01hcv1n381vs9r0j6d297xepg2', routeId: 'guruttomatsumotobus2:16', note: '松本・島内線' },
+  { externalId: '01hdj79wsrrz2n9ee0vq01e6k2', routeId: 'guruttomatsumotobus2:16', note: '松本・島内線（系統違いの別ID）' },
+  { externalId: '01hcv1ny46af2pagpysazrbrz7', routeId: 'guruttomatsumotobus2:17', note: '南松本・山形線' },
+  { externalId: '01hcv1p87398b578fghsmy2wjh', routeId: 'guruttomatsumotobus2:18', note: '梓川・波田線' },
+  { externalId: '01hcv1pnxzz3s3zc9hxpgm3h4n', routeId: 'guruttomatsumotobus2:19', note: '村井・山形線' },
+  { externalId: '01hcv1q1zs8av0kszg6a74rtnp', routeId: 'guruttomatsumotobus2:20', note: '朝日・波田線' },
+  { externalId: '01hd0f1s4vkm0qm6061mvq79fm', routeId: 'guruttomatsumotobus2:23', note: '奈川・安曇線' },
+  { externalId: '01hd0f04bm9e9x0hf196k5e3r2', routeId: 'guruttomatsumotobus2:24', note: '四賀循環線' },
+  { externalId: '01hd0f0m9bdf4xatjaknthjjjb', routeId: 'guruttomatsumotobus2:24', note: '四賀循環線（系統違いの別ID）' },
+  { externalId: '01hd0f12fbb55tmydz5n9cs79k', routeId: 'guruttomatsumotobus2:24', note: '四賀循環線（系統違いの別ID）' },
+  { externalId: '01hd0f1fzc3903rx7ncp0jrevq', routeId: 'guruttomatsumotobus2:24', note: '四賀循環線（系統違いの別ID）' },
+
+  // --- 対応するGTFS路線が存在しない外部ID（route_id: null） ---
+  { externalId: '01kkdhrxy2vtnqs4dzedzdkf2e', routeId: null, note: '第一高校スクール（GTFSに該当路線なし）' },
+  { externalId: '01hcv1qc4k73nr6hav35kaz57q', routeId: null, note: '南松本・平田線（GTFSに該当路線なし）' },
+  { externalId: '01hcv1qnjyrb99ph8m0zb1hpra', routeId: null, note: '平田・村井線（GTFSに該当路線なし）' }
+];
 
 const GTFS_DIR = getGtfsDir(null);
 
@@ -92,7 +144,7 @@ function sortByStopSequence(rows) {
  * config/feeds.js で定義された全フィードについて、feedsテーブルの行の存在を保証する。
  *
  * feeds テーブルはもう構成マスタではなく、**コードで定義されたフィードの稼働状態を
- * 記録するテーブル**である（仕様書 3.3）。id / feed_type / name / url / enabled は
+ * 記録するテーブル**である（docs/外部IDマッピングのコード化_仕様書.md参照）。id / feed_type / name / url / enabled は
  * コードが正で、DBを直接編集しても次回起動時にここで上書きされる。
  *
  * ⚠️ ON CONFLICT DO UPDATE の SET句に last_fetched_at / last_status / last_error を
@@ -120,8 +172,29 @@ async function ensureFeedRows(client) {
 }
 
 /**
- * コード上の設定（config/feeds.js・config/routeExternalIdMapping.js）と
- * 実際のGTFSデータの整合を検証し、問題があれば警告ログを出す（仕様書 4.2・4.4）。
+ * route_external_ids（DB）の初期値を投入する。
+ *
+ * 管理画面での追加・変更・削除を上書きしないよう、テーブルが完全に空の場合
+ * （＝新規DB）だけ実行する。1件でも既にあれば何もしない（seedHolidaysの
+ * 年単位ガードと同じ考え方。ここは対象が1テーブル全体なので判定も単純にできる）。
+ */
+async function seedRouteExternalIds(client) {
+  const { rows } = await client.query(`SELECT COUNT(*)::int AS c FROM route_external_ids`);
+  if (rows[0].c > 0) return;
+
+  for (const { externalId, routeId, note } of DEFAULT_ROUTE_EXTERNAL_IDS) {
+    await client.query(
+      `INSERT INTO route_external_ids (external_id, route_id, note) VALUES ($1, $2, $3)
+       ON CONFLICT (external_id) DO NOTHING`,
+      [externalId, routeId, note]
+    );
+  }
+  console.log(`[seed] 外部ID⇔route_id対応の初期値 ${DEFAULT_ROUTE_EXTERNAL_IDS.length} 件を登録しました。`);
+}
+
+/**
+ * コード上の設定（config/feeds.js）・DB上の対応表（route_external_ids）と
+ * 実際のGTFSデータの整合を検証し、問題があれば警告ログを出す（docs/外部IDマッピングのコード化_仕様書.md参照）。
  *
  * ⚠️ 問題があっても throw しないこと。GTFS更新でフィード側の route_id が一時的に
  * 消えたときに、システム全体が起動不能になるのを避けるため
@@ -131,10 +204,14 @@ async function validateCodeConfig(client) {
   const routeRows = await client.query(`SELECT id FROM routes`);
   const knownRouteIds = new Set(routeRows.rows.map((row) => row.id));
 
-  const problems = [
-    ...validateFeedConfig(),
-    ...validateRouteExternalIdMap(knownRouteIds)
-  ];
+  const mappingRows = await client.query(
+    `SELECT external_id, route_id FROM route_external_ids WHERE route_id IS NOT NULL`
+  );
+  const mappingProblems = mappingRows.rows
+    .filter((row) => !knownRouteIds.has(row.route_id))
+    .map((row) => `外部ID ${row.external_id} の参照先 route_id ${row.route_id} がGTFSデータに存在しません。`);
+
+  const problems = [...validateFeedConfig(), ...mappingProblems];
 
   if (problems.length === 0) {
     console.log('[seed] フィード構成・外部ID対応の検証: 問題ありません。');
@@ -379,11 +456,6 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
         for (const [tripIndex, trip] of routeTrips.entries()) {
           const tripStopRows = sortByStopSequence(stopTimesByTrip.get(trip.trip_id) || []);
 
-          // この便の全停車駅の最小・最大シーケンス番号を求める（始発・終点の通過誤判定防止）
-          const allSeqs = tripStopRows.map(row => Number.parseInt(row.stop_sequence, 10)).filter(n => !Number.isNaN(n));
-          const minSeq = Math.min(...allSeqs);
-          const maxSeq = Math.max(...allSeqs);
-
           // occurrenceKeyの算出は上のstops構築ループと同じ並び・同じロジックで行う必要がある
           // （同じ便の同じ通過には必ず同じoccurrenceKeyが付くようにするため）。
           // localSeq（withOccurrenceKeysが返す配列でのインデックス、0始まり）が、
@@ -391,26 +463,32 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
           for (const [localSeq, { row, occurrenceKey }] of withOccurrenceKeys(tripStopRows).entries()) {
             const stopMeta = stopMetaById.get(row.stop_id);
             if (!stopMeta) continue;
-            const stopSeq = Number.parseInt(row.stop_sequence, 10);
             const stopRowId = stopRowIdByOccurrence.get(occurrenceKey);
             if (!stopRowId) continue;
 
-            // 始発バス停（最小シーケンス）と終点バス停（最大シーケンス）は、
-            // pickup_type/drop_off_type が 1 でも通過扱いにしない（時刻を正しく表示するため）
-            const isFirst = stopSeq === minSeq;
-            const isLast = stopSeq === maxSeq;
-            const isThrough = !isFirst && !isLast && (row.pickup_type === '1' || row.drop_off_type === '1');
-            const scheduledTime = isThrough ? null : toClockTime(row.departure_time || row.arrival_time);
+            // GTFSのstop_times.txtは、載っている行には必ず実際の時刻（arrival_time/
+            // departure_time）が入る。pickup_type/drop_off_typeは「乗降の可否」だけを
+            // 表すフラグであり、時刻の有無とは無関係（GTFS仕様上、時刻を持たない
+            // 「↓」のような非停車表現は存在しない）。真の「通過」＝乗車も降車もできない
+            // 停車は両方が1の場合のみで、gtfsTimetable.js/gtfsRouteSearch.jsのisThrough
+            // 判定と定義を揃えている。is_throughは表示上のラベル用メタデータであり、
+            // scheduled_timeを隠す理由には使わない。
+            const isThrough = row.pickup_type === '1' && row.drop_off_type === '1';
+            const noPickup = row.pickup_type === '1';
+            const noDropOff = row.drop_off_type === '1';
+            const scheduledTime = toClockTime(row.departure_time || row.arrival_time);
             const stopHeadsign = (row.stop_headsign || '').trim() || null;
             await client.query(
-              `INSERT INTO schedule_stop_times (trip_id, stop_id, stop_sequence, scheduled_time, is_through, stop_headsign)
-               VALUES ($1, $2, $3, $4, $5, $6)
+              `INSERT INTO schedule_stop_times (trip_id, stop_id, stop_sequence, scheduled_time, is_through, no_pickup, no_drop_off, stop_headsign)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                ON CONFLICT (trip_id, stop_id) DO UPDATE
                  SET stop_sequence = EXCLUDED.stop_sequence,
                      scheduled_time = EXCLUDED.scheduled_time,
                      is_through = EXCLUDED.is_through,
+                     no_pickup = EXCLUDED.no_pickup,
+                     no_drop_off = EXCLUDED.no_drop_off,
                      stop_headsign = EXCLUDED.stop_headsign`,
-              [routeTripIds[tripIndex], stopRowId, localSeq, scheduledTime, isThrough, stopHeadsign]
+              [routeTripIds[tripIndex], stopRowId, localSeq, scheduledTime, isThrough, noPickup, noDropOff, stopHeadsign]
             );
           }
         }
@@ -504,6 +582,7 @@ async function seed() {
 
     await seedSettings(client);
     await seedHolidays(client);
+    await seedRouteExternalIds(client);
 
     // コード上の設定と、いま投入したGTFSデータの整合を検証する（警告のみ・起動は止めない）
     await validateCodeConfig(client);

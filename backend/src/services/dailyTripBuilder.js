@@ -16,6 +16,7 @@ const {
   getServiceDateString,
   serviceDateTimeToDate
 } = require('../utils/time');
+const { getRuntimeSetting } = require('./runtimeSettings');
 
 // 生成済みの運行日（プロセス内キャッシュ）。GTFS再投入時は invalidateDailyTripCache() で無効化する。
 let builtServiceDate = null;
@@ -50,6 +51,8 @@ async function loadScheduleTrips(client, activeServiceIds) {
             sst.stop_sequence AS seq_order,
             sst.scheduled_time,
             sst.is_through,
+            sst.no_pickup,
+            sst.no_drop_off,
             sst.stop_headsign
      FROM schedule_trips st
      JOIN schedule_stop_times sst ON sst.trip_id = st.id
@@ -77,6 +80,8 @@ async function loadScheduleTrips(client, activeServiceIds) {
       seqOrder: row.seq_order,
       scheduledTime: row.scheduled_time,
       isThrough: row.is_through,
+      noPickup: row.no_pickup,
+      noDropOff: row.no_drop_off,
       stopHeadsign: row.stop_headsign
     });
   }
@@ -183,18 +188,20 @@ async function replaceStopTimes(client, dailyTripId, trip, offsetMinutes) {
   let i = 1;
   for (const st of trip.stopTimes) {
     const scheduled = st.scheduledTime ? shiftTime(st.scheduledTime, offsetMinutes) : null;
-    values.push(`($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`);
-    params.push(dailyTripId, st.stopId, st.seqOrder, scheduled, st.isThrough, st.stopHeadsign || null);
+    values.push(`($${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++}, $${i++})`);
+    params.push(dailyTripId, st.stopId, st.seqOrder, scheduled, st.isThrough, st.noPickup, st.noDropOff, st.stopHeadsign || null);
   }
   if (values.length === 0) return;
 
   await client.query(
-    `INSERT INTO daily_trip_stop_times (daily_trip_id, stop_id, seq_order, scheduled_time, is_through, stop_headsign)
+    `INSERT INTO daily_trip_stop_times (daily_trip_id, stop_id, seq_order, scheduled_time, is_through, no_pickup, no_drop_off, stop_headsign)
      VALUES ${values.join(', ')}
      ON CONFLICT (daily_trip_id, stop_id) DO UPDATE
        SET seq_order = EXCLUDED.seq_order,
            scheduled_time = EXCLUDED.scheduled_time,
            is_through = EXCLUDED.is_through,
+           no_pickup = EXCLUDED.no_pickup,
+           no_drop_off = EXCLUDED.no_drop_off,
            stop_headsign = EXCLUDED.stop_headsign`,
     params
   );
@@ -302,7 +309,7 @@ async function ensureDailyTrips(options = {}) {
 /**
  * 古い運行日のデータを掃除する。
  */
-async function purgeOldDailyTrips(retentionDays = parseInt(process.env.DAILY_TRIP_RETENTION_DAYS || '7', 10)) {
+async function purgeOldDailyTrips(retentionDays = getRuntimeSetting('DAILY_TRIP_RETENTION_DAYS')) {
   const client = await pool.connect();
   try {
     const res = await client.query(

@@ -32,22 +32,31 @@ const {
 const { getApproachingBuses } = require('../services/busStopApproaching');
 const touristSpots = require('../services/touristSpots');
 const { invalidateHolidayCache } = require('../services/holidayCalendar');
+const { invalidateRouteExternalIdCache } = require('../services/routeExternalIdMapping');
 const visitorTracker = require('../services/visitorTracker');
 const jobMonitor = require('../services/jobMonitor');
 const apiMetrics = require('../services/apiMetrics');
 const { getEnabledGtfsFeeds, getEnabledLocationFeeds } = require('../config/feeds');
+const {
+  getRuntimeSetting,
+  getRuntimeSettingSource,
+  refreshRuntimeSettingsCache
+} = require('../services/runtimeSettings');
+const { SETTINGS_CATALOG, SETTINGS_BY_KEY, validateSettingValue } = require('../config/runtimeSettingsCatalog');
 
 const router = express.Router();
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 
-// 運用監視のしきい値（ASSIGN_RADIUS_METERS等と同じ流儀で環境変数上書き可・既定値付き）
-const STALE_GPS_MIN = parseFloat(process.env.ADMIN_STALE_GPS_MIN || '5');
-const DELAY_ALERT_MIN = parseFloat(process.env.ADMIN_DELAY_ALERT_MIN || '5');
-const SEVERE_DELAY_MIN = parseFloat(process.env.ADMIN_SEVERE_DELAY_MIN || '15');
-const UNASSIGNED_OVERDUE_MIN = parseFloat(process.env.ADMIN_UNASSIGNED_OVERDUE_MIN || '5');
-const ETA_STALE_MIN = parseFloat(process.env.ADMIN_ETA_STALE_MIN || '10');
+// 運用監視のしきい値（ASSIGN_RADIUS_METERS等と同じ流儀で環境変数上書き可・既定値付き）。
+// 2026-08-21以降は管理画面「運用パラメータ設定」からも編集できる
+// （config/runtimeSettingsCatalog.js・services/runtimeSettings.js参照）。
+function staleGpsMin() { return getRuntimeSetting('ADMIN_STALE_GPS_MIN'); }
+function delayAlertMin() { return getRuntimeSetting('ADMIN_DELAY_ALERT_MIN'); }
+function severeDelayMin() { return getRuntimeSetting('ADMIN_SEVERE_DELAY_MIN'); }
+function unassignedOverdueMin() { return getRuntimeSetting('ADMIN_UNASSIGNED_OVERDUE_MIN'); }
+function etaStaleMin() { return getRuntimeSetting('ADMIN_ETA_STALE_MIN'); }
 
 // フロントエンドがX-Client-Idヘッダーを付けて叩くAPIリクエストを閲覧数としてカウントする
 // （サーバー負荷判定・管理画面の閲覧数表示に使用。ヘッダーが無いリクエストは対象外）。
@@ -168,12 +177,179 @@ router.get('/admin/settings', requireAdminAuth, async (req, res) => {
   }
 });
 
-// 外部ID ⇔ GTFS route_id の対応表の取得・編集API（GET/PUT /admin/route-mappings）は、
-// 対応を config/routeExternalIdMapping.js へ移したため削除した。
-// 保存できるのに反映されないUIを残さないための措置である（仕様書 3.2.1 / 6）。
+// 外部ID ⇔ GTFS route_id の対応表の取得・編集API（route_external_ids）。
 //
-// 路線データ編集（バス停座標・時刻表の直接編集。GET/PUT /admin/route-data）も削除した。
+// 路線名によるあいまいな解決はしない（「ケ/ヶ」等の表記ゆれ1文字で対応が黙って欠落する
+// 事故が過去にあったため）。保存時にroutesテーブルへの実在チェックを行い、
+// 存在しないroute_idは拒否する（管理画面での入力ミスをその場で弾く）。
+// 対応するGTFS路線がまだ無い外部IDは、route_idを空にして備考に理由を書けば登録できる
+// （旧route_external_idsテーブル削除時に失われかけた「路線未対応の外部ID」の記録を、
+// 再び行として保持できるようにするため）。詳細はdocs/外部IDマッピングのコード化_仕様書.md参照。
+//
+// 路線データ編集（バス停座標・時刻表の直接編集。GET/PUT /admin/route-data）は削除済みのまま。
 // バス停座標・時刻表はGTFSフィード由来のマスタなので、変更はGTFSフィード側の更新で行う。
+
+// GET /api/admin/route-mappings -> 外部ID⇔route_id 対応表の一覧
+router.get('/admin/route-mappings', requireAdminAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT m.external_id, m.route_id, m.note, m.updated_at, r.name AS route_name
+       FROM route_external_ids m
+       LEFT JOIN routes r ON r.id = m.route_id
+       ORDER BY m.route_id ASC NULLS LAST, m.external_id ASC`
+    );
+    res.json({
+      mappings: result.rows.map((row) => ({
+        externalId: row.external_id,
+        routeId: row.route_id,
+        routeName: row.route_name,
+        note: row.note,
+        updatedAt: row.updated_at
+      }))
+    });
+  } catch (err) {
+    console.error('[api] /admin/route-mappings 取得エラー:', err);
+    res.status(500).json({ error: '外部IDマッピングの取得に失敗しました。' });
+  }
+});
+
+// POST /api/admin/route-mappings -> 追加・更新（external_idキーのUPSERT）
+router.post('/admin/route-mappings', requireAdminAuth, async (req, res) => {
+  const { externalId, routeId, note } = req.body || {};
+  const trimmedExternalId = typeof externalId === 'string' ? externalId.trim() : '';
+  const trimmedRouteId = typeof routeId === 'string' ? routeId.trim() : '';
+  const trimmedNote = typeof note === 'string' ? note.trim() : '';
+
+  if (!trimmedExternalId) {
+    return res.status(400).json({ error: '外部IDを入力してください。' });
+  }
+  if (!trimmedRouteId && !trimmedNote) {
+    return res.status(400).json({ error: '対応する路線がまだ無い場合は、備考に理由を入力してください。' });
+  }
+
+  try {
+    if (trimmedRouteId) {
+      const routeCheck = await pool.query('SELECT 1 FROM routes WHERE id = $1', [trimmedRouteId]);
+      if (routeCheck.rows.length === 0) {
+        return res.status(400).json({
+          error: `指定の路線ID「${trimmedRouteId}」は現在のGTFSデータに存在しません。候補一覧から選択してください。`
+        });
+      }
+    }
+
+    await pool.query(
+      `INSERT INTO route_external_ids (external_id, route_id, note, updated_at)
+       VALUES ($1, $2, $3, now())
+       ON CONFLICT (external_id) DO UPDATE
+         SET route_id = EXCLUDED.route_id, note = EXCLUDED.note, updated_at = now()`,
+      [trimmedExternalId, trimmedRouteId || null, trimmedNote || null]
+    );
+    invalidateRouteExternalIdCache();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/route-mappings 保存エラー:', err);
+    res.status(500).json({ error: '外部IDマッピングの保存に失敗しました。' });
+  }
+});
+
+// DELETE /api/admin/route-mappings/:externalId -> 1件削除
+router.delete('/admin/route-mappings/:externalId', requireAdminAuth, async (req, res) => {
+  const { externalId } = req.params;
+  try {
+    await pool.query('DELETE FROM route_external_ids WHERE external_id = $1', [externalId]);
+    invalidateRouteExternalIdCache();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/route-mappings 削除エラー:', err);
+    res.status(500).json({ error: '外部IDマッピングの削除に失敗しました。' });
+  }
+});
+
+// 運用パラメータ設定（判定半径・タイムアウト・しきい値など）の取得・編集API。
+//
+// これまで環境変数（.env）でしか調整できなかった値、および一部コードに直書きされていた値
+// （GPS_STALE_TIMEOUT_MIN。finishService.jsに直書きされていた「GPS 3分途絶」判定）を、
+// 管理画面から編集できるようにしたもの。定義一覧はconfig/runtimeSettingsCatalog.js、
+// 値の解決はservices/runtimeSettings.jsを参照。上書き値はsystem_settingsテーブルに
+// 保存する（お知らせ設定と同じテーブルだが、キー名の名前空間が異なるため衝突しない）。
+//
+// 管理画面で一切編集しなければ、これまでどおり環境変数（未設定ならコード既定値）だけで
+// 動く＝既存の挙動と完全に同じ。反映タイミングは項目により異なる（catalogのrequiresRestart参照）。
+
+// GET /api/admin/runtime-settings -> 定義一覧＋現在の実効値・値の出所（既定値/環境変数/上書き）
+router.get('/admin/runtime-settings', requireAdminAuth, async (req, res) => {
+  try {
+    await refreshRuntimeSettingsCache(true);
+    const settings = SETTINGS_CATALOG.map((def) => ({
+      key: def.key,
+      group: def.group,
+      groupLabel: def.groupLabel,
+      label: def.label,
+      description: def.description,
+      type: def.type,
+      unit: def.unit || null,
+      default: def.default,
+      min: def.min ?? null,
+      max: def.max ?? null,
+      requiresRestart: !!def.requiresRestart,
+      value: getRuntimeSetting(def.key),
+      source: getRuntimeSettingSource(def.key)
+    }));
+    res.json({ settings });
+  } catch (err) {
+    console.error('[api] /admin/runtime-settings 取得エラー:', err);
+    res.status(500).json({ error: '運用パラメータ設定の取得に失敗しました。' });
+  }
+});
+
+// PUT /api/admin/runtime-settings/:key -> 上書き値を保存（値の型・範囲はcatalog定義で検証）
+router.put('/admin/runtime-settings/:key', requireAdminAuth, async (req, res) => {
+  const { key } = req.params;
+  const def = SETTINGS_BY_KEY.get(key);
+  if (!def) {
+    return res.status(404).json({ error: `未知の設定キーです: ${key}` });
+  }
+
+  const rawValue = typeof req.body?.value === 'string' ? req.body.value.trim() : '';
+  if (!rawValue) {
+    return res.status(400).json({ error: '値を入力してください。既定値に戻す場合は削除操作を使ってください。' });
+  }
+  const validationError = validateSettingValue(def, rawValue);
+  if (validationError) {
+    return res.status(400).json({ error: validationError });
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO system_settings (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [key, rawValue]
+    );
+    await refreshRuntimeSettingsCache(true);
+    res.json({ ok: true, key, value: getRuntimeSetting(key), source: getRuntimeSettingSource(key) });
+  } catch (err) {
+    console.error('[api] /admin/runtime-settings 更新エラー:', err);
+    res.status(500).json({ error: '運用パラメータ設定の更新に失敗しました。' });
+  }
+});
+
+// DELETE /api/admin/runtime-settings/:key -> 上書きを解除し、既定値（環境変数 or コード既定値）へ戻す
+router.delete('/admin/runtime-settings/:key', requireAdminAuth, async (req, res) => {
+  const { key } = req.params;
+  const def = SETTINGS_BY_KEY.get(key);
+  if (!def) {
+    return res.status(404).json({ error: `未知の設定キーです: ${key}` });
+  }
+
+  try {
+    await pool.query('DELETE FROM system_settings WHERE key = $1', [key]);
+    await refreshRuntimeSettingsCache(true);
+    res.json({ ok: true, key, value: getRuntimeSetting(key), source: getRuntimeSettingSource(key) });
+  } catch (err) {
+    console.error('[api] /admin/runtime-settings 削除エラー:', err);
+    res.status(500).json({ error: '運用パラメータ設定のリセットに失敗しました。' });
+  }
+});
 
 // PUT /api/admin/settings -> 管理画面から配信お知らせを更新
 router.put('/admin/settings', requireAdminAuth, async (req, res) => {
@@ -357,7 +533,8 @@ router.get('/timetable', async (req, res) => {
     }
 
     const times = await pool.query(
-      `SELECT dst.daily_trip_id, dst.seq_order, s.name AS stop_name, dst.scheduled_time, dst.is_through
+      `SELECT dst.daily_trip_id, dst.seq_order, s.name AS stop_name, dst.scheduled_time,
+              dst.is_through, dst.no_pickup, dst.no_drop_off
        FROM daily_trip_stop_times dst
        JOIN stops s ON s.id = dst.stop_id
        JOIN daily_trips d ON d.id = dst.daily_trip_id
@@ -384,7 +561,12 @@ router.get('/timetable', async (req, res) => {
         entry.stops.push({
           seqOrder: r.seq_order,
           stopName: r.stop_name,
-          scheduledTime: r.is_through ? null : r.scheduled_time
+          // GTFSのstop_times.txtに載る行には必ず実時刻があるため、is_through（真の通過）
+          // でも時刻を隠さない。表示上どう扱うかはフロント側の判断に委ねる。
+          scheduledTime: r.scheduled_time,
+          isThrough: r.is_through,
+          noPickup: r.no_pickup,
+          noDropOff: r.no_drop_off
         });
       }
     }
@@ -426,7 +608,8 @@ async function readTimetableFromSchedule(routeId) {
   // 路線内の表示順専用（service_idグループ横断の共有値）であり、枝分かれ・逆回りの
   // ある便ではこの便自身の実際の停車順と一致しないため使わない（点検所見 C-1 参照）。
   const times = await pool.query(
-    `SELECT st.trip_id, st.stop_sequence AS seq_order, s.name AS stop_name, st.scheduled_time, st.is_through
+    `SELECT st.trip_id, st.stop_sequence AS seq_order, s.name AS stop_name, st.scheduled_time,
+            st.is_through, st.no_pickup, st.no_drop_off
      FROM schedule_stop_times st
      JOIN stops s ON s.id = st.stop_id
      JOIN schedule_trips stp ON stp.id = st.trip_id
@@ -452,7 +635,10 @@ async function readTimetableFromSchedule(routeId) {
       entry.stops.push({
         seqOrder: r.seq_order,
         stopName: r.stop_name,
-        scheduledTime: r.is_through ? null : r.scheduled_time
+        scheduledTime: r.scheduled_time,
+        isThrough: r.is_through,
+        noPickup: r.no_pickup,
+        noDropOff: r.no_drop_off
       });
     }
   }
@@ -823,14 +1009,14 @@ router.get('/admin/dashboard-summary', requireAdminAuth, async (req, res) => {
          WHERE a.role = 'assigned' AND a.state = 'active'
            AND a.delay_minutes >= $1
            AND d.service_date = $2`,
-        [DELAY_ALERT_MIN, serviceDate]
+        [delayAlertMin(), serviceDate]
       ),
       pool.query(
         `SELECT count(*)::int AS count
          FROM vehicles
          WHERE status = 'active'
            AND (last_gps_at IS NULL OR last_gps_at < now() - make_interval(secs => $1::double precision * 60))`,
-        [STALE_GPS_MIN]
+        [staleGpsMin()]
       )
     ]);
 
@@ -968,7 +1154,8 @@ router.get('/admin/pass-status', requireAdminAuth, async (req, res) => {
 
     const result = await pool.query(
       `SELECT d.id AS trip_id, d.start_time, d.headsign, a.id AS assignment_id, a.role, v.car_id,
-              s.name AS stop_name, p.seq_order, p.status, p.actual_time, p.delay_minutes
+              s.name AS stop_name, p.seq_order, p.status, p.actual_time, p.delay_minutes,
+              p.nearby_min_distance_meters, p.nearby_min_distance_gps_time
        FROM trip_stop_progress p
        JOIN trip_vehicle_assignments a ON a.id = p.assignment_id
        JOIN daily_trips d ON d.id = a.daily_trip_id
@@ -990,7 +1177,9 @@ router.get('/admin/pass-status', requireAdminAuth, async (req, res) => {
       seqOrder: row.seq_order,
       status: row.status,
       actualTime: row.actual_time,
-      delayMinutes: row.delay_minutes
+      delayMinutes: row.delay_minutes,
+      nearbyMinDistanceMeters: row.nearby_min_distance_meters,
+      nearbyMinDistanceGpsTime: row.nearby_min_distance_gps_time
     }));
 
     res.json({ date: serviceDate, rows });
@@ -1012,7 +1201,7 @@ router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
        WHERE status = 'active'
          AND (last_gps_at IS NULL OR last_gps_at < now() - make_interval(secs => $1::double precision * 60))
        ORDER BY last_gps_at ASC NULLS FIRST`,
-      [STALE_GPS_MIN]
+      [staleGpsMin()]
     );
     for (const row of staleGpsRes.rows) {
       alerts.push({
@@ -1032,7 +1221,7 @@ router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
          AND service_date = $2
          AND start_at < now() - make_interval(secs => $1::double precision * 60)
        ORDER BY start_at ASC`,
-      [UNASSIGNED_OVERDUE_MIN, serviceDate]
+      [unassignedOverdueMin(), serviceDate]
     );
     for (const row of unassignedRes.rows) {
       alerts.push({
@@ -1055,7 +1244,7 @@ router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
          AND a.delay_minutes >= $1
          AND d.service_date = $2
        ORDER BY a.delay_minutes DESC`,
-      [SEVERE_DELAY_MIN, serviceDate]
+      [severeDelayMin(), serviceDate]
     );
     for (const row of severeDelayRes.rows) {
       alerts.push({
@@ -1081,7 +1270,7 @@ router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
        GROUP BY a.id, a.daily_trip_id, v.car_id, d.start_time
        HAVING MAX(tap.computed_at) IS NULL
           OR MAX(tap.computed_at) < now() - make_interval(secs => $1::double precision * 60)`,
-      [ETA_STALE_MIN, serviceDate]
+      [etaStaleMin(), serviceDate]
     );
     for (const row of etaFailureRes.rows) {
       alerts.push({

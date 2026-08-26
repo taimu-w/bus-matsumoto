@@ -387,28 +387,6 @@ function createBusCard(bus) {
   const startTime = firstStop?.scheduledTime || '--';
   const endTime = lastStop?.scheduledTime || '--';
 
-  // --- 判定ロジック：1つだけ孤立して空になっているバス停を「通過バス停」と判定する ---
-  stops.forEach((stop, i) => {
-    const isSelfEmpty = !stop.scheduledTime || stop.scheduledTime === '--' || stop.scheduledTime === '↓';
-
-    if (isSelfEmpty) {
-      const prevStop = stops[i - 1];
-      const nextStop = stops[i + 1];
-
-      const isPrevEmpty = prevStop && (!prevStop.scheduledTime || prevStop.scheduledTime === '--' || prevStop.scheduledTime === '↓');
-      const isNextEmpty = nextStop && (!nextStop.scheduledTime || nextStop.scheduledTime === '--' || nextStop.scheduledTime === '↓');
-
-      if ((!isPrevEmpty && !isNextEmpty) || stop.status === '通過') {
-        stop.isPassStop = true;
-      } else {
-        stop.isPassStop = false;
-      }
-    } else {
-      stop.isPassStop = false;
-    }
-  });
-  // ----------------------------------------------------------------------------------
-
   const lastIdx = findLastArrivedIndex(stops);
   const currentStop = lastIdx >= 0 ? stops[lastIdx] : null;
   const hasDeparted = currentStop !== null;
@@ -547,16 +525,26 @@ function createScheduleCard(trip, firstTime, directionLabel = '') {
   `;
 
   const rowsContainer = card.querySelector('[data-role="stop-rows"]');
-  trip.stops
-    .slice()
-    .sort((a, b) => a.seqOrder - b.seqOrder)
-    .forEach((stop) => {
-      const isThrough = !stop.scheduledTime;
+  const sortedStops = trip.stops.slice().sort((a, b) => a.seqOrder - b.seqOrder);
+  sortedStops.forEach((stop, index) => {
+      // タグの意味はtimetable.js の renderScheduleRows() と揃える（降車のみ/乗車のみ/終点等）。
+      const passed = stop.isThrough;
+      const tags = [
+        index === 0 ? '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5">始発</span>' : '',
+        index === sortedStops.length - 1 ? '<span class="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-1.5 py-0.5">終点</span>' : '',
+        passed ? '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">通過</span>' : '',
+        !passed && stop.noPickup && index !== sortedStops.length - 1 ? '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">降車のみ</span>' : '',
+        !passed && stop.noDropOff && index !== 0 ? '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">乗車のみ</span>' : ''
+      ].filter(Boolean).join(' ');
+
       const row = document.createElement('div');
-      row.className = `flex justify-between items-center px-3 py-2 rounded-lg ${isThrough ? 'opacity-50' : 'bg-white border border-gray-100'}`;
+      row.className = 'flex justify-between items-center gap-2 px-3 py-2 rounded-lg bg-white border border-gray-100';
       row.innerHTML = `
-        <span data-role="stop-name-link" class="font-bold text-gray-800 underline decoration-dotted cursor-pointer active:text-blue-700">${escapeHtml(stop.stopName)}</span>
-        <span class="font-bold ${isThrough ? 'line-through-double text-gray-400' : 'text-blue-800'}">${isThrough ? '経由なし' : escapeHtml(stop.scheduledTime)}</span>
+        <div class="min-w-0">
+          <span data-role="stop-name-link" class="font-bold text-gray-800 underline decoration-dotted cursor-pointer active:text-blue-700">${escapeHtml(stop.stopName)}</span>
+          ${tags ? `<div class="flex flex-wrap gap-1 mt-0.5">${tags}</div>` : ''}
+        </div>
+        <span class="font-bold text-blue-800 shrink-0">${escapeHtml(passed ? '通過' : (stop.scheduledTime || '--'))}</span>
       `;
       // バス停名タップで /busstop/{stop_id} へ（補完仕様書 3.6.2）。
       row.querySelector('[data-role="stop-name-link"]').addEventListener('click', (e) => {

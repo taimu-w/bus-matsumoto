@@ -4,6 +4,7 @@ const { finishTrips } = require('../services/finishService');
 const { purgeOldDailyTrips } = require('../services/dailyTripBuilder');
 const { purgeOldGpsLogs } = require('../services/vehicleAssigner');
 const { isNightTime } = require('../utils/time');
+const { getRuntimeSetting } = require('../services/runtimeSettings');
 const jobMonitor = require('../services/jobMonitor');
 
 let pipelineTimer = null;
@@ -14,7 +15,9 @@ let finishRunning = false;
 let cleanupRunning = false;
 
 function start() {
-  const pollSeconds = parseInt(process.env.POLL_INTERVAL_SECONDS || '60', 10);
+  // 管理画面から変更しても、setIntervalの間隔はこの起動時点の値で固定されるため、
+  // 反映には再起動が必要（config/runtimeSettingsCatalog.jsのrequiresRestart）。
+  const pollSeconds = getRuntimeSetting('POLL_INTERVAL_SECONDS');
 
   pipelineTimer = setInterval(async () => {
     if (pipelineRunning) return; // 前回処理が長引いている場合は多重実行を防止（GASのLockService相当）
@@ -30,7 +33,7 @@ function start() {
     if (finishRunning) return;
     finishRunning = true;
     try {
-      if (isNightTime()) {
+      if (isNightTime(getRuntimeSetting('NIGHT_START'), getRuntimeSetting('NIGHT_END'))) {
         console.log('[scheduler] 深夜帯のため finish 停止');
         return;
       }

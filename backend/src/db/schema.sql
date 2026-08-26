@@ -22,11 +22,11 @@ CREATE TABLE IF NOT EXISTS routes (
 -- **DBを直接編集しても次回起動時に上書きされる。**
 --
 -- 実行時に書き込まれる観測データは last_fetched_at / last_status / last_error の3列だけで、
--- これらはコード化できないためDBに残している（外部IDマッピングのコード化 仕様書 3.3）。
+-- これらはコード化できないためDBに残している（docs/外部IDマッピングのコード化_仕様書.md参照）。
 --
--- 旧 feed_mappings テーブル（confidence による対応の推測）と
--- 旧 route_external_ids テーブル（外部ID⇔route_idの対応）は、
--- いずれもコードへ移したため削除済み。migrate.js が DROP する。
+-- 旧 feed_mappings テーブル（confidence による対応の推測）は
+-- コードへ移したため削除済み。migrate.js が DROP する。
+-- route_external_ids は下記のとおりDB管理に復帰したため対象外（2026-08-21）。
 CREATE TABLE IF NOT EXISTS feeds (
   id            TEXT PRIMARY KEY,
   feed_type     TEXT NOT NULL CHECK (feed_type IN ('gtfs', 'location')),
@@ -37,6 +37,27 @@ CREATE TABLE IF NOT EXISTS feeds (
   last_status   TEXT,
   last_error    TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 位置情報CSVの外部ID（事業者の系統ID）→ GTFS route_id の対応。
+-- 管理画面（GET/POST/DELETE /api/admin/route-mappings）から編集する。
+--
+-- route_id は routes.id と同じ「feedId:routeId」形式のqualified route id。
+-- 路線名からのあいまいな解決はしない（「ケ/ヶ」等の表記ゆれ1文字で対応が黙って
+-- 欠落する事故が過去にあったため。詳細はdocs/外部IDマッピングのコード化_仕様書.md）。
+-- 保存時にroutesテーブルへの実在チェックを行い、存在しないIDは拒否する。
+--
+-- route_id が NULL の行は「外部IDは判明しているが、対応するGTFS路線がまだ無い」ことを
+-- 表す（note列に理由を書いて残す）。削除すると、後で該当路線がGTFSに追加された際に
+-- 外部IDを再調査する羽目になるため、行として保持できるようにしてある。
+--
+-- サービス層は backend/src/services/routeExternalIdMapping.js（TTL付きメモリキャッシュ。
+-- 管理画面からの変更時に invalidateRouteExternalIdCache() で破棄）。
+CREATE TABLE IF NOT EXISTS route_external_ids (
+  external_id   TEXT PRIMARY KEY,
+  route_id      TEXT,
+  note          TEXT,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- バス停マスタ。物理バス停（GTFSのstop_id）+ occurrence（同一route_id・direction_id内で
@@ -65,7 +86,6 @@ CREATE TABLE IF NOT EXISTS stops (
 );
 
 -- 時刻表: 便（トリップ）ごと・停留所ごとの定刻。
--- scheduled_time が NULL かつ is_through=true の場合は元GASの「↓」（通過・非停車)を表す。
 CREATE TABLE IF NOT EXISTS schedule_trips (
   id            SERIAL PRIMARY KEY,
   route_id      TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
@@ -95,8 +115,15 @@ CREATE TABLE IF NOT EXISTS schedule_stop_times (
                                                  -- stops.seq_orderは路線内の表示順（service_idグループ
                                                  -- 横断の共有値）であり便ごとの実際の順序とは一致しないため、
                                                  -- 順序に依存する判定はこちらを正として参照する
-  scheduled_time TEXT,                          -- "H:mm" 形式。NULLは非停車(↓)
-  is_through    BOOLEAN NOT NULL DEFAULT FALSE,
+  scheduled_time TEXT,                          -- "H:mm" 形式。GTFSのstop_times.txtに載る行には必ず実時刻が
+                                                 -- 入るため、通常はNULLにならない（NULLは元GTFSデータの
+                                                 -- 時刻欠損など、不整合な入力に対する保険的な状態）
+  is_through    BOOLEAN NOT NULL DEFAULT FALSE, -- 真の通過（乗車も降車もできない停車）。GTFSの
+                                                 -- pickup_type=1 かつ drop_off_type=1 の場合のみtrue。
+                                                 -- 表示上のラベル用メタデータであり、scheduled_timeの
+                                                 -- 有無には影響しない
+  no_pickup     BOOLEAN NOT NULL DEFAULT FALSE, -- GTFSのpickup_type=1（降車のみ）。表示用メタデータ
+  no_drop_off   BOOLEAN NOT NULL DEFAULT FALSE, -- GTFSのdrop_off_type=1（乗車のみ）。表示用メタデータ
   stop_headsign TEXT,                           -- GTFS stop_times.txt の stop_headsign（枝分かれ路線の停留所別行先）
   PRIMARY KEY (trip_id, stop_id)
 );
@@ -128,7 +155,15 @@ CREATE TABLE IF NOT EXISTS tourist_spots (
   hours           TEXT,
   stay_duration   TEXT,
   description     TEXT,
+  hours_en        TEXT,
+  stay_duration_en TEXT,
+  description_en  TEXT,
   photo_url       TEXT,
+  category        TEXT,
+  -- 空欄、または「観光」「観光スポット」を含まない値は、バス停ページの周辺観光スポット表示
+  -- （findNearbySpots）からのみ除外する（学校・病院等、経路検索の地点としては使うが観光スポット
+  -- ではない登録への対策）。地点名検索・詳細ポップアップ取得は本フラグの影響を受けない。
+  display_tag     TEXT,
   enabled         BOOLEAN NOT NULL DEFAULT TRUE,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -243,8 +278,12 @@ CREATE TABLE IF NOT EXISTS daily_trip_stop_times (
   daily_trip_id  BIGINT NOT NULL REFERENCES daily_trips(id) ON DELETE CASCADE,
   stop_id        INTEGER NOT NULL REFERENCES stops(id),
   seq_order      INTEGER NOT NULL,
-  scheduled_time TEXT,                          -- "H:mm"。NULLは非停車(↓)
-  is_through     BOOLEAN NOT NULL DEFAULT FALSE,
+  scheduled_time TEXT,                          -- "H:mm"。schedule_stop_times.scheduled_time と同じく
+                                                 -- 通常は常に実時刻が入る
+  is_through     BOOLEAN NOT NULL DEFAULT FALSE, -- schedule_stop_times.is_through の当日分コピー
+                                                 -- （真の通過＝乗車も降車もできない停車。表示用メタデータ）
+  no_pickup      BOOLEAN NOT NULL DEFAULT FALSE, -- schedule_stop_times.no_pickup の当日分コピー（降車のみ）
+  no_drop_off    BOOLEAN NOT NULL DEFAULT FALSE, -- schedule_stop_times.no_drop_off の当日分コピー（乗車のみ）
   stop_headsign  TEXT,                          -- schedule_stop_times.stop_headsign の当日分コピー
   PRIMARY KEY (daily_trip_id, stop_id)
 );
@@ -275,15 +314,22 @@ CREATE INDEX IF NOT EXISTS idx_assignments_vehicle ON trip_vehicle_assignments(v
 
 -- 便×車両ごとのバス停進捗（旧 vehicle_stop_status の置換）。
 -- 候補車両も担当車両と同じように通過判定・遅延計算を行う（仕様書 9）。
+-- 2段階到着判定（バス停到着判定およびフロントエンド表示改善案）により、'到着済'の手前に
+-- '付近'（STOP_RADIUS_METERS以内に入ったがまだ離脱=到着確定していない）状態を追加した。
+-- nearby_min_distance_* は'付近'中に観測した最小距離とその観測GPS時刻（離脱判定・
+-- actual_timeの補完・遡及昇格に使う）。
 CREATE TABLE IF NOT EXISTS trip_stop_progress (
   assignment_id  BIGINT NOT NULL REFERENCES trip_vehicle_assignments(id) ON DELETE CASCADE,
   stop_id        INTEGER NOT NULL REFERENCES stops(id),
   seq_order      INTEGER NOT NULL,
   scheduled_time TEXT,
-  status         TEXT NOT NULL DEFAULT '',      -- '' | '通過' | '到着済'
+  status         TEXT NOT NULL DEFAULT '',      -- '' | '通過' | '付近' | '到着済'
   actual_time    TEXT,
   delay_minutes  INTEGER,
   interpolated   BOOLEAN NOT NULL DEFAULT FALSE,
+  nearby_min_distance_meters      DOUBLE PRECISION,
+  nearby_min_distance_gps_time    TEXT,
+  nearby_min_distance_gps_time_ts TIMESTAMPTZ,
   PRIMARY KEY (assignment_id, stop_id)
 );
 CREATE INDEX IF NOT EXISTS idx_trip_progress_assignment ON trip_stop_progress(assignment_id, seq_order);
@@ -318,7 +364,12 @@ CREATE TABLE IF NOT EXISTS completed_trips (
   departure_time      TEXT,
   finished_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   finish_reason       TEXT,
-  aggregated          BOOLEAN NOT NULL DEFAULT FALSE
+  aggregated          BOOLEAN NOT NULL DEFAULT FALSE,
+  -- 便のクローズが二重実行されても実績が二重に入らないようにする安全網（点検所見 C-5）。
+  -- 一次防御はfinishService.jsのcloseDailyTrip()が取る行ロックで、通常はこの制約に
+  -- 触れることはない。NULLはPostgreSQLのUNIQUE制約上重複扱いされないため、
+  -- daily_trip_id/assignment_idを持たない行があっても問題にならない。
+  UNIQUE (daily_trip_id, assignment_id)
 );
 
 CREATE TABLE IF NOT EXISTS completed_trip_stop_times (

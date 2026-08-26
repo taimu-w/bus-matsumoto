@@ -7,9 +7,10 @@
  * ACTIVE_WINDOW_MSはそれより十分長く取り、タブが一時的にバックグラウンドになっても
  * 過剰にカウントが落ちないようにする。
  */
+const { getRuntimeSetting } = require('./runtimeSettings');
+
 const ACTIVE_WINDOW_MS = 90 * 1000;
 const CLEANUP_INTERVAL_MS = 60 * 1000;
-const HIGH_LOAD_VIEWER_THRESHOLD = parseInt(process.env.HIGH_LOAD_VIEWER_THRESHOLD || '50', 10);
 
 const lastSeenByClient = new Map();
 
@@ -29,10 +30,11 @@ function getActiveViewerCount() {
 
 function getServerLoadStatus() {
   const activeViewers = getActiveViewerCount();
+  const threshold = getRuntimeSetting('HIGH_LOAD_VIEWER_THRESHOLD');
   return {
     activeViewers,
-    threshold: HIGH_LOAD_VIEWER_THRESHOLD,
-    highLoad: activeViewers >= HIGH_LOAD_VIEWER_THRESHOLD
+    threshold,
+    highLoad: activeViewers >= threshold
   };
 }
 

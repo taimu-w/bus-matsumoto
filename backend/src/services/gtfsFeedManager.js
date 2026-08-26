@@ -10,6 +10,7 @@ const fetch = require('cross-fetch');
 const AdmZip = require('adm-zip');
 const pool = require('../config/db');
 const { getEnabledGtfsFeeds } = require('../config/feeds');
+const { getRuntimeSetting } = require('./runtimeSettings');
 
 const GTFS_BASE_DIR = path.join(__dirname, '..', '..', '..', 'data gtfs');
 const REQUIRED_GTFS_FILES = [
@@ -243,7 +244,7 @@ async function ensureGtfsFilesPresent(client, feed) {
  * @returns {{updated: number, failed: number, skipped: boolean}}
  */
 async function updateAllGtfsFeeds() {
-  const updateIntervalMin = parseInt(process.env.GTFS_UPDATE_INTERVAL_MIN || '60', 10);
+  const updateIntervalMin = getRuntimeSetting('GTFS_UPDATE_INTERVAL_MIN');
   const now = Date.now();
 
   // 更新間隔チェック（0以下の場合は毎回更新）
