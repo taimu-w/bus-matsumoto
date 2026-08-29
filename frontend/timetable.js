@@ -25,6 +25,11 @@
   // 「乗り場別」を選んだ直後の選択UI（'map' | 'headsign' | null）
   let platformChooser = null;
   let chooserStopKey = null;
+  // 凡例（路線カラー）のタップによる時刻表の路線絞り込み。この画面内だけの一時状態で、
+  // バス停の切り替え・日付変更・表示モード変更など renderStopView を通る操作でリセットする
+  // （凡例タップ自体は #tt-timetable-section だけを再描画するので保持される）。
+  // 値は routeFilterKey(feedId, routeId) の文字列、絞り込みなしのときは null。
+  let timetableRouteFilter = null;
   // 非同期描画が追い抜かれたときに古い結果で上書きしないための世代番号
   let renderSeq = 0;
   let mapInstance = null;
@@ -165,6 +170,16 @@
     const declared = parseHexColor(textColor);
     if (declared) return `#${String(textColor).replace('#', '')}`;
     return relativeLuminance(rgb) > 0.5 ? '#111827' : '#ffffff';
+  }
+
+  /**
+   * 路線の識別キー。凡例エントリ・発車データのどちらからでも同じ形で作れる
+   * （どちらも feedId + routeId を持つ）。時刻表の路線絞り込みの一致判定に使う。
+   * このキーは data 属性に載せて読み戻すため、区切りは属性値として安全な文字にする
+   * （feedId・route_id ともに区切りの "|" を含まない）。
+   */
+  function routeFilterKey(feedId, routeId) {
+    return `${feedId}|${routeId}`;
   }
 
   /* ---------- ルーティング ---------- */
@@ -425,6 +440,9 @@
       platformChooser = null;
     }
     if (platform && !platformChooser) platformChooser = 'headsign';
+    // renderStopView を通る操作（バス停切替・日付変更・表示モード変更）では絞り込みを解除する。
+    // 凡例タップは refreshTimetableSection() 経由で部分再描画するのでここは通らず、絞り込みは保持される。
+    timetableRouteFilter = null;
 
     destroyMap();
     const seq = ++renderSeq;
@@ -451,6 +469,9 @@
     }
 
     setTitle(data.stop.stopName, 'Timetable');
+
+    // 選択された日付がGTFSデータの有効期間外なら、ダイヤ改正の可能性を注意喚起する
+    if (typeof window.showGtfsExpiryNotice === 'function') window.showGtfsExpiryNotice(data.gtfsValidity);
 
     // 別名で開かれた場合は正規のURLへ置き換える（ブックマークの正規化）
     if (data.stop.stopKey !== state.stopKey) {
@@ -480,8 +501,10 @@
 
       ${renderChooser(data, date)}
       ${renderCalendar(data, date, platform)}
-      ${renderLegend(data)}
-      ${renderTimetableGrid(data, date, platform)}
+      <div id="tt-timetable-section">
+        ${renderLegend(data)}
+        ${renderTimetableGrid(data, date, platform)}
+      </div>
     `;
 
     bindStopViewEvents(data, date, platform);
@@ -601,43 +624,89 @@
       </div>`;
   }
 
-  /** 凡例（路線カラー・略名・主要行先） */
+  /** 凡例で絞り込み操作を出すかどうか（路線が2つ以上あるバス停でのみ）。 */
+  function legendIsInteractive(data) {
+    return Boolean(data.legend && data.legend.length >= 2);
+  }
+
+  /**
+   * 凡例（路線カラー・略名・主要行先）。
+   * 路線が2つ以上あるバス停では、各項目がタップで「その路線だけの時刻表」に絞り込むボタンになる
+   * （もう一度タップ、または「すべて表示」で解除）。1路線だけのバス停では従来どおりの表示のみ。
+   */
   function renderLegend(data) {
     if (!data.legend || data.legend.length === 0) return '';
+    const interactive = legendIsInteractive(data);
+    const activeKey = interactive ? timetableRouteFilter : null;
+
     const items = data.legend
       .map((route) => {
         const bg = parseHexColor(route.color) ? `#${route.color.replace('#', '')}` : '#e2e8f0';
         const fg = chipTextColor(route.color, route.textColor);
         const destinations = (route.headsigns || []).slice(0, 3).join('・');
-        return `
-          <div class="flex items-start gap-2 py-1">
-            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 mt-0.5" style="background:${esc(bg)};color:${esc(fg)}">${esc(route.shortName || route.name)}</span>
-            <div class="min-w-0">
-              <p class="text-xs font-bold text-gray-800 truncate">${esc(route.name)}</p>
-              ${destinations ? `<p class="text-[10px] text-gray-500 font-bold truncate">${esc(destinations)}方面</p>` : ''}
-            </div>
+        const inner = `
+          <span class="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 mt-0.5" style="background:${esc(bg)};color:${esc(fg)}">${esc(route.shortName || route.name)}</span>
+          <div class="min-w-0">
+            <p class="text-xs font-bold text-gray-800 truncate">${esc(route.name)}</p>
+            ${destinations ? `<p class="text-[10px] text-gray-500 font-bold truncate">${esc(destinations)}方面</p>` : ''}
           </div>`;
+        if (!interactive) {
+          return `<div class="flex items-start gap-2 py-1">${inner}</div>`;
+        }
+        const key = routeFilterKey(route.feedId, route.routeId);
+        const isActive = activeKey === key;
+        const stateClass = isActive
+          ? 'border-sky-500 bg-sky-50 ring-1 ring-sky-500'
+          : activeKey
+            ? 'border-gray-200 opacity-45 hover:opacity-100'
+            : 'border-gray-200 hover:border-sky-400';
+        return `
+          <button type="button" data-role="legend-filter" data-route="${esc(key)}" aria-pressed="${isActive ? 'true' : 'false'}"
+                  class="flex items-start gap-2 py-1.5 px-2 -mx-1 rounded-lg border-2 text-left transition-all active:scale-[0.99] ${stateClass}">
+            ${inner}
+          </button>`;
       })
       .join('');
 
+    const header = activeKey
+      ? `<div class="flex items-center justify-between mb-1.5">
+           <p class="text-xs font-bold text-sky-700">1路線だけ表示中</p>
+           <button type="button" data-role="legend-clear" class="text-[11px] font-bold text-sky-700 underline">すべて表示</button>
+         </div>`
+      : `<p class="text-xs font-bold text-gray-500 mb-1">凡例（路線カラー）${interactive ? '・タップでその路線だけ表示' : ''}</p>`;
+
     return `
       <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-200 p-4 mb-4">
-        <p class="text-xs font-bold text-gray-500 mb-1">凡例（路線カラー）</p>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4">${items}</div>
+        ${header}
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 ${interactive ? 'gap-y-1' : ''}">${items}</div>
       </div>`;
   }
 
-  /** 時刻表本体（縦軸=時 / 横軸=分） */
+  /** 時刻表本体（縦軸=時 / 横軸=分）。凡例で路線を絞り込んでいる場合はその路線の発車だけを描く。 */
   function renderTimetableGrid(data, date, platform) {
-    if (!data.hours || data.hours.length === 0) {
+    const filterKey = legendIsInteractive(data) ? timetableRouteFilter : null;
+    const hours = filterKey
+      ? (data.hours || [])
+          .map((block) => ({
+            ...block,
+            departures: block.departures.filter((d) => routeFilterKey(d.feedId, d.routeId) === filterKey)
+          }))
+          .filter((block) => block.departures.length > 0)
+      : (data.hours || []);
+    const filteredCount = hours.reduce((sum, block) => sum + block.departures.length, 0);
+
+    if (hours.length === 0) {
+      const message = filterKey
+        ? `${esc(formatDateLabel(date))}は、絞り込んだ路線の発車がありません。`
+        : `${esc(formatDateLabel(date))}にこの乗り場から発車する便はありません。`;
       return `
         <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-200 p-6 text-center">
-          <p class="font-bold text-gray-500">${esc(formatDateLabel(date))}にこの乗り場から発車する便はありません。</p>
+          <p class="font-bold text-gray-500">${message}</p>
         </div>`;
     }
 
     const showHeadsign = !platform;
-    const rows = data.hours
+    const rows = hours
       .map((block) => {
         const isNextDay = block.hour >= 24;
         const hourLabel = isNextDay ? block.hour - 24 : block.hour;
@@ -672,7 +741,7 @@
     return `
       <div class="bg-white rounded-2xl shadow-sm border-2 border-sky-200 overflow-hidden">
         <div class="px-4 py-2 bg-sky-50 border-b border-sky-100 flex justify-between items-center">
-          <span class="text-xs font-bold text-sky-900">時刻表</span>
+          <span class="text-xs font-bold text-sky-900">時刻表${filterKey ? `（絞り込み中 ${filteredCount}本）` : ''}</span>
           <span class="text-[10px] font-bold text-sky-700">時刻をタップすると各バス停の通過時刻を表示します</span>
         </div>
         ${rows}
@@ -758,6 +827,39 @@
 
     if (platformChooser === 'map' && !data.selectedPlatform) {
       setupPlatformMap(data, date);
+    }
+
+    bindLegendFilterEvents(data, date, platform);
+  }
+
+  /**
+   * 凡例（路線カラー）＋時刻表本体だけを再描画する。
+   * 凡例タップによる路線絞り込みは画面全体を作り直さず（＝再フェッチせず）ここで完結させる。
+   */
+  function refreshTimetableSection(data, date, platform) {
+    const section = root().querySelector('#tt-timetable-section');
+    if (!section) return;
+    section.innerHTML = `${renderLegend(data)}${renderTimetableGrid(data, date, platform)}`;
+    bindLegendFilterEvents(data, date, platform);
+  }
+
+  /** 凡例の「路線で絞り込む」ボタンと「すべて表示」ボタンのイベント。 */
+  function bindLegendFilterEvents(data, date, platform) {
+    const container = root();
+    container.querySelectorAll('[data-role="legend-filter"]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const key = button.dataset.route;
+        // 同じ路線をもう一度タップしたら解除（トグル）
+        timetableRouteFilter = timetableRouteFilter === key ? null : key;
+        refreshTimetableSection(data, date, platform);
+      });
+    });
+    const clearBtn = container.querySelector('[data-role="legend-clear"]');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', () => {
+        timetableRouteFilter = null;
+        refreshTimetableSection(data, date, platform);
+      });
     }
   }
 

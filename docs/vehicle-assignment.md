@@ -1,8 +1,32 @@
 # 車両割り当ての詳細（`services/tripAssignment.js`）
 
-設計の全体像（なぜ便を先に生成し車両を後から割り当てるか）は[design-trip-first-assignment.md](design-trip-first-assignment.md)を参照してください。このドキュメントは`tripAssignment.js`が行う判定条件・処理順序の詳細です。
+このドキュメントは`tripAssignment.js`が行う判定条件・処理順序の詳細です。
 
-旧`businessStart.js`・`departure.js`・`planMaking.js`・`specialBus.js`を置き換えたモジュールです。
+## データモデル：進捗は「便 × 車両」の割り当て単位で持つ
+
+このシステムは**GTFS上の便を先に生成し、始発時刻になった時点で車両を割り当てる**方式です。
+GTFSの時刻表データと当日の実績データが最初から別テーブルに分かれ、GPSの有無に関わらず便自体は
+必ず存在します。
+
+最大の設計判断は、**進捗データを「車両単位」ではなく「(便 × 車両) の割り当て単位」で持つ**ことです。
+
+```
+daily_trips（当日の便。例：8:00発）
+  ├─ trip_vehicle_assignments(role=assigned)  ── 担当車両 ── trip_stop_progress（その車両の通過実績）
+  ├─ trip_vehicle_assignments(role=candidate) ── 候補車両 ── trip_stop_progress（その車両の通過実績）
+  └─ trip_vehicle_assignments(role=candidate) ── 候補車両 ── trip_stop_progress（その車両の通過実績）
+```
+
+- 候補車両にも担当車両と**まったく同じ運行処理**（通過判定・遅延計算・ETA計算）を行います。ただし
+  利用者向けAPIには出しません。
+- 担当車両が運行終了したら、始発時刻時点の候補から再割り当てします。候補は最初からその便に紐づけて
+  実績を記録しているため、**担当への昇格は「どの割り当てを正とみなすか」の切り替えだけ**で済み、
+  実績のコピーやマージは一切発生しません。
+- 「最も進んでいる車両を採用する」というマージは**やってはいけません**。別経路をたまたま走っていた
+  車両を誤って採用する事故につながります。距離が最も近い候補を採用するルールを守ってください。
+- `vehicles`は「観測されている物理車両」を表すだけで、便との紐付けを持ちません。運行終了しても
+  行は削除せず`status='inactive'`にします（1台が複数便の候補になり得るため、削除するとGPSログが
+  CASCADEで消えて他便の処理まで壊れます）。
 
 ## `assignPendingTrips()` — 初回の割り当て（パイプライン④）
 
@@ -30,10 +54,10 @@
 
 ## `openAssignment()` — 停車予定の展開
 
-担当・候補の区別なく、`daily_trip_stop_times`から`trip_stop_progress`を展開します。ルールは旧`planMaking.js`からの移植だったが、2026年8月にGTFSのデータ構造に合わせて簡素化しました（詳細は[pass-detection.md](pass-detection.md)）。
+担当・候補の区別なく、`daily_trip_stop_times`から`trip_stop_progress`を展開します（詳細は[pass-detection.md](pass-detection.md)）。
 
-- `is_through`（GTFSの`pickup_type = 1` かつ `drop_off_type = 1`＝真の通過）のバス停はそのまま`status = '通過'`とする。以前は「便の中で実際に定刻を持つ最後のバス停（`lastValidSeq`）より手前にあるかどうか」という位置ベースの判定を挟んでいたが、これは当時`is_through`のバス停の`scheduled_time`をNULLにしていたことに起因する代償的な措置だった。`scheduled_time`が`is_through`にかかわらず常に実際のGTFS時刻を保持するようになった今は、この判定は不要（`is_through`をそのまま使えば`lastValidSeq`を計算した場合と常に同じ結果になる）。
-- 始発バス停は`status = '到着済'`とし、`actual_time`に**判定に使ったGPSの時刻**を入れる。旧方式の「出発時刻」に相当し、ETAの起点・ペース算出がここから機能する。
+- `is_through`（GTFSの`pickup_type = 1` かつ `drop_off_type = 1`＝真の通過）のバス停はそのまま`status = '通過'`とする。`scheduled_time`は`is_through`にかかわらず常に実際のGTFS時刻を保持するため、位置ベースの判定は挟まない。
+- 始発バス停は`status = '到着済'`とし、`actual_time`に**判定に使ったGPSの時刻**を入れる。ETAの起点・ペース算出がここから機能する。
 
 ## `reassignOrphanTrips()` — 再割り当て（パイプライン⑤）
 

@@ -1,5 +1,5 @@
 // busStopApproaching.js のうち、DB/GTFSインデックスに依存しない純粋関数部分の回帰テスト。
-// 点検所見 H-7（定刻を過ぎた遅延便が接近中バス一覧から消える）の再発防止用。
+// 定刻を過ぎた遅延便が接近中バス一覧から消えないことの回帰テスト。
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { isWithinApproachWindow, computeEtaSeconds } = require('../src/services/busStopApproaching');

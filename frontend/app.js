@@ -121,6 +121,48 @@ document.addEventListener('click', (e) => {
   if (closeTarget) closeModal(closeTarget.dataset.close);
 });
 
+/* ---------- GTFSデータの有効期間外の注意喚起（時刻表・経路検索で共用） ---------- */
+// 同じ日付・同じ有効期間の組み合わせでは一度しか出さない（再描画・ポーリングでの再表示を防ぐ）。
+let lastGtfsExpiryKey = null;
+
+function formatJpDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  if (!m) return iso || '';
+  return `${Number(m[1])}年${Number(m[2])}月${Number(m[3])}日`;
+}
+
+/**
+ * validity は API の gtfsValidity（{ available, outOfRange, position, periodStart, periodEnd, date }）。
+ * 選択された日付が現在のGTFSデータの有効期間外のときだけポップアップを開く。
+ */
+function showGtfsExpiryNotice(validity) {
+  if (!validity || !validity.available || !validity.outOfRange) return;
+
+  const key = `${validity.date}|${validity.periodStart}|${validity.periodEnd}`;
+  const modal = $('gtfs-expiry-modal');
+  if (!modal) return;
+  if (lastGtfsExpiryKey === key && modal.style.display === 'flex') return;
+  lastGtfsExpiryKey = key;
+
+  const period = validity.periodStart && validity.periodEnd
+    ? `${formatJpDate(validity.periodStart)}〜${formatJpDate(validity.periodEnd)}`
+    : validity.periodEnd
+      ? `${formatJpDate(validity.periodEnd)}まで`
+      : `${formatJpDate(validity.periodStart)}以降`;
+
+  const body = $('gtfs-expiry-body');
+  if (body) {
+    body.textContent =
+      `選択された日付（${formatJpDate(validity.date)}）は、現在の時刻表データ（GTFS）の` +
+      `有効期間（${period}）外です。\n\n` +
+      'この日のダイヤは現時点のデータに基づく暫定的なもので、ダイヤ改正により実際の運行と' +
+      '異なる可能性があります。最新の時刻は各バス事業者の情報をご確認ください。';
+  }
+  openModal('gtfs-expiry-modal');
+}
+
+window.showGtfsExpiryNotice = showGtfsExpiryNotice;
+
 // バスマップのポップアップ内「便の詳細を見る」ボタン（Leafletが動的に挿入するDOM向けの委任リスナー）
 document.addEventListener('click', (e) => {
   const detailBtn = e.target.closest('[data-role="tt-bus-detail-btn"]');

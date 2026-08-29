@@ -1,6 +1,6 @@
 // gtfsCalendar.js のうち、DB/ファイルI/Oに依存しない純粋関数部分の回帰テスト。
-// 点検所見 H-8（運行日カレンダーの日付・曜日算出がサーバのローカルタイムゾーンに依存する）の
-// 再発防止用。コンテナがUTCで動く場合を process.env.TZ='UTC' で再現する。
+// 運行日カレンダーの日付・曜日算出がサーバのローカルタイムゾーンに依存しないことの
+// 回帰テスト。コンテナがUTCで動く場合を process.env.TZ='UTC' で再現する。
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { getDayOfWeek, formatDate } = require('../src/services/gtfsCalendar');

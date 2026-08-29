@@ -28,6 +28,12 @@ const GTFS_FEEDS = [
   }
 ];
 
+// のりば（標柱）の座標統合（docs/timetable-search.md「のりばの座標統合」）で、
+// 統合後の表示名・よみがなをどのGTFSフィードの stop_name に従わせるかの優先順位。
+// 2つのフィードが同じ物理のりばをそれぞれ別 stop_id・別表記で登録しているため必要。
+// 配列で先にあるフィードほど優先し、ここに無いフィードは最下位（stop_id順で安定化）。
+const PLATFORM_DISPLAY_NAME_FEED_PRIORITY = ['guruttomatsumotobus1', 'guruttomatsumotobus2'];
+
 const LOCATION_FEEDS = [
   {
     id: 'matsumotoshicombus',
@@ -73,6 +79,13 @@ function getEnabledGtfsFeeds() {
  */
 function getEnabledGtfsFeedIds() {
   return getEnabledGtfsFeeds().map((feed) => feed.id);
+}
+
+/**
+ * のりば座標統合時の表示名採用フィードの優先順位（コピーを返す）。
+ */
+function getPlatformDisplayNameFeedPriority() {
+  return PLATFORM_DISPLAY_NAME_FEED_PRIORITY.slice();
 }
 
 /**
@@ -162,14 +175,22 @@ function validateFeedConfig() {
     }
   }
 
+  for (const gtfsFeedId of PLATFORM_DISPLAY_NAME_FEED_PRIORITY) {
+    if (!gtfsFeedIds.has(gtfsFeedId)) {
+      problems.push(`PLATFORM_DISPLAY_NAME_FEED_PRIORITY が未定義のGTFSフィード ${gtfsFeedId} を参照しています。`);
+    }
+  }
+
   return problems;
 }
 
 module.exports = {
   GTFS_FEEDS,
   LOCATION_FEEDS,
+  PLATFORM_DISPLAY_NAME_FEED_PRIORITY,
   getEnabledGtfsFeeds,
   getEnabledGtfsFeedIds,
+  getPlatformDisplayNameFeedPriority,
   getEnabledLocationFeeds,
   getGtfsFeedIdsFor,
   getAllFeedsForDb,

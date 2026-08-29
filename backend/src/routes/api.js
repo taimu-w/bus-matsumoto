@@ -760,7 +760,7 @@ async function readTimetableFromSchedule(routeId) {
   );
   // 順序はst.stop_sequence（便自身の中での0始まりの連番）を使う。s.seq_orderは
   // 路線内の表示順専用（service_idグループ横断の共有値）であり、枝分かれ・逆回りの
-  // ある便ではこの便自身の実際の停車順と一致しないため使わない（点検所見 C-1 参照）。
+  // ある便ではこの便自身の実際の停車順と一致しないため使わない。
   const times = await pool.query(
     `SELECT st.trip_id, st.stop_sequence AS seq_order, s.name AS stop_name, st.scheduled_time,
             st.is_through, st.no_pickup, st.no_drop_off

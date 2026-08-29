@@ -38,7 +38,7 @@ async function loadActiveServiceIds(serviceDate) {
  *
  * 順序はsst.stop_sequence（便自身の中での0始まりの連番）を使う。stops.seq_orderは
  * 路線内の表示順専用（service_idグループ横断の共有値）であり、枝分かれ・逆回りの
- * ある便ではこの便自身の実際の停車順と一致しないため使わない（点検所見 C-1 参照）。
+ * ある便ではこの便自身の実際の停車順と一致しないため使わない。
  */
 async function loadScheduleTrips(client, activeServiceIds) {
   const res = await client.query(

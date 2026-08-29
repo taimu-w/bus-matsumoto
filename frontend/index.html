@@ -316,6 +316,20 @@
   </div>
 </div>
 
+<!-- ダイヤ改正の注意喚起（時刻表・経路検索で、選択日がGTFSデータの有効期間外のとき開く） -->
+<div id="gtfs-expiry-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center px-4" style="display:none;">
+  <div class="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
+    <div class="bg-amber-500 p-4 text-white font-bold text-lg flex items-center gap-2">
+      <span aria-hidden="true">⚠️</span>
+      <h3>ダイヤ改正にご注意ください</h3>
+    </div>
+    <div id="gtfs-expiry-body" class="p-6 text-base text-gray-900 leading-relaxed whitespace-pre-wrap"></div>
+    <div class="p-4 border-t bg-gray-50">
+      <button data-close="gtfs-expiry-modal" class="w-full bg-gray-900 text-white py-3.5 rounded-xl text-base font-bold">閉じる</button>
+    </div>
+  </div>
+</div>
+
 <!-- 地図ポップアップ（OpenStreetMap。便詳細ページのリアルタイム表示から使う。外部サイトへは遷移しない） -->
 <div id="tt-map-popup-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4" style="display:none;">
   <div class="bg-white rounded-t-3xl sm:rounded-2xl w-full max-w-md shadow-2xl p-4">

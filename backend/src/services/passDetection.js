@@ -745,7 +745,7 @@ async function processAssignmentPass(client, assignment, { radiusMeters, marginM
   }
 
   // 重複除去で外れたGPSログは trip_gps_matches に記録しないため、
-  // 次回のバッチで自動的に再評価される（旧実装の matched_label 戻し処理に相当）。
+  // 次回のバッチで自動的に再評価される。
 
   // --- ② 付近→到着済確認(confirm): 最小距離からの離脱を検知して到着確定する ---
   // GPS点はここではtrip_gps_matchesに消費しないため、未消費のまま次バッチでも

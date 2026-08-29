@@ -1,50 +1,15 @@
-# 経路検索機能 改善仕様書
+# 経路検索機能の仕様（`services/gtfsRouteSearch.js` / `frontend/routesearch.js`）
 
-作成日: 2026-08-11
+## 1. 概要
 
-> この仕様書に基づく作り直しは完了済みです。以下は実装当時の設計意図（なぜ`gtfsRouteSearch.js`へ全面的に移したか）の記録であると同時に、現在も経路検索エンジンの詳細仕様（アーキテクチャ・探索アルゴリズム・API）の参照先として有効です。細部の定数・挙動は必ず実装コード（`services/gtfsRouteSearch.js`）を正としてください。
->
-> **追記（2026-08-17）**: 当初「対象外」としていた到着時刻指定（「◯時までに着きたい」）を実装しました。順向きの探索（`runRaptor`）には手を入れず、時間軸を反転させた`runRaptorReverse`を別に持つ構成です。詳細は5.6を参照してください。
+経路検索は、時刻表検索と同じGTFSインメモリインデックス（`gtfsTimetable.js`）を直接探索するRAPTOR型の
+エンジンです。**リアルタイム運行状況とはデータ経路が完全に独立**しており、探索はDBを一切見ません。
+リアルタイム情報（遅延・予測時刻・車両位置）は、確定した経路に`realtimeTripLookup.js`経由で後から
+重ねます（バス停検索の「接近中のバス」と同じ設計）。
 
-## 0. この仕様書の位置づけ
-
-現行の経路検索（`services/routeSearch.js` + `frontend/app.js` 内のルート検索UI）を全面的に作り直すための仕様書。
-実装はこの仕様書に基づいて行う。対象となる要望は次の6点。
-
-| # | 要望 | 対応する章 |
-|---|---|---|
-| 1 | 路線カラーが使われていない。路線カラーに基づいたデザインにする | 6章 |
-| 2 | バス停検索画面のように、ひらがな・ローマ字でも検索できるようにする | 3章 |
-| 3 | バス停をタップすると `/busstop` へ移動できる／乗るバスの通過バス停・時刻がわかる | 5.4章・6.4章 |
-| 4 | GTFSの運賃データを取得して運賃を表示する | 4章 |
-| 5 | カレンダーで日付を選択して検索できるようにする | 5.1章・6.2章 |
-| 6 | 経路がたまに見つからないのをできるだけ防ぐ | 2章・7章 |
-
----
-
-## 1. 現行実装の問題点（なぜ作り直すのか）
-
-現行の `routeSearch.js` はDBの `stops` / `daily_trips` / `daily_trip_stop_times` を検索対象にしている。
-この構造そのものが、上記6要望のうち5つを実現できない原因になっている。
-
-| 現行の作り | それが引き起こす問題 |
-|---|---|
-| DBの `daily_trips`（当日ぶんしか生成されない）を見る | **日付を選んで検索できない**（要望5）。当日の便が未生成・生成失敗のときは検索結果がゼロになる |
-| DBの `stops` は路線×方向×順序で正規化され、GTFSの `stop_id`・`zone_id`・標柱を持たない | **運賃を引けない**（要望4）。**`/busstop` のstopKeyへ変換できない**（要望3）。`name_kana` は持つがローマ字は無い（要望2） |
-| 停留所の一致判定が「バス停名の完全一致」 | 表記ゆれ・別停留所名（例:「松本駅前」と「松本駅お城口」）でつながらず、**経路が見つからない**（要望6） |
-| 直通は「出発地と目的地の両方の名前を持つ路線」に限定 | 路線をまたぐ経路が直通候補に出ない |
-| 乗換は**直通が0件のときだけ**・**1回まで**・乗換地点は**同名バス停のみ**・各区間は**最速1本だけ**採用 | 乗換2回が必要な区間、徒歩数十mの別名バス停での乗換が**まったく出ない**（要望6の主因） |
-| 路線カラー（`routes.color`）を結果に載せていない | **路線カラーが使えない**（要望1） |
-| 便の全通過停留所を返していない | **通過バス停・通過時刻を表示できない**（要望3） |
-
-一方、時刻表検索機能（`services/gtfsTimetable.js`）は既にGTFSファイルを直接インメモリインデックス化しており、
-**任意日付のダイヤ判定・ひらがな/ローマ字検索・路線カラー・stop_id・標柱・便ごとの全通過時刻**をすべて持っている。
-バス停検索機能（`/busstop`）のstopKeyもこのインデックスのものである。
-
-→ **経路検索の探索基盤を、DBからGTFSインメモリインデックス（`gtfsTimetable.js`）へ移す。**
-リアルタイム情報（遅延・予測時刻・車両位置）は、バス停検索機能が既に使っている
-`realtimeTripLookup.js` の橋渡し（GTFS識別子 → 当日の `daily_trips`）で**上から重ねる**。
-これはバス停検索機能の「接近中のバス」（`busStopApproaching.js`）と同じ設計であり、新しい依存関係を増やさない。
+このドキュメントはアーキテクチャ・探索アルゴリズム・APIの詳細です。細部の定数・挙動は必ず実装コード
+（`services/gtfsRouteSearch.js`）を正としてください。章番号（`5.6` など）は他ドキュメントからの参照でも
+使われています。
 
 ---
 
@@ -73,25 +38,12 @@
 
 - **探索（どの便に乗るか）はGTFSインデックスだけで完結する。** DBが落ちていても、当日便が未生成でも、任意の日付で経路が出る。
 - **リアルタイムは「今日」を検索したときだけ**、確定した経路に対して後から重ねる。重ね合わせに失敗しても定刻表示で成立させる（soft-fail）。
-- 既存の3機能（リアルタイム運行状況・時刻表検索・バス停検索）の挙動は変更しない。
-
-### 2.1 新規・変更するファイル
-
-| ファイル | 区分 | 内容 |
-|---|---|---|
-| `backend/src/services/gtfsFare.js` | 新規 | 運賃インデックスと運賃照会 |
-| `backend/src/services/gtfsRouteSearch.js` | 新規 | 経路探索エンジン本体 |
-| `backend/src/services/gtfsTimetable.js` | 変更 | インデックスに探索用の情報を追加（後方互換） |
-| `backend/src/services/gtfsFeedManager.js` | 変更 | `fare_attributes.txt` / `fare_rules.txt` を任意ファイルに追加 |
-| `backend/src/services/routeSearch.js` | 変更 | 経路探索部分を削除し、`/api/stops/search` 用の `searchStops()` のみ残す |
-| `backend/src/routes/api.js` | 変更 | `/api/route-search` 系を新エンジンへ差し替え |
-| `frontend/routesearch.js` | 新規 | 経路検索画面（SPA・パスルーティング） |
-| `frontend/index.html` | 変更 | 旧ルート検索UIを撤去し `#routesearch-root` を置く |
-| `frontend/app.js` | 変更 | 旧ルート検索ロジックを撤去し、`/routesearch` へのルーティングを追加 |
+- 運賃は`gtfsFare.js`が`fare_attributes.txt` / `fare_rules.txt`（任意ファイル）から引く。
+- `routeSearch.js`には`/api/stops/search`用の`searchStops()`だけを残し、経路探索は`gtfsRouteSearch.js`が担う。
 
 ---
 
-## 3. バス停の指定（要望2）
+## 3. バス停の指定
 
 ### 3.1 候補検索
 
@@ -99,7 +51,7 @@
 
 - `gtfsTimetable.searchStops()` をそのまま使う。すなわち**漢字・ひらがな・カタカナ・ローマ字（大文字小文字・全半角不問）**に対応し、前方一致を優先して部分一致も返す。時刻表検索・バス停検索と**まったく同じ検索体験**にする。
 - 返す `stopKey` は**GTFSインデックスのグループキー**（`/busstop/{stopKey}` や `/timetable/stops/{stopKey}` と同じ値）。
-  - これにより、経路検索の結果から `/busstop` へ**IDのまま**遷移できる（要望3）。現行のような名前による橋渡し（`navigateToBusStopByName`）は不要になる。
+  - これにより、経路検索の結果から `/busstop` へ**IDのまま**遷移できる（名前による橋渡しは不要）。
 - レスポンス（`stops[]`）:
 
 ```jsonc
@@ -128,14 +80,13 @@ GTFSインデックスの統合ルール（`gtfsTimetable.js` の `buildGroups()
 
 ---
 
-## 4. 運賃（要望4）
+## 4. 運賃
 
 ### 4.1 データの取得
 
-GTFS ZIPには `fare_attributes.txt` / `fare_rules.txt` が含まれている（両フィードとも実在を確認済み）が、
-現行の `gtfsFeedManager.js` は `MANAGED_GTFS_FILES` に無いファイルを展開先へ配置しないため、ディスク上に存在しない。
+`fare_attributes.txt` / `fare_rules.txt` は `gtfsFeedManager.js` の `OPTIONAL_GTFS_FILES` に含まれ、
+存在すれば展開先へ配置される。
 
-- `OPTIONAL_GTFS_FILES` に `fare_attributes.txt` と `fare_rules.txt` を追加する。
 - **`REQUIRED_GTFS_FILES` には絶対に追加しない。** 持たないフィードが1つでもあると全フィードのGTFS更新が止まる（CLAUDE.md 既知の注意点）。
 - 読み込みは `readCsvIfExists()` を使い、無ければ「運賃不明」として機能全体は成立させる。
 
@@ -177,7 +128,7 @@ GTFS ZIPには `fare_attributes.txt` / `fare_rules.txt` が含まれている（
 |---|---|---|
 | `fromStopKey` / `from` | 出発地（stopKey または自由文字列） | 必須 |
 | `toStopKey` / `to` | 目的地（stopKey または自由文字列） | 必須 |
-| `date` | 検索する日付（`YYYY-MM-DD`）＝**カレンダーで選択した日**（要望5） | 本日（JST） |
+| `date` | 検索する日付（`YYYY-MM-DD`）＝**カレンダーで選択した日** | 本日（JST） |
 | `time` | 基準時刻（`HH:MM`）。`timeMode` により出発時刻／到着時刻が切り替わる | 出発時刻指定：現在時刻（本日のとき）／`05:00`（他日のとき）<br>到着時刻指定：現在時刻＋1時間（本日のとき）／`12:00`（他日のとき） |
 | `timeMode` | `departure`＝この時刻**以降に出発**／`arrival`＝この時刻**までに到着** | `departure` |
 | `limit` | 返す経路数 | 5 |
@@ -185,7 +136,7 @@ GTFS ZIPには `fare_attributes.txt` / `fare_rules.txt` が含まれている（
 | `allowWalkTransfer` | 詳細設定：徒歩での乗り継ぎを使うか。5.8 | `true` |
 | `minTransferMinutes` | 詳細設定：乗り換えに要求する最低の余裕時間（分）。5.8 | `1` |
 
-`timeMode=arrival`（「◯時までに着きたい」）は5.7で述べる**逆向き探索**で処理する。
+`timeMode=arrival`（「◯時までに着きたい」）は5.6で述べる**逆向き探索**で処理する。
 未指定・不正値は必ず `departure` として扱い、従来のクライアントの挙動を変えない。
 詳細設定（5.8）も同様に、未指定・不正値はすべて既定＝従来の探索条件に落とす。
 
@@ -194,7 +145,12 @@ GTFS ZIPには `fare_attributes.txt` / `fare_rules.txt` が含まれている（
 `gtfsTimetable.getActiveServices(index, dateStr)`（`calendar.txt` の有効期間＋曜日、`calendar_dates.txt` の例外を反映）で
 その日に有効な `service_id` を求め、その `service_id` を持つ便だけを探索対象にする。
 
-**日跨ぎの扱い**（見つからない経路を減らすため、要望6）:
+**GTFSデータの有効期間外の日付**: `common.gtfsValidity`（`describeDateValidity()`）を成否にかかわらず
+返す。選択日が現在のGTFSの有効期間（全有効フィードの union）外なら `outOfRange:true` とし、画面が
+「ダイヤ改正でこの日の運行が変わる可能性がある」旨をポップアップで出す。期間の求め方・レスポンス形状は
+[timetable-search.md](timetable-search.md)「GTFSデータの有効期間外の注意喚起」を参照。
+
+**日跨ぎの扱い**（見つからない経路を減らすため）:
 
 - 前日サービスの24時超え便（例: 前日の `24:30` 発）を **−86400秒シフト**して当日の `0:30` として取り込む。
   → 深夜0時台の検索で「昨日のダイヤの深夜便」が正しく出る。
@@ -261,7 +217,7 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
           "type": "bus",
           "feedId": "guruttomatsumotobus1",
           "routeId": "11", "routeName": "横田信大循環線", "routeShortName": "",
-          "routeColor": "FF9900", "routeTextColor": "FFFFFF",   // ← 要望1
+          "routeColor": "FF9900", "routeTextColor": "FFFFFF",
           "agencyName": "松本市",
           "tripId": "2平日_09時05分_系統101001",
           "tripDepartureTime": "0905",
@@ -278,7 +234,7 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
           "realtime": { "hasRealtime": true, "delayMinutes": 2, "vehicleId": "1234",
                         "currentStopName": "本町", "lat": …, "lng": …,
                         "predictedDepartureTime": "9:07", "predictedArrivalTime": "9:24" },
-          "stops": [   // ← 要望3：乗車から降車までの通過バス停と通過時刻
+          "stops": [   // 乗車から降車までの通過バス停と通過時刻
             { "stopKey":"100", "stopId":"100_03", "name":"松本バスターミナル", "arrivalTime":"9:05",
               "departureTime":"9:05", "isBoard":true, "isAlight":false, "isThrough":false,
               "predictedTime":"9:05", "status":"到着済", "busstopUrl":"/busstop/100" },
@@ -386,7 +342,7 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
 ### 6.1 URL設計
 
 時刻表検索・バス停検索と同じくHistory API（パス）でルーティングする。
-検索条件をURLに持たせることで、**`/busstop` へ移動して戻ってきても検索結果が復元される**（要望3の副作用対策）。
+検索条件をURLに持たせることで、**`/busstop` へ移動して戻ってきても検索結果が復元される**。
 
 ```
 /routesearch                                                    検索フォーム
@@ -413,7 +369,7 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
 
 - 出発地／目的地：インクリメンタル候補表示（ひらがな・ローマ字対応、`/api/route-search/stops`）。候補には路線カラーのチップを並べる。
 - 入れ替えボタン（現行同等）。
-- **日付**：`<input type="date">`＋クイックボタン「今日／明日／平日／土曜／日祝」（時刻表検索の `renderCalendar` と同じ操作感）。選択中の日付は「8月11日（火）」形式で表示する（要望5）。
+- **日付**：`<input type="date">`＋クイックボタン「今日／明日／平日／土曜／日祝」（時刻表検索の `renderCalendar` と同じ操作感）。選択中の日付は「8月11日（火）」形式で表示する。
 - 時刻：**「出発時刻／到着時刻」の切り替えボタン**＋`<input type="time">`＋「現在時刻」ボタン。
   切り替えると（日付のクイックボタンと同じく）出発地・目的地が入力済みならその場で検索し直す。
   どちらを指定しているかは切り替えボタンの選択状態と、直下の説明文（「指定した時刻までに到着する経路を、
@@ -434,7 +390,7 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
     TailwindのCDNビルド依存の `group-open:` は使わない。
 - 未入力・同一バス停選択などはフォーム内に警告表示（現行同等）。
 
-### 6.3 結果の2階層（経路一覧 → 経路詳細・路線カラー基調・要望1）
+### 6.3 結果の2階層（経路一覧 → 経路詳細・路線カラー基調）
 
 結果は**「一覧で選ぶ」→「1件の詳細を読む」の2画面**に分ける。乗り換え時刻や通過バス停まで
 すべてを一覧に並べると、5件並んだだけで画面が縦に長くなり、経路を見比べられなくなるため。
@@ -508,7 +464,7 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
   ヘッダーの地点名（`endpointHeadingHtml()`）は一覧と詳細で**同じ関数を共用する**。同じ経路が
   2画面で違う見た目・違う運賃表記になるのを防ぐため。
 
-### 6.4 バス停タップと通過バス停（要望3）
+### 6.4 バス停タップと通過バス停
 
 - **経路詳細**の**すべてのバス停名はリンク**であり、`/busstop/{stopKey}` へSPA遷移する（一覧のカードはボタン1つなのでリンクを持たない）。
 - 「通過するバス停を見る」を開くと、その区間の**乗車停から降車停までの全通過バス停と通過時刻**を縦のタイムラインで表示する。
@@ -526,7 +482,7 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
   どちらを開いていてもポーリングする**（詳細は同じAPIレスポンスのN件目を描いているため、
   再取得の処理は共通で、開いている「通過するバス停」（`openLegKeys`）も再描画をまたいで維持する）。
 
-### 6.6 見つからなかったとき（要望6）
+### 6.6 見つからなかったとき
 
 - 段階的フォールバック（7章）の結果として `found:false` になった場合は、理由（`reason`）に応じたメッセージと次の手を出す。
   - `no-service-on-date`：「この日はこの区間を結ぶ便がありません。」＋**次の運行日（8月13日（木））で検索**ボタン。
@@ -539,7 +495,7 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
 
 ---
 
-## 7. 「経路が見つからない」を減らすための段階的フォールバック（要望6）
+## 7. 「経路が見つからない」を減らすための段階的フォールバック
 
 `searchJourneys()` は、結果が0件のあいだ次の順に条件を緩めて再探索する。**どの段階で見つかったかを `relaxation` としてレスポンスに含め、画面に明示する。**
 
@@ -593,7 +549,8 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
 | `allowWalkTransfer` | 詳細設定：`false`（または`0`）で徒歩での乗り継ぎを使わない。未指定＝使う |
 | `minTransferMinutes` | 詳細設定：乗り換えの余裕時間（1〜15分。未指定＝1） |
 
-レスポンス: 5.5 の構造（＋どちらの指定で検索したかを示す `timeMode`、＋適用中の条件を示す `preferences`）。
+レスポンス: 5.5 の構造（＋どちらの指定で検索したかを示す `timeMode`、＋適用中の条件を示す `preferences`、
+＋選択日がGTFS有効期間外かを示す `gtfsValidity`）。
 見つからない場合は `{ "found": false, "reason": "...", "message": "...", "suggestion": { … } }`。
 `suggestion` には `kind`（`first-bus` / `first-arrival` / `next-service-day`）・`date`・`time`・`timeMode` を含める。
 **`time` はそのまま検索フォームの時刻欄へ入れられる値**（出発時刻指定なら発時刻、到着時刻指定なら着時刻）とする。
@@ -602,16 +559,13 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
 `preferences` は成否にかかわらず必ず返す:
 `{ "maxTransfers": null|0..3, "allowWalkTransfer": true|false, "minTransferMinutes": 1..15, "isDefault": true|false }`
 
-**旧APIとの互換性**: 旧 `departureTime` パラメータは `time` の別名として受け付ける。
-`arrivalTime` を渡した場合は `timeMode=arrival` とみなす。
-`timeMode` 未指定は必ず出発時刻指定として扱うので、既存のURL・ブックマークの挙動は変わらない。
-詳細設定の3パラメータも未指定なら従来の条件で探索するため、既存のクライアントには影響しない
-（増えるのはレスポンスの `preferences` フィールドだけで、既存フィールドは一切変わらない）。
-旧レスポンス（`routes[]`）は廃止し `journeys[]` にする。旧フロントは同時に差し替えるため互換は不要。
+**パラメータの別名**: `departureTime` は `time` の別名として受け付ける。`arrivalTime` を渡した場合は
+`timeMode=arrival` とみなす。`timeMode` 未指定は必ず出発時刻指定として扱う。詳細設定の3パラメータも
+未指定なら既定条件で探索する（既存のURL・ブックマーク・お気に入りの挙動を変えないため）。
 
-### 8.3 変更しないAPI
+### 8.3 関連API
 
-`/api/stops/search`（DBベースのバス停名検索）は管理用途で残す。`routeSearch.js` にはこの関数だけを残す。
+`/api/stops/search`（DBベースのバス停名検索）は管理用途で残してある。`routeSearch.js` にはこの関数だけを置く。
 
 ---
 
@@ -626,11 +580,11 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
 
 ---
 
-## 10. 移行・後方互換に関する注意
+## 10. 実装上の制約
 
-- **`REQUIRED_GTFS_FILES` に運賃ファイルを足さない**（4.1）。
-- **`gtfsTimetable.js` の既存の公開関数のシグネチャは変えない。** 追加するのは新しいエクスポートとインデックスのフィールドのみ。
-  時刻表検索・バス停検索・バス停マップの挙動を変えてはならない。
-- **DB側の3つの曜日区分ロジック（`getDayType` / `getActiveServiceIds` / `getActiveServices`）は統合しない。**
+- **`REQUIRED_GTFS_FILES` に運賃ファイル（`fare_attributes.txt` / `fare_rules.txt`）を足さない**（4.1）。
+  持たないフィードがあるとGTFS更新が全フィードで止まる。
+- **`gtfsTimetable.js` の公開関数のシグネチャは変えない。** 時刻表検索・バス停検索・バス停マップと
+  インデックスを共用しているため、これらの挙動を変えてはならない。
+- **3つの曜日区分ロジック（`getDayType` / `getActiveServiceIds` / `getActiveServices`）は統合しない。**
   経路検索は時刻表検索用の `getActiveServices()` を使う（任意日付・有効期間チェックが必要なため）。
-- 旧 `routeSearch.js` の経路探索関数（`searchStopCandidates` / `resolveStopNameCandidates` / `findLegCandidates` / `searchDirectRoutes` / `searchTransferRoutes` / `searchRoutes`）は削除する。README §8 も差し替える。

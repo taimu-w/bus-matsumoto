@@ -18,7 +18,8 @@ const {
   searchStops,
   resolveHeadsign,
   formatHhmm,
-  todayString
+  todayString,
+  describeDateValidity
 } = require('./gtfsTimetable');
 const { expandFrequencies } = require('./gtfsFrequencies');
 const { getFareIndex, lookupFare } = require('./gtfsFare');
@@ -1711,7 +1712,16 @@ async function searchJourneys(options = {}) {
   const destination = await resolveEndpoint(index, { stopKey: options.toStopKey, text: options.to, spotId: options.toSpotId });
 
   // preferences は成否にかかわらず必ず返す（画面が現在の詳細設定を復元・表示するのに使う）
-  const common = { date: dateStr, baseTime, isToday, timeMode, preferences: serializePreferences(preferences) };
+  // gtfsValidity: 選択された日付が現在のGTFSデータの有効期間外なら、画面で
+  // 「ダイヤが変更される可能性がある」旨を注意喚起する（成否にかかわらず返す）。
+  const common = {
+    date: dateStr,
+    baseTime,
+    isToday,
+    timeMode,
+    preferences: serializePreferences(preferences),
+    gtfsValidity: describeDateValidity(index, dateStr)
+  };
 
   if (origin.groups.length === 0 || destination.groups.length === 0) {
     const missingSide = origin.groups.length === 0 ? origin : destination;

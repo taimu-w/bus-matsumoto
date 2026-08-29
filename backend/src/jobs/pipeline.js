@@ -50,7 +50,7 @@ async function runPipeline() {
     await jobMonitor.track('pipeline.delayCalc', delayCalc);                     // ⑦ 遅延計算（担当・候補すべて）
 
     // ⑧ 全active割り当てのETAを一括計算しtrip_arrival_predictionsへ保存
-    //    （オンデマンド計算からプリコンピュート方式への移行。設計書 docs/design-eta-precompute.md）
+    //    （APIはここから読むだけ。詳細は docs/eta-prediction-algorithm.md）
     await jobMonitor.track('pipeline.computeArrivals', computeAndStoreAllArrivals);
   } catch (err) {
     console.error('[pipeline] 実行エラー:', err);

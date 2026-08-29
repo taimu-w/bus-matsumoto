@@ -131,7 +131,7 @@ function isServiceActiveOnDayOfWeek(calRow, dayOfWeek) {
 // 曜日・日付はサーバのローカルタイムゾーンに関わらずAsia/Tokyo(JST)で判定する
 // （utils/time.jsの実装に委譲）。コンテナがUTCで動く場合、ローカル系メソッド
 // （getDay()・getFullYear()等）だとJST 00:00〜09:00に前日の曜日・日付を返し、
-// 運行日判定が丸ごと1日ずれていた（点検所見 H-8）。
+// 運行日判定が丸ごと1日ずれるため、JST固定のヘルパーに委譲する。
 function getDayOfWeek(date) {
   return getDayOfWeekJST(date);
 }

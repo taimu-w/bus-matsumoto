@@ -33,11 +33,16 @@ const REQUIRED_GTFS_FILES = [
 // fare_attributes.txt / fare_rules.txt は経路検索の運賃表示（gtfsFare.js）で使う。
 // これらも同じ理由で REQUIRED にはしない。無い場合は「運賃不明」として扱い、
 // 経路検索自体は成立させる（経路検索機能_改善仕様書 4.1）。
+//
+// feed_info.txt は「GTFSデータの有効期間」（feed_start_date / feed_end_date）の
+// 供給元。経路検索・時刻表検索で「選択された日付が有効期間外」の注意喚起に使う。
+// 持たないフィードでは calendar.txt の期間から推定するため、これも REQUIRED にはしない。
 const OPTIONAL_GTFS_FILES = [
   'frequencies.txt',
   'translations.txt',
   'fare_attributes.txt',
-  'fare_rules.txt'
+  'fare_rules.txt',
+  'feed_info.txt'
 ];
 
 const MANAGED_GTFS_FILES = [...REQUIRED_GTFS_FILES, ...OPTIONAL_GTFS_FILES];

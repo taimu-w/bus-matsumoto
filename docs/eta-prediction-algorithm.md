@@ -1,8 +1,24 @@
 # 到着予測（ETA）アルゴリズムの詳細（`services/etaPredictor.js`）
 
-このモジュールは「過去の走行実績をどう使うか」「実績がない場合にどう到着時刻を計算するか」を担う中核部分です。旧ロジック（現在の遅延をそのまま残り全区間に単純加算するだけ）を、**過去統計＋直近の走行ペースを組み合わせた予測**に置き換えたものです。
+このモジュールは「過去の走行実績をどう使うか」「実績がない場合にどう到着時刻を計算するか」を担う中核部分です。**過去統計＋直近の走行ペースを組み合わせた予測**を行います。
 
-計算がいつ・どこで呼ばれるか（プリコンピュート方式）については[design-eta-precompute.md](design-eta-precompute.md)を参照してください。このドキュメントはアルゴリズム本体の詳細です。
+## 計算のタイミング（プリコンピュート方式）
+
+到着予測はパイプライン内で一括計算してDBへ保存し、APIはそれを読み出すだけにしています。
+
+- `etaPredictor.js`の`computeAndStoreAllArrivals()`が、`jobs/pipeline.js`の`runPipeline()`から
+  `delayCalc()`の直後（パイプラインの⑧番目のステップ）に呼ばれます。役割（担当・候補）を問わず
+  `state = 'active'`な全割り当てに対して`predictArrivals()`を実行し、結果を`trip_arrival_predictions`
+  テーブルへUPSERTします（`assignment_id, stop_id`が複合主キー）。あわせて`computed_at`が48時間より
+  古いレコードを削除します。
+- API側は計算を一切行わず、`getArrivalsForAssignment(client, assignmentId)`で
+  `trip_arrival_predictions`から読み出すだけです（`routes/api.js`の`GET /api/buses`、
+  `services/realtimeTripLookup.js`の`buildBusEntry()`）。
+- 計算回数は「ポーリング間隔（既定60秒）× active割り当て数」に固定され、APIリクエスト数がどれだけ
+  増えても計算コストは増えません。代わりに予測値は最大でポーリング間隔ぶん遅れます。
+
+`predictArrivals(client, assignmentId)`の引数は車両IDではなく**割り当てID**です（進捗が
+`trip_stop_progress`に移ったため）。以下はアルゴリズム本体の詳細です。
 
 ## データの土台：区間別走行時間統計（`segment_travel_stats`テーブル）
 
@@ -12,7 +28,7 @@
 
 運行が終了した便（`finishService.js`が`completed_trips`にアーカイブしたもの。詳細は[trip-lifecycle.md](trip-lifecycle.md)）から統計を作ります。
 
-この関数は**2つの独立した経路**から呼ばれます：`finishService.js`の`finishTrips()`の最後（1件以上運行終了・クローズがあった場合）と、`tripAssignment.js`の`reassignOrphanTrips()`の最後（1件以上便がクローズされた場合）です。つまり、**バスが1便完走するたびに統計が少しずつ育っていく**仕組みですが、2系統のタイマーがほぼ同時に走るため、同じ`completed_trips`行を両方が同時に処理しようとすることが実際に起こります（点検所見 C-5）。
+この関数は**2つの独立した経路**から呼ばれます：`finishService.js`の`finishTrips()`の最後（1件以上運行終了・クローズがあった場合）と、`tripAssignment.js`の`reassignOrphanTrips()`の最後（1件以上便がクローズされた場合）です。つまり、**バスが1便完走するたびに統計が少しずつ育っていく**仕組みですが、2系統のタイマーがほぼ同時に走るため、同じ`completed_trips`行を両方が同時に処理しようとすることが実際に起こります。
 
 1. `updateSegmentStats()`全体を1つのトランザクション（`BEGIN`〜`COMMIT`）で実行する。
 2. `completed_trips`のうち`aggregated = FALSE`（未集計）**かつ`is_official = TRUE`**の便を`FOR UPDATE SKIP LOCKED`付きで最大200件取得する。
@@ -138,9 +154,9 @@ combinedPaceFactor = Σ(重み × シグナル値) / Σ(重み)   ※nullのシ�
 
 #### (b) `scheduled_time`が欠損している区間の場合（現行データでは通常発生しない）
 
-**2026年8月のGTFSデータ構造の見直しにより、この分岐は「通過バス停」の処理ではなくなりました。** GTFSの`stop_times.txt`に載る行には必ず実際の時刻が入るため、`is_through`（真の通過。`pickup_type = 1` かつ `drop_off_type = 1`）のバス停であっても`scheduled_time`は常に実際のGTFS時刻を持ちます（詳細は[pass-detection.md](pass-detection.md)）。したがって`isValidTime()`が偽になるのは、元GTFSフィード側の時刻データが欠損・不正であるという、こちらでは制御できない外部データ不備のときだけです（現行の実データでは一度も発生しません）。
+GTFSの`stop_times.txt`に載る行には必ず実際の時刻が入るため、`is_through`（真の通過。`pickup_type = 1` かつ `drop_off_type = 1`）のバス停であっても`scheduled_time`は常に実際のGTFS時刻を持ちます（詳細は[pass-detection.md](pass-detection.md)）。したがって`isValidTime()`が偽になるのは、元GTFSフィード側の時刻データが欠損・不正であるという、こちらでは制御できない外部データ不備のときだけです（現行の実データでは発生しません）。
 
-この分岐自体は、そうした万一の外部データ不備が起きたときに「5分固定を連鎖加算して予測が大暴走する」という過去に実際に発生した不具合を再発させないための保険として残しています。統計・ペース補正のどちらも使わないのは、そのような区間は統計が汚染されている／存在しないことが多く、無理に使うと予測が破綻するためです。
+この分岐は、そうした外部データ不備が起きたときに「5分固定を連鎖加算して予測が大暴走する」のを防ぐための保険です。統計・ペース補正のどちらも使わないのは、そのような区間は統計が汚染されている／存在しないことが多く、無理に使うと予測が破綻するためです。
 
 1. **予測対象のバス停自体が定刻を持たない場合（`source: 'through_skip'`）**
    時間を進めずスキップします（`segmentMinutes = 0`）。

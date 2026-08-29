@@ -1158,6 +1158,12 @@
 
     lastResult = result;
 
+    // 選択された日付がGTFSデータの有効期間外なら、ダイヤ改正の可能性を注意喚起する。
+    // リアルタイム追随のサイレント更新では出し直さない。
+    if (!silent && typeof window.showGtfsExpiryNotice === 'function') {
+      window.showGtfsExpiryNotice(result.gtfsValidity);
+    }
+
     // 経路詳細（?journey=N）。一覧と同じAPIの結果からN件目を取り出して描くだけなので、
     // 詳細専用のAPIは持たない（リアルタイムの重ね合わせも一覧とまったく同じ結果になる）。
     if (state.journeyIndex !== null) {

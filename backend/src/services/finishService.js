@@ -128,8 +128,8 @@ async function archiveAssignment(client, assignment, reason, isOfficial) {
   const tripRes = await client.query(
     `INSERT INTO completed_trips
        (route_id, car_id, trip_id, daily_trip_id, assignment_id, start_time, is_official,
-        trip_type, day_of_week, day_type, business_start_time, departure_time, finish_reason)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, NULL, $10)
+        day_of_week, day_type, finish_reason)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING id`,
     [
       assignment.route_id,
@@ -181,7 +181,7 @@ async function archiveAssignment(client, assignment, reason, isOfficial) {
 async function closeDailyTrip(client, dailyTripId, reason) {
   await client.query('BEGIN');
   try {
-    // 便クローズの二重実行防止（点検所見 C-5）。
+    // 便クローズの二重実行防止。
     // finishTrips()の運行日終了掃除と、パイプラインのreassignOrphanTrips()は、
     // それぞれ別タイマー・別DB接続から同じ便を同時にクローズしようとすることがある。
     // 行ロックを取り、既にクローズ済み（closed_at IS NOT NULL）なら即座に抜ける。

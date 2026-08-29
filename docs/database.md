@@ -6,7 +6,7 @@
 |---|---|
 | `routes` | 路線マスタ（`feed_id`でどのGTFSフィード由来かを追跡） |
 | `feeds` | **フィードの稼働状態**（`last_fetched_at` / `last_status` / `last_error`）。構成（`feed_type` / `url` / `enabled` 等）は`config/feeds.js`が正で、行は`seed.js`がそこからUPSERTする |
-| `route_external_ids` | 外部ID（位置情報CSVの系統ID）⇔GTFS route_idの対応（`external_id`が主キー）。路線名によるあいまい解決はせず、`route_id`（qualified route id）を直接持つ。管理画面「外部IDマッピング」から編集可能。`route_id`が`NULL`の行は「対応するGTFS路線がまだ無い」ことを表し、`note`に理由を残す。`services/routeExternalIdMapping.js`がTTLキャッシュする |
+| `route_external_ids` | 外部ID（位置情報CSVの系統ID）⇔GTFS route_idの対応（`external_id`が主キー）。路線名によるあいまい解決はせず、`route_id`（qualified route id）を直接持つ。管理画面「外部IDマッピング」から編集可能。`route_id`が`NULL`の行は「対応するGTFS路線がまだ無い」ことを表し、`note`に理由を残す。`services/routeExternalIdMapping.js`がTTLキャッシュする（詳細は[feed-config.md](feed-config.md)） |
 | `stops` | バス停マスタ（路線・方向・座標・名称（かな/英語）・お知らせ・時刻表リンク）。物理バス停（`gtfs_stop_id`）＋通過回数（`occurrence`。循環路線で1便が同じ停留所を複数回通るケースの識別用）で一意化する。`seq_order`は路線内の表示順専用で、便ごとの実際の停車順には使わない（`schedule_stop_times.stop_sequence`を参照） |
 | `schedule_trips` | 時刻表の「便」（`service_id`＝曜日区分ごと、`gtfs_trip_id`＝GTFS原文のtrip_id、`headsign`＝行先表示） |
 | `schedule_stop_times` | 便ごとのバス停定刻（`scheduled_time`はGTFSの実時刻を常に保持。`is_through`はGTFSの`pickup_type=1`かつ`drop_off_type=1`＝真の通過を表す表示用メタデータで、時刻の有無には影響しない。`no_pickup`/`no_drop_off`は`pickup_type`/`drop_off_type`単独のフラグで「降車のみ」「乗車のみ」バッジの表示用）。`stop_sequence`が便自身の中での実際の停車順（0始まりの連番）で、`daily_trip_stop_times`以降の`seq_order`列はこれを引き継ぐ |
@@ -23,30 +23,15 @@
 | `vehicle_labels` | 車両ID（`car_id`が主キー）に管理画面「車両名・メモ管理」から付ける名前・メモ。`vehicles`は路線ごとに行が分かれ運行終了で行が増えるため`car_id`をキーにする。運行ダッシュボードの便詳細セクションで、名前を持つ車両を`car_id`ではなく名前で表示し、名前タップでメモを表示する。名前・メモがどちらも空になった時点で行を削除する |
 | `vehicle_positions_raw` | GPSフィードから取得した直後の生ログ（未処理分の一時置き場、取得元`feed_id`付き） |
 | `vehicle_gps_log` | 車両ごとに整理された走行ログ |
-| `vehicle_stop_status` | **未使用（旧・車両起点方式の名残）**。`trip_stop_progress`に置き換わったが移行のため残置 |
-| `completed_trips` | 運行終了後にアーカイブされた便（`is_official=TRUE`のみが統計学習の対象）。`closeDailyTrip()`の二重実行防止（行ロック）の安全網として`UNIQUE (daily_trip_id, assignment_id)`を持つ（点検所見 C-5） |
+| `completed_trips` | 運行終了後にアーカイブされた便（`is_official=TRUE`のみが統計学習の対象）。`closeDailyTrip()`の二重実行防止（行ロック）の安全網として`UNIQUE (daily_trip_id, assignment_id)`を持つ |
 | `completed_trip_stop_times` | アーカイブされた便のバス停ごとの実績（`actual_minutes`は統計集計用） |
 | `segment_travel_stats` | ★区間別・曜日区分別・時間帯別の走行時間統計（ETA予測の核。詳細は[eta-prediction-algorithm.md](eta-prediction-algorithm.md)） |
-| `trip_arrival_predictions` | ★**プリコンピュートされた到着予測**（パイプラインが60秒ごとに全active割り当て分を保存。`assignment_id, stop_id`が複合主キー。APIはここから読み出すだけ → [design-eta-precompute.md](design-eta-precompute.md)）。`source`が`historical`/`schedule_paced`の行に限り、ペース補正の内訳（`live_factor`・`today_previous_trip_factor`・`nearby_factor`・`combined_pace_factor`等）も保存する。管理画面「ETA予測根拠」「当日の状況」向け（詳細は[eta-prediction-algorithm.md](eta-prediction-algorithm.md)） |
+| `trip_arrival_predictions` | ★**プリコンピュートされた到着予測**（パイプラインが60秒ごとに全active割り当て分を保存。`assignment_id, stop_id`が複合主キー。APIはここから読み出すだけ → [eta-prediction-algorithm.md](eta-prediction-algorithm.md)）。`source`が`historical`/`schedule_paced`の行に限り、ペース補正の内訳（`live_factor`・`today_previous_trip_factor`・`nearby_factor`・`combined_pace_factor`等）も保存する。管理画面「ETA予測根拠」「当日の状況」向け |
 | `trip_arrival_prediction_log` | ETA予測の履歴ログ（追記のみ）。`trip_arrival_predictions`は最新値のみのUPSERTのため「いつの時点の予測か」が失われる。予測精度監視のため、直前の記録から値が変化した場合のみ1行追記する。`assignment_id`経由でCASCADE削除されるため専用の掃除ジョブを持たない。`source='actual'`だけを対象にした部分インデックスを2本持つ（下記） |
 | `service_status_cache` | アルピコ交通公式サイトの運行状況ページをスクレイピングした結果のキャッシュ（1行のみ保持） |
-| `active_vehicle_summary`（VIEW） | 稼働中車両のサマリ表示用ビュー |
 
 ## 予測精度監視まわりのインデックス
 
 `trip_arrival_prediction_log`には、通常のインデックス（`assignment_id, stop_id, computed_at DESC` と `route_id, computed_at DESC`）に加えて、`WHERE source = 'actual'`の部分インデックスが2本あります（`idx_prediction_log_actual_time` / `idx_prediction_log_actual_route_time`）。
 
 予測精度の集計（`services/predictionAccuracy.js`）は「実績が確定した行（`source='actual'`）を期間で絞る」ところから始まりますが、この行はテーブル全体の4割程度しかありません。部分インデックスにすることで、路線を絞る場合・絞らない場合のどちらでも、全件スキャンして`source`でフィルタする形を避けられます。**2本あるのは、路線絞り込みの有無で先頭列が変わるためです。片方だけにしないでください。**
-
-## 未使用列・旧方式の名残
-
-現在使われていない列やテーブルも、過去の互換性・移行のロールバック余地のために意図的に残されています。削除しないでください。
-
-- `vehicles`の`business_start_time` / `departure_time` / `trip_id` / `trip_type` / `last_arrived_seq` / `delay_minutes`：旧・車両起点方式の名残（詳細は[design-trip-first-assignment.md](design-trip-first-assignment.md)）。
-- `vehicle_stop_status`テーブル：`trip_stop_progress`に置き換わった旧方式のテーブル全体。
-
-## 削除済みの旧テーブル
-
-`feed_mappings`（confidenceによる対応の推測）は、対応関係をコード（`config/feeds.js`）へ移したため削除済みです。`migrate.js`が起動時に`DROP TABLE IF EXISTS`します。
-
-`route_external_ids`（外部ID⇔route_idの対応）も一時期同様にコード化して削除していましたが、2026-08-21に管理画面編集可能なDB管理へ戻しました（表参照）。`migrate.js`は現在この表をDROPしません。経緯は[外部IDマッピングのコード化_仕様書.md](外部IDマッピングのコード化_仕様書.md)を参照してください。

@@ -1,11 +1,11 @@
 const fs = require('fs');
 const path = require('path');
 
-// マイグレーション: service_id対応 + 複数事業者対応（feeds）
-// フィード構成はコード（config/feeds.js）へ移し、旧 feed_mappings テーブルはステップ8で削除する。
-// 外部ID⇔route_idの対応（route_external_ids）は、一時期コードへ移した後、
-// 表記ゆれの心配がない厳格な検証を維持したままDB管理・管理画面編集に戻した
-// （2026-08-21。schema.sqlのCREATE TABLE IF NOT EXISTSで新規・既存どちらにも保証される）。
+// 既存DBを現行スキーマへ揃えるためのマイグレーション。
+// 冒頭で schema.sql（CREATE TABLE IF NOT EXISTS）を流したうえで、
+// 既存DBに足りない列・制約・データ移行を冪等に適用する。
+// フィード構成はコード（config/feeds.js）で管理し、feeds テーブルは稼働状態のみを持つ。
+// 外部ID⇔route_idの対応（route_external_ids）はDB管理・管理画面編集（詳細は docs/feed-config.md）。
 async function migrate() {
   const pool = require('../config/db');
   const client = await pool.connect();
@@ -97,12 +97,10 @@ async function migrate() {
       ADD COLUMN IF NOT EXISTS feed_id TEXT
     `);
     
-    // 8. 旧 feed_mappings テーブルの削除
-    //    位置情報フィード⇔GTFSフィードの対応は config/feeds.js へ移した。
-    //    他テーブルから参照される側ではない（routes / feeds を参照する側）ため
-    //    CASCADE は不要で、他テーブルへの波及もない。
-    //    ⚠️ feeds は DROP しない。稼働状態の記録先として残す（docs/外部IDマッピングのコード化_仕様書.md参照）。
-    //    route_external_ids は DROP しない。DB管理・管理画面編集に戻したため（2026-08-21）。
+    // 8. 使われていない feed_mappings テーブルの削除。
+    //    位置情報フィード⇔GTFSフィードの対応は config/feeds.js（コード）が持つ。
+    //    ⚠️ feeds は DROP しない（稼働状態の記録先）。route_external_ids も DROP しない
+    //    （外部ID⇔route_idの対応はDB管理・管理画面編集。docs/feed-config.md）。
     await client.query(`DROP TABLE IF EXISTS feed_mappings`);
 
     // 9. schedule_trips に headsign を追加（GTFS trip_headsign。行先表示のハードコード解消のため）
@@ -274,18 +272,17 @@ async function migrate() {
     `);
 
     // ==========================================================
-    // 19. C-1/C-2 修正: stops.seq_order を「路線×方向で共有される、単一の
-    //     直線順序」として便の実際の停車順や物理バス停の一意キーに使っていたのを
-    //     やめる（点検所見 バス運行システム点検所見.md 参照）。
+    // 19. stops.seq_order を「路線×方向で共有される単一の直線順序」として
+    //     便の実際の停車順や物理バス停の一意キーに使っていた設計をやめる
+    //     （停車パターンの異なる便で順序が壊れ、service_idグループ間で
+    //     stops行が別バス停に上書きされる欠陥があった）。
     //
     //     - stops は物理バス停(gtfs_stop_id) + 通過回数(occurrence) で一意化する
-    //       （旧: route_id, direction_id, seq_order。service_idを含まないため、
-    //       停車パターンの異なるservice_idグループが同じseq_orderの行を
-    //       別の物理バス停のデータで上書きしていた＝C-2）。
+    //       （UNIQUE制約に service_id を含まないと、停車パターンの異なる
+    //       service_idグループが同じseq_orderの行を別の物理バス停のデータで
+    //       上書きしてしまう）。
     //     - 便ごとの実際の停車順は schedule_stop_times.stop_sequence
-    //       （新規列、便内0始まりの連番）に持たせる。stops.seq_order は
-    //       表示順専用に格下げする（旧: 路線内の便パターンの和集合を
-    //       擬似的な順序として使っていた＝C-1・C-3・H-3・H-4の根本原因）。
+    //       （便内0始まりの連番）に持たせる。stops.seq_order は表示順専用に格下げする。
     //
     //     stops.id の意味が変わるため、依存する統計・履歴・進捗データは
     //     作り直す方針とし、いったん空にしてseed()で正しい構造として再構築する
@@ -305,10 +302,9 @@ async function migrate() {
 
     if (stopsGtfsStopIdColumn.rows.length === 0) {
       // 19.1 stops.id / schedule_trips.id を参照している列のうち、便の実行に
-      //      無関係な「未使用列」を先にクリアする。vehicles.trip_id と
-      //      vehicle_gps_log.matched_stop_id / matched_label は旧・車両起点方式の
-      //      名残で、現行コードのどこからも読み書きされていない
-      //      （docs/database.md「未使用列・旧方式の名残」参照）。
+      //      無関係で現行コードから読み書きされていない列（vehicles.trip_id、
+      //      vehicle_gps_log.matched_stop_id）を先にクリアする。
+      //      これらの列自体はステップ30で削除する。
       //      ⚠️ TRUNCATEはFK制約の"存在"だけでも拒否される（対象行が無くても、
       //      その制約自体を持つ他テーブルを道連れにする必要がある）ため、
       //      19.2は素のDELETEを使う。DELETEは実データの参照有無で判定されるため、
@@ -375,32 +371,21 @@ async function migrate() {
     await client.query(`ALTER TABLE stops DROP CONSTRAINT IF EXISTS stops_route_direction_seq_key`);
 
     // ==========================================================
-    // 20. C-5 対策: 便クローズの二重実行防止（点検所見 バス運行システム点検所見.md参照）
+    // 20. 便クローズの二重実行に対する安全網。
     //
-    //     finishTrips()の運行日終了掃除とパイプラインのreassignOrphanTrips()が、
-    //     それぞれ独立したタイマー・DB接続から同じ便を同時にcloseDailyTrip()して
-    //     いたため、completed_trips に同一 (daily_trip_id, assignment_id) の行が
-    //     二重に入り、その行がupdateSegmentStats()で二重集計されてsegment_travel_stats
-    //     まで汚染されうる状態だった。コード側の一次対策（closeDailyTripの行ロック、
-    //     updateSegmentStatsのFOR UPDATE SKIP LOCKED化）に加え、DB制約でも
-    //     二重挿入を防ぐ。
+    //     finishTrips()の運行日終了掃除とパイプラインのreassignOrphanTrips()は
+    //     独立したタイマー・DB接続から同じ便を同時にcloseDailyTrip()しうる。
+    //     コード側の一次対策（closeDailyTripの行ロック、updateSegmentStatsの
+    //     FOR UPDATE SKIP LOCKED化）に加え、completed_trips に
+    //     UNIQUE (daily_trip_id, assignment_id) を張って二重挿入を防ぐ。
     //
-    //     制約追加に先立ち、既存データの重複を確認する（対応時の検証環境で実際に
-    //     6組・12行の重複が見つかっている＝この競合が理論上ではなく実際に発生して
-    //     いたことの裏付け）。重複がある状態でUNIQUE制約を追加しようとすると
-    //     ALTER TABLEそのものが失敗するため、事前にdaily_trip_id/assignment_idの
-    //     組ごとに最小id（先にアーカイブされた側）だけを残して重複行を削除する
-    //     （completed_trip_stop_timesはON DELETE CASCADEで追従する）。
-    //
-    //     重複を含む行は二重集計された可能性があるため、segment_travel_statsの
-    //     sample_count・avg_secondsは既に汚染されている。C-1/C-2対応時と同じく
-    //     過去の統計値をそのまま維持する前提は置かず、completed_trips.aggregated を
-    //     全行FALSEへ戻してTRUNCATEし、重複排除後の（＝正しい件数の）completed_trips
-    //     からupdateSegmentStats()に作り直させる。
+    //     制約を張る前に、既存の重複行（daily_trip_id/assignment_idの組ごとに
+    //     最小idだけ残す）を削除し、二重集計された可能性のある
+    //     segment_travel_stats をTRUNCATE・completed_trips.aggregated を全行FALSEへ
+    //     戻して updateSegmentStats() に作り直させる。
     //
     //     ⚠️ このクリーンアップは一度だけでよいため、制約がまだ存在しないことを
-    //     ガードにする（ステップ19と同じ考え方）。2回目以降の起動では、通常運用で
-    //     生じるはずのない重複を誤って掃除しないよう丸ごとスキップする。
+    //     ガードにする（ステップ19と同じ考え方）。
     // ==========================================================
     const completedTripsUniqueConstraint = await client.query(`
       SELECT 1 FROM pg_constraint WHERE conname = 'completed_trips_daily_trip_id_assignment_id_key'
@@ -416,7 +401,7 @@ async function migrate() {
       `);
 
       if (dupGroups.rows.length > 0) {
-        console.log(`[migrate] C-5対策: completed_trips に (daily_trip_id, assignment_id) の重複を ${dupGroups.rows.length}組 検出しました。重複を排除し、統計を作り直します。`);
+        console.log(`[migrate] completed_trips に (daily_trip_id, assignment_id) の重複を ${dupGroups.rows.length}組 検出しました。重複を排除し、統計を作り直します。`);
         // 各組で最小id（先にアーカイブされた側）だけを残す
         await client.query(`
           DELETE FROM completed_trips a
@@ -565,10 +550,9 @@ async function migrate() {
     `);
 
     // ==========================================================
-    // 29. お知らせ機能の見直し（お知らせ1／お知らせ2の廃止）。
-    //     通常のお知らせは system_settings の key='notices' に JSON 配列（最大3件、
-    //     題名・本文・配信期間）で保存する方式へ移行。旧 notice1 / notice2 は
-    //     概念ごと廃止するため、行を削除する（内容は引き継がない）。
+    // 29. 通常のお知らせは system_settings の key='notices' に JSON 配列
+    //     （最大3件、題名・本文・配信期間）で保存する。使われていない
+    //     notice1 / notice2 の行は削除する。
     //     重要なお知らせ（key='important_notice'）はそのまま。
     // ==========================================================
     await client.query(`DELETE FROM system_settings WHERE key IN ('notice1', 'notice2')`);
@@ -577,8 +561,42 @@ async function migrate() {
       ON CONFLICT (key) DO NOTHING
     `);
 
+    // ==========================================================
+    // 30. 使われていないスキーマ要素の削除（既存DBの掃除）。
+    //     いずれも現行コードのどこからも読み書きされていない。
+    //     全文が IF EXISTS で冪等なので、毎起動で無条件に流してよい
+    //     （新規DBではschema.sqlがこれらを作らないため全てno-op）。
+    //     ⚠️ ステップ19（古代DB向け一度きり移行）がこれらの列・テーブルを
+    //     参照するため、必ずステップ19より後に置くこと。
+    //     列を消す前にVIEWの依存を外す必要があるため DROP VIEW が先。
+    // ==========================================================
+    await client.query(`DROP VIEW IF EXISTS active_vehicle_summary`);
+    await client.query(`DROP TABLE IF EXISTS vehicle_stop_status`);
+    await client.query(`
+      ALTER TABLE vehicles
+        DROP COLUMN IF EXISTS business_start_time,
+        DROP COLUMN IF EXISTS departure_time,
+        DROP COLUMN IF EXISTS trip_type,
+        DROP COLUMN IF EXISTS trip_id,
+        DROP COLUMN IF EXISTS delay_minutes,
+        DROP COLUMN IF EXISTS last_arrived_seq,
+        DROP COLUMN IF EXISTS finished_at,
+        DROP COLUMN IF EXISTS finish_reason
+    `);
+    await client.query(`
+      ALTER TABLE vehicle_gps_log
+        DROP COLUMN IF EXISTS matched_stop_id,
+        DROP COLUMN IF EXISTS matched_label
+    `);
+    await client.query(`
+      ALTER TABLE completed_trips
+        DROP COLUMN IF EXISTS trip_type,
+        DROP COLUMN IF EXISTS business_start_time,
+        DROP COLUMN IF EXISTS departure_time
+    `);
+
     await client.query('COMMIT');
-    console.log('[migrate] 複数事業者対応・便起点割り当てマイグレーション完了');
+    console.log('[migrate] マイグレーション完了');
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[migrate] エラー:', err);

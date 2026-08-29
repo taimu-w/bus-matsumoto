@@ -12,7 +12,7 @@
 | GET | `/api/stops` | 全バス停マスタ（時刻表画面・地図表示用） |
 | GET | `/api/stops/search` | バス停名の部分一致検索（全路線対応） |
 | GET | `/api/timetable` | 本日運行対象の便の時刻表（`daily_trips`ベース。frequencies由来の仮想便も含む） |
-| GET | `/api/buses` | **担当車両が割り当てられている当日便のリアルタイム運行状況＋到着予測**（`trip_arrival_predictions`から読み出すだけ。計算はパイプライン側でプリコンピュート済み → [design-eta-precompute.md](design-eta-precompute.md)）。候補車両は公開しない |
+| GET | `/api/buses` | **担当車両が割り当てられている当日便のリアルタイム運行状況＋到着予測**（`trip_arrival_predictions`から読み出すだけ。計算はパイプライン側でプリコンピュート済み → [eta-prediction-algorithm.md](eta-prediction-algorithm.md)）。候補車両は公開しない |
 | GET | `/api/buses-for-map` | バスマップ用の走行中バス位置（担当車両のみ・到着予測なしの軽量版）。`routeId`は任意で、省略時（および`routeId=all`）は全路線を返す |
 | GET | `/api/service-status` | アルピコ交通の運行状況（1時間ごとにスクレイピングしてキャッシュ済み） |
 
@@ -21,7 +21,7 @@
 | メソッド | パス | 概要 |
 |---|---|---|
 | GET | `/api/route-search/stops` | 出発地・目的地の候補（漢字/ひらがな/カタカナ/ローマ字。返す`stopKey`は時刻表検索・バス停検索と共通） |
-| GET | `/api/route-search` | 経路検索：乗換2回まで・徒歩接続あり・任意日付・運賃つき。`fromStopKey`/`from`・`toStopKey`/`to`・`date=YYYY-MM-DD`・`time=HH:MM`・`limit`（旧`departureTime`は`time`の別名として受付）。詳細設定（すべて任意。未指定なら従来どおりの条件）：`maxTransfers=0..3`（`0`＝乗り換えなし）・`allowWalkTransfer=false`（徒歩での乗り継ぎを使わない）・`minTransferMinutes=1..15`（乗り換えの余裕時間）。詳細は[../docs/経路検索機能_改善仕様書.md](経路検索機能_改善仕様書.md) |
+| GET | `/api/route-search` | 経路検索：乗換2回まで・徒歩接続あり・任意日付・運賃つき。`fromStopKey`/`from`・`toStopKey`/`to`・`date=YYYY-MM-DD`・`time=HH:MM`・`limit`（`departureTime`は`time`の別名として受付）。詳細設定（すべて任意。未指定なら既定の条件）：`maxTransfers=0..3`（`0`＝乗り換えなし）・`allowWalkTransfer=false`（徒歩での乗り継ぎを使わない）・`minTransferMinutes=1..15`（乗り換えの余裕時間）。詳細は[route-search.md](route-search.md) |
 
 ## 時刻表検索・バス停検索
 
@@ -67,10 +67,10 @@
 
 ### `GET /api/admin/prediction-accuracy` の集計方針
 
-集計は**すべてSQL側（GROUPING SETSで全軸を1パス）で行い、指定期間内の全サンプルを対象にします**。かつては突合結果を最大20000行だけNodeへ取り出してJSで集計しており、「全期間の集計」と表示しながら実際には最新の一部しか見ていませんでした（実測で全体の約20%。的中率が5ポイント近くずれていました）。行数に依存する処理をDB内に閉じ込めたため、レスポンスは軸ごとの集計値＋明細100件という固定サイズになります。
+集計は**すべてSQL側（GROUPING SETSで全軸を1パス）で行い、指定期間内の全サンプルを対象にします**。行数に依存する処理をDB内に閉じ込めているため、レスポンスは軸ごとの集計値＋明細100件という固定サイズになります。
 
 `days`は**1〜7**にクランプします（`MAX_DAYS`）。突合結果（実績×予測履歴）はサンプル数が増えるほど突合とハッシュ集計が重くなり、期間を延ばすと計算に失敗するためです。実運用で必要なのは直近の傾向確認なので上限を7日にしています。予測側を突合するCTEも「集計期間＋2日」の範囲に絞っており（`DAILY_TRIP_RETENTION_DAYS`を延ばしてログが厚くなっても、このCTEだけ全期間をmaterializeしてメモリを溢れさせない）、2日の余裕は期間の境目をまたぐ予測を取りこぼさないためのものです。
 
 応答には集計値のほかに`totalSampleCount`（絞り込み前の総サンプル数）・`generatedAt`・`computeMs`・`cached`が含まれます。同一条件の結果は`POLL_INTERVAL_SECONDS`と同じ長さ（既定60秒）だけメモリにキャッシュされます。ログに行が増えるのはパイプラインが走ったときだけなので、絞り込み条件を切り替えて見比べる操作が即応になります。
 
-> 旧`GET/PUT /api/admin/route-data`（バス停座標・時刻表の直接編集）は、バス停座標・時刻表をGTFSフィード側の更新へ一本化したため削除済みです。`GET/PUT /api/admin/route-mappings`（外部ID⇔route_id対応の編集）は一時期同様に削除していましたが、上表のとおり`GET/POST/DELETE`として復活しています。同種のルートを追加する際は、`router`が`/api`配下にマウント済みであることに注意してください（先頭に`/api`を重ねない）。
+> ルート定義を追加する際は、`router`が`/api`配下にマウント済みであることに注意してください（パス先頭に`/api`を重ねない）。

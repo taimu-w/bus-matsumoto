@@ -120,7 +120,7 @@ function capPredictedDelay(rawDelay, currentDelay) {
  */
 async function updateSegmentStats(client) {
   // finishTrips()の運行日終了掃除と、パイプラインのreassignOrphanTrips()の両方から
-  // 呼ばれるため、2つの独立したDB接続が同時にこの関数を実行しうる（点検所見 C-5）。
+  // 呼ばれるため、2つの独立したDB接続が同時にこの関数を実行しうる。
   // 対策として、この関数全体を1トランザクションにまとめ、対象行の取得を
   // FOR UPDATE SKIP LOCKEDにする。これにより「もう一方が処理中の行」を
   // 互いに読み飛ばすため、同じ completed_trips 行を二重集計することがなくなる。
@@ -840,9 +840,8 @@ async function logPredictionChanges(client, assignmentId, dailyTripId, routeId, 
 /**
  * 全 active な割り当て（担当・候補とも）に対する ETA を一括計算し、
  * trip_arrival_predictions へ UPSERT する。パイプライン内から delayCalc() の
- * 直後に呼ばれる（設計書 docs/design-eta-precompute.md）。
- * predictArrivals() 自体はここでもオンデマンド計算時と同じものを使う。
- * アルゴリズムを重複実装しないため。
+ * 直後に呼ばれる（詳細は docs/eta-prediction-algorithm.md）。
+ * 計算本体は predictArrivals() をそのまま使い、アルゴリズムを重複実装しない。
  * @returns {Promise<{computed: number, stored: number, deleted: number}>}
  */
 async function computeAndStoreAllArrivals() {
