@@ -17,7 +17,7 @@
 | `daily_trips` | ★**当日の運行便**（`assignment_state`＝pending/assigned/unassigned、`start_at`＝実時刻、`origin`＝static/frequency） |
 | `daily_trip_stop_times` | ★当日便のバス停別定刻（frequenciesのオフセット適用済み。以降の全処理はここだけを見る） |
 | `trip_vehicle_assignments` | ★**便への車両割り当て**（`role`＝assigned/candidate、`state`＝active/ended、始発時刻時点の距離） |
-| `trip_stop_progress` | ★**便×車両ごとのバス停進捗**（定刻・実績・遅延・通過/到着ステータス） |
+| `trip_stop_progress` | ★**便×車両ごとのバス停進捗**（定刻・実績・遅延・通過/到着ステータス）。`nearby_min_distance_*`は「付近」中に観測した最小距離・GPS時刻。`arrival_method`（`vector`/`nearby`/`promoted`/`interpolated`/`manual`/`start`/`finish`）と`arrival_evidence`（JSONB。ベクトル判定の内積・線分距離・前後GPS点など）は「なぜ到着済になったか」を管理画面「運行ダッシュボード」のバス停別モーダルに出すための表示専用列。`nearby_min_distance_*`と同じく`openAssignment()`のON CONFLICT SET句には含めない |
 | `trip_gps_matches` | 通過判定で消費したGPSログ（割り当て単位。1台が複数便の候補になるため車両側の列では管理できない） |
 | `vehicles` | 観測されている物理車両（便との紐付けは持たない。運行終了でも削除せず`status='inactive'`にする） |
 | `vehicle_positions_raw` | GPSフィードから取得した直後の生ログ（未処理分の一時置き場、取得元`feed_id`付き） |
@@ -26,7 +26,7 @@
 | `completed_trips` | 運行終了後にアーカイブされた便（`is_official=TRUE`のみが統計学習の対象）。`closeDailyTrip()`の二重実行防止（行ロック）の安全網として`UNIQUE (daily_trip_id, assignment_id)`を持つ（点検所見 C-5） |
 | `completed_trip_stop_times` | アーカイブされた便のバス停ごとの実績（`actual_minutes`は統計集計用） |
 | `segment_travel_stats` | ★区間別・曜日区分別・時間帯別の走行時間統計（ETA予測の核。詳細は[eta-prediction-algorithm.md](eta-prediction-algorithm.md)） |
-| `trip_arrival_predictions` | ★**プリコンピュートされた到着予測**（パイプラインが60秒ごとに全active割り当て分を保存。`assignment_id, stop_id`が複合主キー。APIはここから読み出すだけ → [design-eta-precompute.md](design-eta-precompute.md)） |
+| `trip_arrival_predictions` | ★**プリコンピュートされた到着予測**（パイプラインが60秒ごとに全active割り当て分を保存。`assignment_id, stop_id`が複合主キー。APIはここから読み出すだけ → [design-eta-precompute.md](design-eta-precompute.md)）。`source`が`historical`/`schedule_paced`の行に限り、ペース補正の内訳（`live_factor`・`today_previous_trip_factor`・`nearby_factor`・`combined_pace_factor`等）も保存する。管理画面「ETA予測根拠」「当日の状況」向け（詳細は[eta-prediction-algorithm.md](eta-prediction-algorithm.md)） |
 | `trip_arrival_prediction_log` | ETA予測の履歴ログ（追記のみ）。`trip_arrival_predictions`は最新値のみのUPSERTのため「いつの時点の予測か」が失われる。予測精度監視のため、直前の記録から値が変化した場合のみ1行追記する。`assignment_id`経由でCASCADE削除されるため専用の掃除ジョブを持たない。`source='actual'`だけを対象にした部分インデックスを2本持つ（下記） |
 | `service_status_cache` | アルピコ交通公式サイトの運行状況ページをスクレイピングした結果のキャッシュ（1行のみ保持） |
 | `active_vehicle_summary`（VIEW） | 稼働中車両のサマリ表示用ビュー |

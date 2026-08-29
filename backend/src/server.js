@@ -28,6 +28,12 @@ app.get('/servicestatus', (req, res) => {
 app.get('/servicestatus.html', (req, res) => {
   res.sendFile(path.join(frontendDir, 'servicestatus.html'));
 });
+app.get('/howto', (req, res) => {
+  res.sendFile(path.join(frontendDir, 'howto.html'));
+});
+app.get('/howto.html', (req, res) => {
+  res.sendFile(path.join(frontendDir, 'howto.html'));
+});
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
   res.sendFile(path.join(frontendDir, 'index.html'));

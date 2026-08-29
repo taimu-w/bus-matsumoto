@@ -7,17 +7,15 @@ const POLL_INTERVALS_MS = {
   alerts: 15000,
   viewers: 15000,
   assignment: 30000,
-  pass: 30000,
-  'eta-basis': 30000,
+  'today-overview': 30000,
   'job-monitor': 30000
 };
 
 const SECTION_LOADERS = {
   dashboard: () => window.AdminDashboard.load(),
   assignment: () => window.AdminAssignment.load(),
-  pass: () => window.AdminPass.load(),
-  'eta-basis': () => window.AdminEtaBasis.load(),
   'prediction-accuracy': () => window.AdminPredictionAccuracy.load(),
+  'today-overview': () => window.AdminTodayOverview.load(),
   alerts: () => window.AdminAlerts.load(),
   'gtfs-feeds': () => window.AdminGtfsFeeds.load(),
   'location-feeds': () => window.AdminLocationFeeds.load(),
@@ -28,7 +26,6 @@ const SECTION_LOADERS = {
   'route-mappings': () => window.AdminRouteMappings.load(),
   'runtime-settings': () => window.AdminRuntimeSettings.load(),
   'tourist-spots': () => window.AdminTouristSpots.load(),
-  // positionsは手動更新のみのため含めない（loaderなし＝showSection側で何もしない）
   viewers: () => window.AdminViewers.load(),
   'operation-records': () => window.AdminOperationRecords.load()
 };

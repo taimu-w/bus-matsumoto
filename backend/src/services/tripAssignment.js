@@ -193,6 +193,8 @@ async function openAssignment(client, trip, candidate, role) {
     let status = st.is_through ? '通過' : '';
     let actualTime = null;
     let delayMinutes = null;
+    let arrivalMethod = null;
+    let arrivalEvidence = null;
 
     if (isOrigin) {
       // 始発時刻の時点で始発バス停から100m以内にいたという確定した観測事実を実績にする。
@@ -200,11 +202,16 @@ async function openAssignment(client, trip, candidate, role) {
       status = '到着済';
       actualTime = candidate.gpsTime;
       delayMinutes = computeDelayMinutes(st.scheduled_time, actualTime);
+      arrivalMethod = 'start';
+      arrivalEvidence = { distanceMeters: candidate.distance, gpsTime: candidate.gpsTime };
     }
 
+    // arrival_method / arrival_evidence は nearby_min_distance_* と同じく ON CONFLICT の
+    // SET句に含めない（GTFS再取得のreseedで進行中の判定結果・根拠を巻き戻さないため）。
     await client.query(
-      `INSERT INTO trip_stop_progress (assignment_id, stop_id, seq_order, scheduled_time, status, actual_time, delay_minutes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO trip_stop_progress
+         (assignment_id, stop_id, seq_order, scheduled_time, status, actual_time, delay_minutes, arrival_method, arrival_evidence)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (assignment_id, stop_id) DO UPDATE
          SET scheduled_time = EXCLUDED.scheduled_time,
              status = CASE
@@ -219,7 +226,7 @@ async function openAssignment(client, trip, candidate, role) {
                WHEN trip_stop_progress.status IN ('到着済', '付近') THEN trip_stop_progress.delay_minutes
                ELSE EXCLUDED.delay_minutes
              END`,
-      [assignmentId, st.stop_id, st.seq_order, st.scheduled_time, status, actualTime, delayMinutes]
+      [assignmentId, st.stop_id, st.seq_order, st.scheduled_time, status, actualTime, delayMinutes, arrivalMethod, arrivalEvidence]
     );
   }
 
@@ -346,7 +353,7 @@ async function assignPendingTrips() {
  * 始発時刻後に近づいてきた車両を追加することはしない（仕様書 10.2）。
  */
 async function reassignOrphanTrips() {
-  const { closeDailyTrip } = require('./finishService');
+  const { closeDailyTrip, SUCCESS_END_REASONS } = require('./finishService');
   const client = await pool.connect();
   let reassigned = 0;
   let closed = 0;
@@ -376,7 +383,8 @@ async function reassignOrphanTrips() {
 
     for (const trip of orphans.rows) {
       // 終点まで走り切って終了した便は、再割り当てせずそのまま完了とする。
-      // （時間経過・GPS途絶で落ちた場合だけが再割り当ての対象）
+      // GPS途絶時の終点到着救済判定で終点到達が確認できたケースも同様に扱う。
+      // （時間経過・終点未到達でのGPS途絶ロストで落ちた場合だけが再割り当ての対象）
       const lastAssigned = await client.query(
         `SELECT end_reason FROM trip_vehicle_assignments
          WHERE daily_trip_id = $1 AND role = 'assigned'
@@ -385,7 +393,7 @@ async function reassignOrphanTrips() {
         [trip.id]
       );
       const endReason = lastAssigned.rows[0]?.end_reason || '';
-      if (endReason === '最終バス停到着済' || endReason === '終了エリア到達') {
+      if (SUCCESS_END_REASONS.has(endReason)) {
         await closeDailyTrip(client, trip.id, endReason);
         closed++;
         continue;

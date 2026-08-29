@@ -7,6 +7,8 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%231e3a8a'/%3E%3Cpath fill='%23fff' d='M18,11H6V6h12M16.5,17A1.5,1.5 0 0,1 15,15.5A1.5,1.5 0 0,1 16.5,14A1.5,1.5 0 0,1 18,15.5A1.5,1.5 0 0,1 16.5,17M7.5,17A1.5,1.5 0 0,1 6,15.5A1.5,1.5 0 0,1 7.5,14A1.5,1.5 0 0,1 9,15.5A1.5,1.5 0 0,1 7.5,17M4,16c0,0.88 0.39,1.67 1,2.22V20a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1h8v1a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1.78c0.61-0.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8,0.5-8,4V16Z'/%3E%3C/svg%3E">
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <link rel="stylesheet" href="/admin.css">
 </head>
 <body class="bg-slate-100 text-slate-900">
@@ -53,17 +55,13 @@
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="17" rx="2"></rect><path d="M9 3.5h6a1 1 0 011 1V6H8V4.5a1 1 0 011-1z"></path><path d="M8.5 12.5l2 2 4.5-5"></path></svg>
               <span>便の割当監視</span>
             </button>
-            <button data-section="pass" data-label="通過判定" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
-              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"></circle><path d="M8.3 12.3l2.4 2.4 5-5.4"></path></svg>
-              <span>通過判定</span>
-            </button>
-            <button data-section="eta-basis" data-label="ETA予測根拠" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
-              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7.5V12l3.2 2"></path></svg>
-              <span>ETA予測根拠</span>
-            </button>
             <button data-section="prediction-accuracy" data-label="予測精度の監視" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"></circle><circle cx="12" cy="12" r="4.5"></circle><circle cx="12" cy="12" r="0.6" fill="currentColor"></circle></svg>
               <span>予測精度の監視</span>
+            </button>
+            <button data-section="today-overview" data-label="当日の状況" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="6" height="6" rx="1"></rect><rect x="14.5" y="3.5" width="6" height="6" rx="1"></rect><rect x="3.5" y="14.5" width="6" height="6" rx="1"></rect><rect x="14.5" y="14.5" width="6" height="6" rx="1"></rect></svg>
+              <span>当日の状況</span>
             </button>
             <button data-section="alerts" data-label="異常アラート" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold flex items-center justify-between">
               <span class="flex items-center gap-2">
@@ -72,6 +70,32 @@
               </span>
               <span id="alerts-nav-badge" class="hidden ml-2 inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded-full bg-red-500 text-white text-[11px] font-black">0</span>
             </button>
+          </div>
+        </div>
+        <div>
+          <p class="px-2 text-[11px] font-black tracking-wider text-blue-300 mb-1">設定・配信</p>
+          <div class="space-y-0.5">
+            <button data-section="notices" data-label="お知らせ編集" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3" y="5" width="15" height="10" rx="2.5"></rect><path d="M7 15l-1 4 4.5-4"></path></svg>
+              <span>お知らせ編集</span>
+            </button>
+            <button data-section="tourist-spots" data-label="観光スポット管理" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M6 3v18"></path><path d="M6 4.5h12l-3 4 3 4H6z"></path></svg>
+              <span>観光スポット管理</span>
+            </button>
+            <button data-section="viewers" data-label="サイト閲覧数" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M2.5 12S6.5 5.5 12 5.5 21.5 12 21.5 12 17.5 18.5 12 18.5 2.5 12 2.5 12z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>
+              <span>サイト閲覧数</span>
+            </button>
+            <button data-section="operation-records" data-label="運行実績ダウンロード" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="4.5" rx="1.2"></rect><path d="M5.5 8.5V18a1.5 1.5 0 001.5 1.5h10a1.5 1.5 0 001.5-1.5V8.5"></path><path d="M10 12.5h4"></path></svg>
+              <span>運行実績ダウンロード</span>
+            </button>
+          </div>
+        </div>
+        <div>
+          <p class="px-2 text-[11px] font-black tracking-wider text-blue-300 mb-1">システム</p>
+          <div class="space-y-0.5">
             <button data-section="gtfs-feeds" data-label="GTFSフィード監視" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="6" cy="18" r="1.4" fill="currentColor" stroke="none"></circle><path d="M5 12.5a6.5 6.5 0 016.5 6.5"></path><path d="M5 7a12 12 0 0112 12"></path></svg>
               <span>GTFSフィード監視</span>
@@ -88,15 +112,6 @@
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
               <span>ジョブ監視</span>
             </button>
-          </div>
-        </div>
-        <div>
-          <p class="px-2 text-[11px] font-black tracking-wider text-blue-300 mb-1">設定・配信</p>
-          <div class="space-y-0.5">
-            <button data-section="notices" data-label="お知らせ編集" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
-              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3" y="5" width="15" height="10" rx="2.5"></rect><path d="M7 15l-1 4 4.5-4"></path></svg>
-              <span>お知らせ編集</span>
-            </button>
             <button data-section="holidays" data-label="祝日カレンダー" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2"></rect><path d="M3.5 10h17"></path><path d="M8 3v4"></path><path d="M16 3v4"></path></svg>
               <span>祝日カレンダー</span>
@@ -108,22 +123,6 @@
             <button data-section="runtime-settings" data-label="運用パラメータ設定" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.6"></circle><path d="M19.4 13.5a1.65 1.65 0 000-3l1.1-1.9-2.1-2.1-1.9 1.1a1.65 1.65 0 00-3 0L12.6 3.5h-2.9L8.7 5.6a1.65 1.65 0 00-3 0l-1.9-1.1-2.1 2.1 1.1 1.9a1.65 1.65 0 000 3l-1.1 1.9 2.1 2.1 1.9-1.1a1.65 1.65 0 003 0l1 2.1h2.9l1-2.1a1.65 1.65 0 003 0l1.9 1.1 2.1-2.1z"></path></svg>
               <span>運用パラメータ設定</span>
-            </button>
-            <button data-section="tourist-spots" data-label="観光スポット管理" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
-              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M6 3v18"></path><path d="M6 4.5h12l-3 4 3 4H6z"></path></svg>
-              <span>観光スポット管理</span>
-            </button>
-            <button data-section="positions" data-label="バス位置情報モニター" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
-              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"></circle><path d="M14.5 9.5L13 13l-3.5 1.5L11 11l3.5-1.5z"></path></svg>
-              <span>バス位置情報モニター</span>
-            </button>
-            <button data-section="viewers" data-label="サイト閲覧数" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
-              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M2.5 12S6.5 5.5 12 5.5 21.5 12 21.5 12 17.5 18.5 12 18.5 2.5 12 2.5 12z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>
-              <span>サイト閲覧数</span>
-            </button>
-            <button data-section="operation-records" data-label="運行実績ダウンロード" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
-              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="4.5" rx="1.2"></rect><path d="M5.5 8.5V18a1.5 1.5 0 001.5 1.5h10a1.5 1.5 0 001.5-1.5V8.5"></path><path d="M10 12.5h4"></path></svg>
-              <span>運行実績ダウンロード</span>
             </button>
           </div>
         </div>
@@ -142,13 +141,44 @@
         </div>
         <div id="status" class="hidden rounded-lg px-4 py-3 text-sm font-bold"></div>
 
-        <!-- 運行ダッシュボード -->
-        <section id="section-dashboard" class="section hidden space-y-4">
-          <h2 class="text-xl font-bold">運行ダッシュボード</h2>
-          <div id="dashboard-tiles" class="grid gap-3 md:grid-cols-3 xl:grid-cols-5"></div>
-          <div class="bg-white rounded-xl border p-4">
-            <h3 class="font-bold text-slate-700 mb-2">GTFS更新状態</h3>
-            <div id="dashboard-gtfs" class="text-sm"></div>
+        <!-- 運行ダッシュボード（地図） -->
+        <section id="section-dashboard" class="section hidden -mx-6 -mb-6">
+          <div class="dashboard-map-shell">
+            <div class="relative flex-1 min-w-0">
+              <div id="dashboard-map" class="w-full h-full"></div>
+              <div class="absolute left-3 top-3 z-[1000] flex items-center gap-2">
+                <div id="dashboard-mode-toggle" class="bg-white/95 rounded-lg shadow border overflow-hidden flex text-xs font-bold">
+                  <button type="button" data-mode="active" class="mode-toggle-btn px-3 py-1.5">運行中の便</button>
+                  <button type="button" data-mode="all" class="mode-toggle-btn px-3 py-1.5">全車両（直近3分）</button>
+                </div>
+                <div id="dashboard-map-status" class="bg-white/95 rounded-lg px-3 py-1.5 text-xs font-bold text-slate-600 shadow"></div>
+              </div>
+            </div>
+            <aside id="dashboard-detail-panel" class="w-[380px] shrink-0 bg-white border-l overflow-y-auto">
+              <div id="dashboard-detail-empty" class="p-4">
+                <div id="dashboard-stats-bar" class="flex flex-col gap-3">
+                  <button type="button" data-role="stat-vehicles"
+                          class="text-left rounded-xl border-2 p-3 bg-blue-50 text-blue-800 border-blue-200 cursor-default">
+                    <div class="text-xs font-bold opacity-70">リアルタイム運行中の車両数</div>
+                    <div class="text-2xl font-black mt-1" data-role="stat-vehicles-value">—</div>
+                  </button>
+                  <button type="button" data-role="stat-unassigned"
+                          class="text-left rounded-xl border-2 p-3 bg-amber-50 text-amber-800 border-amber-200 hover:border-amber-400">
+                    <div class="text-xs font-bold opacity-70">本日の未割当便数（タップで詳細）</div>
+                    <div class="text-2xl font-black mt-1" data-role="stat-unassigned-value">—</div>
+                  </button>
+                  <button type="button" data-role="stat-delayed"
+                          class="text-left rounded-xl border-2 p-3 bg-red-50 text-red-800 border-red-200 hover:border-red-400">
+                    <div class="text-xs font-bold opacity-70">5分以上の遅延便数（タップで地図に絞込）</div>
+                    <div class="text-2xl font-black mt-1" data-role="stat-delayed-value">—</div>
+                  </button>
+                </div>
+                <p class="mt-4 text-sm text-slate-400 text-center">
+                  地図上のバスアイコンをタップすると、ここにリアルタイム時刻表が表示されます。
+                </p>
+              </div>
+              <div id="dashboard-detail-body" class="hidden"></div>
+            </aside>
           </div>
         </section>
 
@@ -176,33 +206,11 @@
           </div>
         </section>
 
-        <!-- 通過判定 -->
-        <section id="section-pass" class="section hidden space-y-3">
-          <div class="flex items-center justify-between">
-            <h2 class="text-xl font-bold">通過判定</h2>
-            <span class="text-xs text-slate-400">現在の判定状態（スナップショット）</span>
-          </div>
-          <div id="pass-container" class="space-y-3"></div>
-        </section>
-
-        <!-- ETA予測根拠 -->
-        <section id="section-eta-basis" class="section hidden space-y-3">
-          <div class="flex items-center justify-between">
-            <div>
-              <h2 class="text-xl font-bold">ETA予測根拠</h2>
-              <p class="text-sm text-slate-500">稼働中の便・停留所ごとに、到着予測が何を根拠に算出されたか（時刻表／過去統計／直近走行ペース）を表示します。</p>
-            </div>
-            <span id="eta-basis-updated" class="text-xs text-slate-400"></span>
-          </div>
-          <div class="bg-white rounded-xl border p-3 flex flex-wrap gap-2 text-xs" id="eta-basis-legend"></div>
-          <div id="eta-basis-container" class="space-y-3"></div>
-        </section>
-
         <!-- 予測精度の監視 -->
         <section id="section-prediction-accuracy" class="section hidden space-y-4">
           <div>
             <h2 class="text-xl font-bold">予測精度の監視</h2>
-            <p class="text-sm text-slate-500">各停留所に到着した実績をもとに、予測はいつ・何停留所手前で出されたものかによって常に変動します。下の条件で絞り込んで誤差を確認できます。集計は指定期間内の全サンプルを対象にしています（件数が多くても間引きません）。</p>
+            <p class="text-sm text-slate-500">各停留所に到着した実績をもとに、予測はいつ・何停留所手前で出されたものかによって常に変動します。下の条件で絞り込んで誤差を確認できます。集計は指定期間内の全サンプルを対象にしています。</p>
           </div>
 
           <div class="bg-white rounded-xl border p-4">
@@ -378,6 +386,54 @@
               </thead>
               <tbody id="accuracy-samples-tbody"></tbody>
             </table>
+          </div>
+        </section>
+
+        <!-- 当日の状況（路線別ペース状況・遅延メッシュ地図） -->
+        <section id="section-today-overview" class="section hidden space-y-4">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h2 class="text-xl font-bold">当日の状況</h2>
+              <p class="text-sm text-slate-500">ETA予測が今どの程度「今日の状況」（本便の直近ペース・今日の前便実績・周辺道路実績）を反映しているかを、路線別サマリと地図メッシュで確認できます。</p>
+            </div>
+            <span id="today-overview-updated" class="text-xs text-slate-400 whitespace-nowrap"></span>
+          </div>
+
+          <div class="bg-white rounded-xl border overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500 text-xs">
+                <tr>
+                  <th class="text-left px-3 py-2">路線</th>
+                  <th class="text-left px-3 py-2">稼働中車両</th>
+                  <th class="text-left px-3 py-2">本便ペース平均</th>
+                  <th class="text-left px-3 py-2">今日の前便実績</th>
+                  <th class="text-left px-3 py-2">周辺道路実績</th>
+                  <th class="text-left px-3 py-2">総合ペース平均</th>
+                  <th class="text-left px-3 py-2">平均予測遅延</th>
+                  <th class="text-left px-3 py-2">最大予測遅延</th>
+                </tr>
+              </thead>
+              <tbody id="today-overview-route-tbody"></tbody>
+            </table>
+          </div>
+
+          <div class="bg-white rounded-xl border overflow-hidden">
+            <div class="px-4 py-3 flex flex-wrap items-center justify-between gap-3 border-b">
+              <div>
+                <h3 class="font-bold">遅延メッシュ地図</h3>
+                <p class="text-xs text-slate-500">直近60分の区間実績（他路線含む）を格子状に集約し、周辺の混雑状況を色で表示します。セルをクリックすると詳細が出ます。</p>
+              </div>
+              <label class="text-xs font-bold text-slate-600 flex items-center gap-1.5">セルサイズ
+                <select id="mesh-cell-size" class="border rounded-lg px-2 py-1 text-xs font-bold">
+                  <option value="200">200m</option>
+                  <option value="300" selected>300m</option>
+                  <option value="500">500m</option>
+                  <option value="1000">1000m</option>
+                </select>
+              </label>
+            </div>
+            <div id="delay-mesh-map" class="delay-mesh-map"></div>
+            <div class="px-4 py-2 border-t flex flex-wrap items-center gap-3 text-xs" id="delay-mesh-legend"></div>
           </div>
         </section>
 
@@ -600,24 +656,6 @@
           </div>
         </section>
 
-        <!-- バス位置情報モニター -->
-        <section id="section-positions" class="section hidden space-y-4">
-          <div class="flex items-center justify-between gap-3">
-            <div>
-              <h2 class="text-xl font-bold">バス位置情報モニター</h2>
-              <p class="text-sm text-slate-500">直近3分以内にGPSデータを受信したバスの位置を表示します。</p>
-            </div>
-            <button id="refresh-positions-btn" class="bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-lg px-4 py-2 flex items-center gap-2">
-              <svg id="pos-refresh-icon" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-              <span>更新</span>
-            </button>
-          </div>
-          <div id="positions-status" class="text-sm font-bold text-slate-500">「更新」ボタンを押して情報を取得してください</div>
-          <div id="positions-container" class="space-y-3"></div>
-        </section>
-
         <!-- サイト閲覧数 -->
         <section id="section-viewers" class="section hidden space-y-4">
           <div class="flex items-center justify-between gap-3">
@@ -665,9 +703,8 @@
   <script src="/admin-core.js"></script>
   <script src="/admin-dashboard.js"></script>
   <script src="/admin-assignment.js"></script>
-  <script src="/admin-pass.js"></script>
-  <script src="/admin-eta-basis.js"></script>
   <script src="/admin-prediction-accuracy.js"></script>
+  <script src="/admin-today-overview.js"></script>
   <script src="/admin-alerts.js"></script>
   <script src="/admin-gtfs-feeds.js"></script>
   <script src="/admin-location-feeds.js"></script>
@@ -678,7 +715,6 @@
   <script src="/admin-route-mappings.js"></script>
   <script src="/admin-runtime-settings.js"></script>
   <script src="/admin-tourist-spots.js"></script>
-  <script src="/admin-positions.js"></script>
   <script src="/admin-viewers.js"></script>
   <script src="/admin-operation-records.js"></script>
   <script src="/admin-router.js"></script>

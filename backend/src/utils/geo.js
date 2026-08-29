@@ -27,4 +27,27 @@ function toLocalXYMeters(lat, lon, refLat, refLon) {
   };
 }
 
-module.exports = { haversineDistanceMeters, toLocalXYMeters };
+/**
+ * 2点間の初期方位角を度(0〜360、真北=0・東=90)で返す。
+ * ETAの周辺道路実績（services/etaPredictor.js）で、対象区間と候補区間の
+ * 進行方向がどれだけ近いかを判定するために使う。
+ */
+function bearingDegrees(lat1, lon1, lat2, lon2) {
+  const toRad = (v) => (v * Math.PI) / 180;
+  const toDeg = (v) => (v * 180) / Math.PI;
+  const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
+  const x =
+    Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+    Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lon2 - lon1));
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+/**
+ * 2つの方位角(度)の差を0〜180度で返す（周回方向を考慮した最短差）。
+ */
+function angleDiffDegrees(bearing1, bearing2) {
+  const diff = Math.abs(bearing1 - bearing2) % 360;
+  return diff > 180 ? 360 - diff : diff;
+}
+
+module.exports = { haversineDistanceMeters, toLocalXYMeters, bearingDegrees, angleDiffDegrees };

@@ -142,6 +142,15 @@ CREATE TABLE IF NOT EXISTS holidays (
   name          TEXT
 );
 
+-- 異常アラートの確認済み状態。alert_key は種別＋対象エンティティIDから組み立てる
+-- 安定キー（api.js の buildAlertKey() 参照）。対象の異常が解消された行は
+-- /api/admin/alerts の取得時にガベージコレクトするため、同じ異常が再発すれば
+-- 再度アラートとして表示される。
+CREATE TABLE IF NOT EXISTS admin_alert_acknowledgements (
+  alert_key        TEXT PRIMARY KEY,
+  acknowledged_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- 観光スポット情報（観光スポット情報_仕様書）。GTFS由来データ（stops等）とは完全独立。
 -- バス停との関連付けは保存時ではなく参照時に緯度経度の近接検索で都度解決するため、外部キーは持たない。
 CREATE TABLE IF NOT EXISTS tourist_spots (
@@ -311,6 +320,9 @@ CREATE TABLE IF NOT EXISTS trip_vehicle_assignments (
 CREATE INDEX IF NOT EXISTS idx_assignments_active ON trip_vehicle_assignments(state, role);
 CREATE INDEX IF NOT EXISTS idx_assignments_trip ON trip_vehicle_assignments(daily_trip_id, role, state);
 CREATE INDEX IF NOT EXISTS idx_assignments_vehicle ON trip_vehicle_assignments(vehicle_id, state);
+-- ETA予測の「周辺道路実績」(etaPredictor.js の getRecentSegmentPerformance)が、運行終了
+-- 直後（state='ended'）の割り当てもRECENTLY_ENDED_MINUTES以内なら候補に含めるための索引。
+CREATE INDEX IF NOT EXISTS idx_assignments_recently_ended ON trip_vehicle_assignments(ended_at) WHERE state = 'ended';
 
 -- 便×車両ごとのバス停進捗（旧 vehicle_stop_status の置換）。
 -- 候補車両も担当車両と同じように通過判定・遅延計算を行う（仕様書 9）。
@@ -330,6 +342,19 @@ CREATE TABLE IF NOT EXISTS trip_stop_progress (
   nearby_min_distance_meters      DOUBLE PRECISION,
   nearby_min_distance_gps_time    TEXT,
   nearby_min_distance_gps_time_ts TIMESTAMPTZ,
+  -- 到着済に確定した「判定方法」と、その根拠の詳細（管理画面「運行ダッシュボード」の
+  -- バス停別詳細モーダル向け。表示専用で絞り込み・JOINには使わない）。
+  --   arrival_method: 'vector'（ベクトル通過判定）| 'nearby'（付近経由＝離脱検知）
+  --                 | 'promoted'（付近スタックの遡及昇格）| 'interpolated'（線形補間）
+  --                 | 'manual'（管理画面で手動確定）| 'start'（始発バス停・割り当て時）
+  --                 | 'finish'（割り当て終了時の強制昇格／GPS途絶時の終点救済）
+  --                   NULL＝未到着、または本機能導入前に確定した行。
+  --   arrival_evidence: 方法別の詳細JSON。ベクトルは stepDist/distP1Stop/distP2Stop/segDist/dot/t
+  --                   と前後GPS点(p1/p2)、付近系は最小距離・観測GPS時刻・離脱マージン等。
+  -- openAssignment() の ON CONFLICT SET句には含めない（nearby_min_distance_* と同じく
+  -- GTFS再取得のreseedで進行中の判定結果を巻き戻さないため）。
+  arrival_method   TEXT,
+  arrival_evidence JSONB,
   PRIMARY KEY (assignment_id, stop_id)
 );
 CREATE INDEX IF NOT EXISTS idx_trip_progress_assignment ON trip_stop_progress(assignment_id, seq_order);
@@ -409,6 +434,16 @@ CREATE TABLE IF NOT EXISTS trip_arrival_predictions (
   predicted_time           TEXT,
   predicted_delay_minutes  INTEGER,
   source                   TEXT NOT NULL,
+  -- ETA予測根拠の内訳（管理画面「ETA予測根拠」「当日の状況」向け。source が
+  -- 'historical'/'schedule_paced' のときだけ埋まり、それ以外はNULL。
+  -- 算出はetaPredictor.jsのcombinePaceFactor参照。
+  live_factor                    DOUBLE PRECISION, -- 直近3区間の実績ペース
+  today_previous_trip_factor     DOUBLE PRECISION, -- 今日の前便実績（未使用時NULL）
+  today_previous_trip_samples    INTEGER,          -- 上記の元になった隣接区間の一致数
+  nearby_factor                  DOUBLE PRECISION, -- 周辺道路の最近実績（未使用時NULL）
+  nearby_factor_samples          INTEGER,          -- 上記にマッチした周辺区間の件数
+  nearby_weight_mass             DOUBLE PRECISION, -- 上記の重み合計（Σ距離×方位×新しさ。確信度の目安）
+  combined_pace_factor           DOUBLE PRECISION, -- 上記3つを動的重みでブレンドした最終補正係数
   computed_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (assignment_id, stop_id)

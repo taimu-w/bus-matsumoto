@@ -24,10 +24,46 @@ function fmtDateTime(value) {
   return d.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
 }
 
+// ペース比率（実績÷定刻。1.0=定刻通り、大きいほど遅い。etaPredictor.jsのcombinePaceFactor等が
+// 0.5〜2.5にクランプ済み）を色分けする共通ヘルパー。「ETA予測根拠」「当日の状況」（路線別
+// サマリ・メッシュ地図）のいずれからも使うため、hex（Leafletの塗り色用）とTailwindクラス
+// （バッジ用）の両方を返す。
+function paceFactorColor(factor) {
+  if (factor === null || factor === undefined) return { text: 'text-slate-400', bg: 'bg-slate-100', hex: '#94a3b8' };
+  if (factor < 0.85) return { text: 'text-blue-700', bg: 'bg-blue-100', hex: '#2563eb' };
+  if (factor <= 1.15) return { text: 'text-green-700', bg: 'bg-green-100', hex: '#16a34a' };
+  if (factor <= 1.5) return { text: 'text-amber-700', bg: 'bg-amber-100', hex: '#d97706' };
+  return { text: 'text-red-700', bg: 'bg-red-100', hex: '#dc2626' };
+}
+
 function fmtDuration(ms) {
   if (ms === null || ms === undefined) return '—';
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}秒`;
+}
+
+// ペース補正の内訳（本便＝直近3区間／今日の前便実績／周辺道路実績／総合）をバッジ列で描画する
+// 共通ヘルパー。paceBreakdown が null（source が 'historical'/'schedule_paced' 以外）なら空文字。
+// 「ETA予測根拠」タブと「運行ダッシュボード」のバス停別モーダルの両方で使う。
+function paceBreakdownBadges(pb) {
+  if (!pb) return '';
+  const badge = (label, factor, title) => {
+    if (factor === null || factor === undefined) return '';
+    const c = paceFactorColor(factor);
+    return `<span class="px-1.5 py-0.5 rounded ${c.bg} ${c.text}" title="${escapeHtml(title)}">${label}×${Number(factor).toFixed(2)}</span>`;
+  };
+  const parts = [badge('本便', pb.liveFactor, '直近3区間の実績ペース（当該便自身）')];
+  if (pb.todayPreviousTripFactor != null) {
+    parts.push(badge('前便', pb.todayPreviousTripFactor, `同一路線・同方向の当日直前便の実績（一致区間${pb.todayPreviousTripSamples}件）`));
+  }
+  if (pb.nearbyFactor != null) {
+    parts.push(badge('周辺', pb.nearbyFactor, `周辺500m以内・直近60分の他便実績（${pb.nearbyFactorSamples}件、重み合計${Number(pb.nearbyWeightMass).toFixed(1)}）`));
+  }
+  if (pb.combinedPaceFactor != null) {
+    const total = paceFactorColor(pb.combinedPaceFactor);
+    parts.push(`<span class="px-1.5 py-0.5 rounded ${total.bg} ${total.text} font-black" title="上記を確信度に応じた動的重みでブレンドした最終補正係数">総合×${Number(pb.combinedPaceFactor).toFixed(2)}</span>`);
+  }
+  return `<div class="mt-1 flex flex-wrap gap-1 text-[10px]">${parts.filter(Boolean).join('')}</div>`;
 }
 
 function showStatus(message, tone = 'info') {

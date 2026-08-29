@@ -41,8 +41,70 @@
   - 統計が信頼できない場合は、時刻表上の定刻差分を基準にする。
 - 「実際にかかった時間 ÷ 基準時間」を各区間で計算し、その平均を`liveFactor`とする。
   - 例: 統計上5分の区間を実際には6分かけていれば、その区間の比は1.2（＝2割増しペース＝やや遅い）。
-- 異常値対策として、`liveFactor`は**0.5倍〜2.5倍の範囲にクランプ**する（GPSの一時的な乱れで極端な値が出て予測が暴走しないようにするため）。
+- 異常値対策として、`liveFactor`は**0.5倍〜2.5倍の範囲にクランプ**する（GPSの一時的な乱れで極端な値が出て予測が暴走しないようにするため）。この`PACE_RATIO_MIN`/`PACE_RATIO_MAX`（0.5〜2.5）のクランプ範囲は、下記の追加要素①②にも共通で使う。
 - 到着済み区間が2件未満（＝統計を取れるだけの実績がない）場合は`liveFactor = 1`（等倍）とする。
+
+### 追加要素①: 今日の前便実績（`getTodayPreviousTripFactor`）
+
+`liveFactor`が「当該便自身の直近3区間」だけを見るのに対し、こちらは**同一路線・同方向・当日の直前便**（直前に始発時刻を迎えた便）が実際にどのくらいのペースで走ったかを見る。過去統計（`segment_travel_stats`）にも当日分のサンプルは混ざっているが、曜日区分×時間帯の平均に薄まってしまうため、「今日この路線で何が起きているか」を強く反映する独立シグナルとして別枠で扱う。
+
+- 検索条件は`route_id`・`direction_id`・`service_date`が同一で、`start_at`が対象便より前の`daily_trips`のうち直近の1件（`ORDER BY start_at DESC LIMIT 1`）。これより前には遡らない（「直前便」という条件そのものが仕様のため）。
+- 直前便が既に運行終了（`completed_trips.is_official = TRUE`）していればその正実績を、まだ運行中であれば担当車両(`role = 'assigned'`)の`trip_stop_progress`から取れる範囲の実績を使う。走行中の便の「ここまでの遅れ」も今日の状況を示す有効な手掛かりとして扱う。
+- 隣接区間（`seq_order`差1）ごとに「実績の所要時間 ÷ 定刻の所要時間」の比を取り、`updateSegmentStats()`と同じ基準（1区間60分超は測定誤り）で異常値を除外したうえで、`clampPaceRatio`（0.5〜2.5）した値を平均する。
+- マッチした区間数が**2件未満**の場合はnullを返し、このシグナルは使わない（直前便が存在しない＝当日この路線の最初の便、車両が一度も割り当たらなかった、等）。
+
+### 追加要素②: 周辺道路の最近実績（`getNearbyCandidateSegments` / `computeNearbyFactor`）
+
+対象区間（`prevStop → s`）の**周辺500m以内**を最近走った、他の便（担当・候補いずれも、他路線も含む）の実績から「今この道路周辺がどの程度混雑しているか」を推定する補正要素。
+
+- 候補プールは`predictArrivals()`呼び出しごとに**1回だけ**取得する（区間ごとにSQLを投げ直さない）。現在アクティブな全割り当て（`trip_vehicle_assignments.state = 'active'`。対象の割り当て自身は除外）の`trip_stop_progress`から、隣接区間で実績が揃っているものを`getNearbyCandidateSegments()`が抽出し、区間ごとの重み付けは`computeNearbyFactor()`がJS側で行う。
+- 候補は担当・候補どちらの役割でも採用する。どちらも実在する車両の実際のGPS実績であり、路面状況を知る手掛かりとしては同格に扱ってよいため。
+- 各候補区間について、対象区間との**距離**・**方位差**・**新しさ**をそれぞれ重み付けし、3つの積を総合重みとする：
+
+  | 距離（中心点間） | 距離重み |
+  |---|---|
+  | 同一区間（from/to停留所IDが対象区間と完全一致。同一路線・同方向の別便が今まさにこの区間を走った場合） | 1.0 |
+  | 100m以内 | 0.8 |
+  | 300m以内 | 0.5 |
+  | 500m以内 | 0.2 |
+  | それ超 | 除外 |
+
+  | 方位差 | 方位重み |
+  |---|---|
+  | 20度以内 | 1.0 |
+  | 45度以内 | 0.5 |
+  | それ超 | 除外 |
+
+  | 実績の新しさ | 新しさ重み |
+  |---|---|
+  | 5分以内 | 1.0 |
+  | 15分以内 | 0.7 |
+  | 30分以内 | 0.4 |
+  | 60分以内 | 0.1 |
+  | それ超 | 除外 |
+
+- 候補区間ごとの比率（実績÷定刻、`clampPaceRatio`でクランプ済み）を総合重みで加重平均したものが`nearbyFactor`。マッチした候補が**2件未満**、または重みの合計が0の場合はnullを返す。
+
+### ペース信号の統合（`combinePaceFactor`）
+
+`liveFactor`・追加要素①（`todayPreviousTripFactor`）・追加要素②（`nearbyFactor`）の3つを、**固定比率ではなく動的な重み**でブレンドする。
+
+```
+各シグナルの重み = 基礎重み × 確信度(0〜1)
+  liveFactor:  基礎重み1.0（常に採用。confidenceの概念はなく固定）
+  前便実績:    基礎重み0.6 × min(1, マッチ区間数 / 6)
+  周辺実績:    基礎重み0.5 × min(1, 重み合計(Σ距離×方位×新しさ) / 4)
+
+combinedPaceFactor = Σ(重み × シグナル値) / Σ(重み)   ※nullのシグナルは重み0として除外
+```
+
+この設計により：
+
+- **新シグナルが両方とも欠損する場合、`combinedPaceFactor`は`liveFactor`そのものに一致する**。データが薄い状況（前便が無い・周辺に実績が無い）でも既存の挙動から後退しない。
+- 各シグナルの基礎重み（0.6・0.5）は`liveFactor`の基礎重み（1.0）以下に抑えてあるため、新シグナルがどれだけ確信度満点（サンプル数が多い）でも、`liveFactor`を上回って結果を支配することはない。これが「異常値・運行乱れの影響を受けすぎない」ための寄与率の上限にあたる。
+- 個々のシグナル自体も算出過程で`clampPaceRatio`（0.5〜2.5）済みのため、単一区間の極端な実績値がそのままETA全体に伝播することはない。
+
+算出した`combinedPaceFactor`は、下記(a)の`historical`／`schedule_paced`分岐で、従来`liveFactor`単体を使っていた箇所にそのまま置き換えて使う（`isThroughSegment`分岐は対象外のまま変更しない）。
 
 ### ステップ2: 起点（カーソル）を決める
 
@@ -58,18 +120,18 @@
 優先順位は次の通りです。過去実績が「ある場合」「ない場合」の切り分けはここで行われます。
 
 1. **過去統計が使える場合（`source: 'historical'`）**
-   区間の統計（`segment_travel_stats`）があり、サンプル数が`MIN_SAMPLES_FOR_TRUST`（3件）以上なら、統計の平均所要時間を採用しつつ、直近ペース（`liveFactor`）で補正する：
+   区間の統計（`segment_travel_stats`）があり、サンプル数が`MIN_SAMPLES_FOR_TRUST`（3件）以上なら、統計の平均所要時間を採用しつつ、直近ペース（`liveFactor`に今日の前便実績・周辺道路実績を動的ブレンドした`combinedPaceFactor`。上記「ペース信号の統合」参照）で補正する：
    ```
-   segmentMinutes = 統計の平均所要時間 × (BLEND_WEIGHT + (1 - BLEND_WEIGHT) × liveFactor)
+   segmentMinutes = 統計の平均所要時間 × (BLEND_WEIGHT + (1 - BLEND_WEIGHT) × combinedPaceFactor)
    ```
-   `BLEND_WEIGHT`（既定0.55、`ETA_BLEND_WEIGHT`で調整可）は「過去統計をどれだけ信頼するか」の重みです。例えば0.55の場合、55%は過去統計そのまま、残り45%分は直近ペースで揺らす、という按分になります。`liveFactor = 1`（定刻通りのペース）なら結果は統計の平均そのものに近づき、`liveFactor`が1から離れるほど直近の遅れ/早さが反映されます。
+   `BLEND_WEIGHT`（既定0.55、`ETA_BLEND_WEIGHT`で調整可）は「過去統計をどれだけ信頼するか」の重みです。例えば0.55の場合、55%は過去統計そのまま、残り45%分は`combinedPaceFactor`で揺らす、という按分になります。この55/45の比率自体は追加要素①②の有無で変わりません（変わるのは45%側の内訳＝combinedPaceFactorがliveFactor単体か、前便・周辺実績も加味した値か、という点だけです）。`combinedPaceFactor = 1`（定刻通りのペース）なら結果は統計の平均そのものに近づき、1から離れるほど直近の遅れ/早さが反映されます。
 
 2. **過去統計が無い・サンプル不足の場合（`source: 'schedule_paced'`）**
-   時刻表上の定刻差分を基準に、直近ペース（`liveFactor`）だけで補正します：
+   時刻表上の定刻差分を基準に、`combinedPaceFactor`だけで補正します：
    ```
-   segmentMinutes = 時刻表上の所要時間 × liveFactor
+   segmentMinutes = 時刻表上の所要時間 × combinedPaceFactor
    ```
-   これが「**過去の実績が無い区間**」に対する第一のフォールバックです。時刻表の所要時間を「その日の混雑状況（直近ペース）」で引き伸ばし/圧縮して使います。
+   これが「**過去の実績が無い区間**」に対する第一のフォールバックです。時刻表の所要時間を「その日の混雑状況（直近ペース＋今日の前便実績＋周辺道路実績）」で引き伸ばし/圧縮して使います。
 
 3. **時刻表の定刻すら片方が欠けている等、上記いずれも計算できない場合（`source: 'naive'`）**
    最終手段として、時刻表の定刻差分をそのまま（ペース補正なしで）使うか、それも無理なら固定5分を所要時間とします。
@@ -133,3 +195,18 @@
 | `scheduled_time`欠損区間・対象駅自体が定刻なし（元データ不備。通常発生しない） | 時間を進めない | `through_skip` |
 | `scheduled_time`欠損区間・基準駅から絶対時刻で算出可能（元データ不備。通常発生しない） | 基準駅からの定刻差分で計算 | `naive_anchored` |
 | `scheduled_time`欠損区間・基準駅も定刻なし（異常系） | 固定5分 | `naive` |
+
+## 管理画面での確認（ペース補正の内訳・当日の状況）
+
+`combinePaceFactor`が算出する内訳（`liveFactor`・今日の前便実績・周辺道路実績・`combinedPaceFactor`）は、`source`が`historical`または`schedule_paced`の行に限り`trip_arrival_predictions`テーブル（`live_factor`・`today_previous_trip_factor`・`today_previous_trip_samples`・`nearby_factor`・`nearby_factor_samples`・`nearby_weight_mass`・`combined_pace_factor`列）へそのまま保存されます。それ以外の`source`（`actual`/`schedule`/`naive`/`through_skip`/`naive_anchored`）の行は全項目`NULL`です（`predictArrivals()`内の`paceInfo`／`EMPTY_PACE_INFO`参照）。
+
+保存された内訳は、管理画面から次の2箇所で確認できます。
+
+- **「運行ダッシュボード」のバス停別詳細モーダル**（`GET /api/admin/assignments/:id/stops/:stopId`）：未到着のバス停で、現在のETA予測根拠（`source`＋`paceBreakdown`）と、`trip_arrival_prediction_log`によるETA予測の推移（いつ・何停留所手前で、どの根拠で、何分遅れと予測していたか）を表示します。到着済のバス停では推移の末尾に実績（`source='actual'`）が付きます。
+- **「当日の状況」**（`GET /api/admin/eta-route-overview` / `GET /api/admin/delay-mesh`）：
+  - 路線別サマリは、稼働中の担当車両（`role='assigned'`）が今どの程度のペース補正で計算されているかを路線ごとに平均集計したものです。今日の前便実績・周辺道路実績それぞれの「使用件数」も表示するため、データが薄くどちらも使われていない路線が一目でわかります。
+  - 遅延メッシュ地図は、対象区間を限定しない別集計です。`etaPredictor.js`の`getRecentSegmentPerformance()`（周辺道路実績と同じ、直近の区間実績データ）をシステム全体で取得し、`services/delayMesh.js`が緯度経度の格子（既定300m四方、`?cellMeters`で100〜2000mに調整可）へ新しさだけで重み付け集計します。対象区間が無いため距離・方位による重み付けは行わず、`nearbyRecencyWeight()`（同じくetaPredictor.jsからexport）による新しさの重みだけを使う点が、区間ごとの周辺道路実績（距離×方位×新しさ）との違いです。
+
+### `getRecentSegmentPerformance()`：周辺道路実績とメッシュ地図の共通データソース
+
+区間ごとの周辺道路実績（`computeNearbyFactor`）とメッシュ地図（`delayMesh.js`）は、どちらも`getRecentSegmentPerformance(client, { excludeAssignmentId })`という同じ下位関数から候補区間を取得します。現在アクティブな割り当てに加え、**運行終了直後（`RECENTLY_ENDED_MINUTES`＝90分以内）の割り当ても候補に含めます**。これは、便が終了した瞬間にその区間の実績が「周辺道路実績」から消えてしまう（数分前の新しい実績なのに使われなくなる）のを防ぐためです。個々の区間の実際の重みは、この後段のJS側フィルタ（周辺道路実績なら距離×方位×新しさ、メッシュなら新しさのみ）で決まるため、SQL側の90分は粗いプレフィルタに過ぎません（実際に使われるのは直近`NEARBY_RECENCY_MINUTES`＝60分以内の実績だけです）。`trip_vehicle_assignments(ended_at) WHERE state = 'ended'`の部分インデックス（`idx_assignments_recently_ended`）がこの絞り込みを支えています。

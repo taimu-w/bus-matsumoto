@@ -2,11 +2,11 @@ const fs = require('fs');
 const express = require('express');
 const pool = require('../config/db');
 const { resolveRouteId } = require('../services/gtfsData');
-const { getArrivalsForAssignment, describeSource, SOURCE_INFO } = require('../services/etaPredictor');
 const { getAccuracyReport } = require('../services/predictionAccuracy');
+const { getDelayMesh } = require('../services/delayMesh');
 const { searchStops } = require('../services/routeSearch');
 const { searchJourneys, searchRouteSearchStops } = require('../services/gtfsRouteSearch');
-const { getServiceDateString } = require('../utils/time');
+const { getServiceDateString, computeDelayMinutes } = require('../utils/time');
 const { getActiveServiceIds } = require('../services/gtfsCalendar');
 const { getCachedServiceStatus } = require('../services/serviceStatusScraper');
 const {
@@ -27,9 +27,13 @@ const {
 const {
   findLiveAssignment,
   buildBusEntry,
+  getAssignmentDetailForAdmin,
+  getStopArrivalDetailForAdmin,
   startTimeToUrlHhmm
 } = require('../services/realtimeTripLookup');
 const { getApproachingBuses } = require('../services/busStopApproaching');
+const { listLinkableTrips, linkVehicleToTrip, unlinkAssignment } = require('../services/manualAssignment');
+const { SUCCESS_END_REASONS } = require('../services/finishService');
 const touristSpots = require('../services/touristSpots');
 const { invalidateHolidayCache } = require('../services/holidayCalendar');
 const { invalidateRouteExternalIdCache } = require('../services/routeExternalIdMapping');
@@ -53,10 +57,16 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 // 2026-08-21以降は管理画面「運用パラメータ設定」からも編集できる
 // （config/runtimeSettingsCatalog.js・services/runtimeSettings.js参照）。
 function staleGpsMin() { return getRuntimeSetting('ADMIN_STALE_GPS_MIN'); }
-function delayAlertMin() { return getRuntimeSetting('ADMIN_DELAY_ALERT_MIN'); }
 function severeDelayMin() { return getRuntimeSetting('ADMIN_SEVERE_DELAY_MIN'); }
 function unassignedOverdueMin() { return getRuntimeSetting('ADMIN_UNASSIGNED_OVERDUE_MIN'); }
 function etaStaleMin() { return getRuntimeSetting('ADMIN_ETA_STALE_MIN'); }
+
+// 異常アラートの確認済み管理用の安定キー。同じ異常インスタンスなら常に同じ値になり、
+// 対象エンティティのIDだけでなく変化しうる値（例: 最終GPS時刻）も含めることで、
+// 一度解消してから再発した異常には別のキーが振られ、改めて表示される。
+function buildAlertKey(type, ...parts) {
+  return [type, ...parts.map((p) => (p === null || p === undefined ? '' : String(p instanceof Date ? p.toISOString() : p)))].join(':');
+}
 
 // フロントエンドがX-Client-Idヘッダーを付けて叩くAPIリクエストを閲覧数としてカウントする
 // （サーバー負荷判定・管理画面の閲覧数表示に使用。ヘッダーが無いリクエストは対象外）。
@@ -795,6 +805,7 @@ router.get('/buses-for-map', async (req, res) => {
     const buses = rows.map((row) => ({
       id: row.car_id,
       vehicleId: row.vehicle_id,
+      assignmentId: row.assignment_id,
       tripId: row.daily_trip_id,
       lat: Number(row.lat),
       lng: Number(row.lon),
@@ -900,78 +911,49 @@ router.get('/route-search', async (req, res) => {
   }
 });
 
-// GET /api/admin/bus-positions -> 直近3分以内のバス位置情報（住所付き）
-router.get('/admin/bus-positions', requireAdminAuth, async (req, res) => {
+// GET /api/admin/vehicle-positions-map -> 運行ダッシュボード（地図）の「全車両（直近3分）」モード用。
+// /api/buses-for-map（担当車両のみ）と異なり、便に割り当てられていない・候補にすらなっていない
+// 車両も含め、直近3分以内にGPSを受信した全車両を1台につき最新の1件だけ返す。
+// レスポンス形状は/api/buses-for-mapのバス1件分と揃えてあり、フロント側のマーカー描画を共用する。
+router.get('/admin/vehicle-positions-map', requireAdminAuth, async (req, res) => {
   try {
-    const now = new Date();
-    const threeMinutesAgo = new Date(now.getTime() - 3 * 60 * 1000);
-
-    // vehicle_positions_raw から直近3分以内のデータを取得
     const result = await pool.query(
-      `SELECT DISTINCT ON (vpr.car_id) 
-              vpr.id, vpr.route_id, vpr.car_id, vpr.received_time, 
-              vpr.gps_time, vpr.gps_time_ts, vpr.lat, vpr.lon, vpr.direction_id,
-              r.name AS route_name
+      `SELECT DISTINCT ON (vpr.car_id)
+              vpr.car_id, vpr.route_id, vpr.lat, vpr.lon, vpr.gps_time, vpr.gps_time_ts,
+              r.name AS route_name, r.color AS route_color, r.text_color AS route_text_color,
+              v.id AS vehicle_id,
+              (SELECT a.id FROM trip_vehicle_assignments a
+               WHERE a.vehicle_id = v.id AND a.state = 'active'
+               ORDER BY (a.role = 'assigned') DESC, a.id DESC
+               LIMIT 1) AS assignment_id
        FROM vehicle_positions_raw vpr
        LEFT JOIN routes r ON r.id = vpr.route_id
-       WHERE vpr.gps_time_ts >= $1 AND vpr.gps_time_ts <= $2
-       ORDER BY vpr.car_id ASC, vpr.gps_time_ts DESC`,
-      [threeMinutesAgo.toISOString(), now.toISOString()]
+       LEFT JOIN vehicles v ON v.car_id = vpr.car_id AND v.route_id = vpr.route_id
+       WHERE vpr.gps_time_ts >= now() - interval '3 minutes'
+       ORDER BY vpr.car_id, vpr.gps_time_ts DESC, vpr.id DESC`
     );
 
-    const positions = [];
+    const vehicles = result.rows.map((row) => ({
+      id: row.car_id,
+      vehicleId: row.vehicle_id,
+      assignmentId: row.assignment_id,
+      lat: Number(row.lat),
+      lng: Number(row.lon),
+      routeId: row.route_id,
+      routeName: row.route_name || row.route_id || '路線未確定',
+      routeColor: row.route_color || null,
+      routeTextColor: row.route_text_color || null,
+      headsign: null,
+      currentHeadsign: null,
+      delayMinutes: null,
+      gpsTime: row.gps_time,
+      gpsTimeTs: row.gps_time_ts
+    }));
 
-    for (const row of result.rows) {
-      // Yahoo!リバースジオコーダで住所を特定
-      let address = '';
-      try {
-        const yahooClientId = process.env.YAHOO_CLIENT_ID;
-        if (yahooClientId) {
-          const fetch = require('cross-fetch');
-          const yahooUrl = `https://map.yahooapis.jp/geoapi/V1/reverseGeoCoder?lat=${row.lat}&lon=${row.lon}&appid=${yahooClientId}&output=json`;
-          const yahooRes = await fetch(yahooUrl);
-          const yahooJson = await yahooRes.json();
-          
-          if (yahooJson.Feature && yahooJson.Feature.length > 0) {
-            address = yahooJson.Feature[0].Property.Address || '';
-            // 長野県と郵便番号を除去
-            address = address.replace(/長野県/g, '');
-            address = address.replace(/〒?\d{3}-\d{4}/g, '').trim();
-          } else {
-            address = '地点特定不可';
-          }
-        }
-      } catch (e) {
-        address = '住所取得エラー';
-        console.warn(`車両ID ${row.car_id} の住所取得に失敗: ${e.message}`);
-      }
-
-      // 100ms待機（APIレート制限対策）
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      positions.push({
-        id: row.id,
-        routeId: row.route_id,
-        routeName: row.route_name || row.route_id,
-        carId: row.car_id,
-        receivedTime: row.received_time,
-        gpsTime: row.gps_time,
-        gpsTimeTs: row.gps_time_ts,
-        lat: parseFloat(row.lat),
-        lon: parseFloat(row.lon),
-        directionId: row.direction_id,
-        address: address
-      });
-    }
-
-    res.json({
-      positions,
-      count: positions.length,
-      fetchedAt: now.toISOString()
-    });
+    res.json({ vehicles });
   } catch (err) {
-    console.error('[api] /admin/bus-positions エラー:', err);
-    res.status(500).json({ error: 'バス位置情報の取得に失敗しました。' });
+    console.error('[api] /admin/vehicle-positions-map エラー:', err);
+    res.status(500).json({ error: '全車両位置情報の取得に失敗しました。' });
   }
 });
 
@@ -986,71 +968,187 @@ function parseServiceDateParam(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value || '') ? value : getServiceDateString();
 }
 
-// 正常終了とみなす end_reason（緑色表示用。unassignedの赤系と区別するため）
-const SUCCESS_END_REASONS = new Set(['最終バス停到着済', '終了エリア到達']);
 
-// GET /api/admin/dashboard-summary -> 運行ダッシュボード
-router.get('/admin/dashboard-summary', requireAdminAuth, async (req, res) => {
+// GET /api/admin/assignments/:assignmentId -> 運行ダッシュボード（地図）でバスアイコンを
+// タップしたときの詳細（リアルタイム時刻表・地図に重ねる停車バス停・位置履歴）。
+router.get('/admin/assignments/:assignmentId', requireAdminAuth, async (req, res) => {
   try {
-    const serviceDate = getServiceDateString();
+    const assignmentId = Number(req.params.assignmentId);
+    if (!Number.isInteger(assignmentId)) {
+      return res.status(400).json({ error: '不正な assignmentId です。' });
+    }
+    const detail = await getAssignmentDetailForAdmin(assignmentId);
+    if (!detail) return res.status(404).json({ error: '指定の割り当てが見つかりませんでした。' });
+    res.json(detail);
+  } catch (err) {
+    console.error('[api] /admin/assignments/:assignmentId エラー:', err);
+    res.status(500).json({ error: '便の詳細情報の取得に失敗しました。' });
+  }
+});
 
-    const [activeVehiclesRes, unassignedRes, delayedRes, staleGpsRes] = await Promise.all([
-      pool.query(`SELECT count(*)::int AS count FROM vehicles WHERE status = 'active'`),
-      pool.query(
-        `SELECT count(*)::int AS count
-         FROM daily_trips
-         WHERE service_date = $1 AND assignment_state = 'unassigned' AND closed_at IS NULL`,
-        [serviceDate]
-      ),
-      pool.query(
-        `SELECT count(*)::int AS count
-         FROM trip_vehicle_assignments a
-         JOIN daily_trips d ON d.id = a.daily_trip_id
-         WHERE a.role = 'assigned' AND a.state = 'active'
-           AND a.delay_minutes >= $1
-           AND d.service_date = $2`,
-        [delayAlertMin(), serviceDate]
-      ),
-      pool.query(
-        `SELECT count(*)::int AS count
-         FROM vehicles
-         WHERE status = 'active'
-           AND (last_gps_at IS NULL OR last_gps_at < now() - make_interval(secs => $1::double precision * 60))`,
-        [staleGpsMin()]
-      )
+const ACTUAL_TIME_PATTERN = /^([0-9]|1[0-9]|2[0-3]):[0-5][0-9]$/;
+
+// GET /api/admin/assignments/:assignmentId/stops/:stopId -> 運行ダッシュボードのバス停別詳細モーダル。
+// 到着済なら「判定方法（付近経由／ベクトル判定／手動 等）と根拠（内積・線分距離・前後GPS点 等）」＋
+// 遅れ分数＋ETA予測の推移、未到着なら「ETA予測根拠（source・ペース補正の内訳）」＋ETA予測の推移を返す。
+router.get('/admin/assignments/:assignmentId/stops/:stopId', requireAdminAuth, async (req, res) => {
+  try {
+    const assignmentId = Number(req.params.assignmentId);
+    const stopId = Number(req.params.stopId);
+    if (!Number.isInteger(assignmentId) || !Number.isInteger(stopId)) {
+      return res.status(400).json({ error: '不正なパラメータです。' });
+    }
+    const detail = await getStopArrivalDetailForAdmin(assignmentId, stopId);
+    if (!detail) return res.status(404).json({ error: '指定のバス停が見つかりませんでした。' });
+    res.json(detail);
+  } catch (err) {
+    console.error('[api] GET /admin/assignments/:assignmentId/stops/:stopId エラー:', err);
+    res.status(500).json({ error: 'バス停の詳細情報の取得に失敗しました。' });
+  }
+});
+
+// PUT /api/admin/assignments/:assignmentId/stops/:stopId -> 到着判定時刻の手動編集。
+// - actualTime が H:mm: そのバス停を '到着済' に手動確定する（未到着のバス停への手動確定も可）。
+//   passDetection.js は status IN ('到着済','付近') を新規の付近入り候補から除外するため、
+//   ここで確定させた行は次回パイプライン実行で上書きされない。
+// - actualTime が空: そのバス停を「未到着」に差し戻す（到着判定・実績時刻・遅れ・判定根拠を消去）。
+//   誤判定の取り消し用。trip_gps_matches は消さない（消すと直近48hの生GPSが即再判定を誘発する）。
+//   前後が到着済で1停留所だけ空くと、次回パイプラインの線形補間で再び埋まり得る（仕様）。
+router.put('/admin/assignments/:assignmentId/stops/:stopId', requireAdminAuth, async (req, res) => {
+  try {
+    const assignmentId = Number(req.params.assignmentId);
+    const stopId = Number(req.params.stopId);
+    if (!Number.isInteger(assignmentId) || !Number.isInteger(stopId)) {
+      return res.status(400).json({ error: '不正なパラメータです。' });
+    }
+    const actualTime = String(req.body?.actualTime || '').trim();
+    const isRevert = actualTime === '';
+    if (!isRevert && !ACTUAL_TIME_PATTERN.test(actualTime)) {
+      return res.status(400).json({ error: '到着判定時刻は H:mm 形式（例: 8:05）で入力してください。空で保存すると未到着に戻します。' });
+    }
+
+    // scheduled_time / seq_order に加え、差し戻し後のステータス決定用に is_through を引く。
+    const progressRes = await pool.query(
+      `SELECT p.scheduled_time, p.seq_order, COALESCE(dtst.is_through, FALSE) AS is_through
+       FROM trip_stop_progress p
+       JOIN trip_vehicle_assignments a ON a.id = p.assignment_id
+       LEFT JOIN daily_trip_stop_times dtst
+         ON dtst.daily_trip_id = a.daily_trip_id AND dtst.stop_id = p.stop_id
+       WHERE p.assignment_id = $1 AND p.stop_id = $2`,
+      [assignmentId, stopId]
+    );
+    const progress = progressRes.rows[0];
+    if (!progress) return res.status(404).json({ error: '指定のバス停が見つかりませんでした。' });
+
+    const delayMinutes = isRevert ? null : computeDelayMinutes(progress.scheduled_time, actualTime);
+
+    if (isRevert) {
+      // 未到着へ差し戻し。真の通過バス停は '通過'、それ以外は '' に戻す。
+      const revertStatus = progress.is_through ? '通過' : '';
+      await pool.query(
+        `UPDATE trip_stop_progress
+         SET status = $3, actual_time = NULL, delay_minutes = NULL, interpolated = FALSE,
+             arrival_method = NULL, arrival_evidence = NULL,
+             nearby_min_distance_meters = NULL, nearby_min_distance_gps_time = NULL, nearby_min_distance_gps_time_ts = NULL
+         WHERE assignment_id = $1 AND stop_id = $2`,
+        [assignmentId, stopId, revertStatus]
+      );
+      // last_arrived_seq は前進のみの GREATEST では戻せないため、残った到着済から引き直す。
+      await pool.query(
+        `UPDATE trip_vehicle_assignments a
+         SET last_arrived_seq = COALESCE(
+               (SELECT MAX(seq_order) FROM trip_stop_progress WHERE assignment_id = a.id AND status = '到着済'), -1)
+         WHERE a.id = $1`,
+        [assignmentId]
+      );
+    } else {
+      await pool.query(
+        `UPDATE trip_stop_progress
+         SET status = '到着済', actual_time = $1, delay_minutes = $2, interpolated = FALSE,
+             arrival_method = 'manual',
+             arrival_evidence = jsonb_build_object('note', '管理画面で手動確定', 'editedAt', now()),
+             nearby_min_distance_meters = NULL, nearby_min_distance_gps_time = NULL, nearby_min_distance_gps_time_ts = NULL
+         WHERE assignment_id = $3 AND stop_id = $4`,
+        [actualTime, delayMinutes, assignmentId, stopId]
+      );
+      await pool.query(
+        `UPDATE trip_vehicle_assignments SET last_arrived_seq = GREATEST(last_arrived_seq, $1) WHERE id = $2`,
+        [progress.seq_order, assignmentId]
+      );
+    }
+
+    // 便レベルのdelay_minutesを、delayCalc.jsと同じ規則（seq_order昇順で最後にnon-nullな値）で再計算する。
+    // 差し戻しで到着済が1つも残らない場合は 0（列の既定値）に戻す。
+    const latestRes = await pool.query(
+      `SELECT delay_minutes FROM trip_stop_progress
+       WHERE assignment_id = $1 AND delay_minutes IS NOT NULL
+       ORDER BY seq_order DESC LIMIT 1`,
+      [assignmentId]
+    );
+    await pool.query(`UPDATE trip_vehicle_assignments SET delay_minutes = $1 WHERE id = $2`, [
+      latestRes.rows[0] ? latestRes.rows[0].delay_minutes : 0,
+      assignmentId
     ]);
 
-    const enabledGtfsFeeds = getEnabledGtfsFeeds();
-    const feedIds = enabledGtfsFeeds.map((f) => f.id);
-    const feedRowsRes = feedIds.length > 0
-      ? await pool.query(
-          `SELECT id, last_fetched_at, last_status, last_error FROM feeds WHERE id = ANY($1::text[])`,
-          [feedIds]
-        )
-      : { rows: [] };
-    const feedRowById = new Map(feedRowsRes.rows.map((r) => [r.id, r]));
-    const gtfsFeeds = enabledGtfsFeeds.map((f) => {
-      const row = feedRowById.get(f.id);
-      return {
-        id: f.id,
-        name: f.name,
-        lastFetchedAt: row ? row.last_fetched_at : null,
-        lastStatus: row ? row.last_status : null,
-        lastError: row ? row.last_error : null
-      };
-    });
-
-    res.json({
-      activeVehicles: activeVehiclesRes.rows[0].count,
-      unassignedTripsCount: unassignedRes.rows[0].count,
-      delayedTripsCount: delayedRes.rows[0].count,
-      staleGpsVehicleCount: staleGpsRes.rows[0].count,
-      gtfsFeeds,
-      generatedAt: new Date().toISOString()
-    });
+    if (isRevert) {
+      res.json({ ok: true, stopId, reverted: true });
+    } else {
+      res.json({ ok: true, stopId, actualTime, delayMinutes, reverted: false });
+    }
   } catch (err) {
-    console.error('[api] /admin/dashboard-summary エラー:', err);
-    res.status(500).json({ error: '運行ダッシュボードの取得に失敗しました。' });
+    console.error('[api] PUT /admin/assignments/:assignmentId/stops/:stopId エラー:', err);
+    res.status(500).json({ error: '到着判定時刻の更新に失敗しました。' });
+  }
+});
+
+// GET /api/admin/daily-trips?routeId=...&date=YYYY-MM-DD -> 運行ダッシュボードで
+// 車両アイコンを便に手動で紐づける際の候補一覧（その路線・その日のまだクローズしていない便）。
+router.get('/admin/daily-trips', requireAdminAuth, async (req, res) => {
+  try {
+    const routeId = String(req.query.routeId || '').trim();
+    if (!routeId) return res.status(400).json({ error: 'routeId を指定してください。' });
+    const serviceDate = parseServiceDateParam(req.query.date);
+    const trips = await listLinkableTrips(routeId, serviceDate);
+    res.json({ trips });
+  } catch (err) {
+    console.error('[api] /admin/daily-trips エラー:', err);
+    res.status(500).json({ error: '便一覧の取得に失敗しました。' });
+  }
+});
+
+// POST /api/admin/assignments -> 運行ダッシュボードで、便に割り当てられていない車両アイコンを
+// タップして選んだ便に手動で紐づける。
+router.post('/admin/assignments', requireAdminAuth, async (req, res) => {
+  try {
+    const vehicleId = Number(req.body?.vehicleId);
+    const dailyTripId = Number(req.body?.dailyTripId);
+    if (!Number.isInteger(vehicleId) || !Number.isInteger(dailyTripId)) {
+      return res.status(400).json({ error: '不正なパラメータです。' });
+    }
+    const result = await linkVehicleToTrip(vehicleId, dailyTripId);
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    res.json({ ok: true, assignmentId: result.assignmentId });
+  } catch (err) {
+    console.error('[api] POST /admin/assignments エラー:', err);
+    res.status(500).json({ error: '車両の紐づけに失敗しました。' });
+  }
+});
+
+// DELETE /api/admin/assignments/:assignmentId -> 運行ダッシュボードで、紐づけ済みの
+// 車両アイコンをタップして紐づけを解除する。便のクローズ・再割り当ては既存の
+// 自動割り当てパイプライン（次回ポーリング、最大60秒）に委ねる。
+router.delete('/admin/assignments/:assignmentId', requireAdminAuth, async (req, res) => {
+  try {
+    const assignmentId = Number(req.params.assignmentId);
+    if (!Number.isInteger(assignmentId)) {
+      return res.status(400).json({ error: '不正な assignmentId です。' });
+    }
+    const result = await unlinkAssignment(assignmentId);
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] DELETE /admin/assignments/:assignmentId エラー:', err);
+    res.status(500).json({ error: '紐づけの解除に失敗しました。' });
   }
 });
 
@@ -1147,48 +1245,6 @@ router.get('/admin/assignment-monitor', requireAdminAuth, async (req, res) => {
   }
 });
 
-// GET /api/admin/pass-status?date=YYYY-MM-DD -> 通過判定の現在状態スナップショット（履歴ではない）
-router.get('/admin/pass-status', requireAdminAuth, async (req, res) => {
-  try {
-    const serviceDate = parseServiceDateParam(req.query.date);
-
-    const result = await pool.query(
-      `SELECT d.id AS trip_id, d.start_time, d.headsign, a.id AS assignment_id, a.role, v.car_id,
-              s.name AS stop_name, p.seq_order, p.status, p.actual_time, p.delay_minutes,
-              p.nearby_min_distance_meters, p.nearby_min_distance_gps_time
-       FROM trip_stop_progress p
-       JOIN trip_vehicle_assignments a ON a.id = p.assignment_id
-       JOIN daily_trips d ON d.id = a.daily_trip_id
-       JOIN stops s ON s.id = p.stop_id
-       JOIN vehicles v ON v.id = a.vehicle_id
-       WHERE a.state = 'active' AND d.service_date = $1 AND d.closed_at IS NULL
-       ORDER BY d.start_at ASC, a.id ASC, p.seq_order ASC`,
-      [serviceDate]
-    );
-
-    const rows = result.rows.map((row) => ({
-      tripId: row.trip_id,
-      startTime: row.start_time,
-      headsign: row.headsign || null,
-      assignmentId: row.assignment_id,
-      role: row.role,
-      carId: row.car_id,
-      stopName: row.stop_name,
-      seqOrder: row.seq_order,
-      status: row.status,
-      actualTime: row.actual_time,
-      delayMinutes: row.delay_minutes,
-      nearbyMinDistanceMeters: row.nearby_min_distance_meters,
-      nearbyMinDistanceGpsTime: row.nearby_min_distance_gps_time
-    }));
-
-    res.json({ date: serviceDate, rows });
-  } catch (err) {
-    console.error('[api] /admin/pass-status エラー:', err);
-    res.status(500).json({ error: '通過判定データの取得に失敗しました。' });
-  }
-});
-
 // GET /api/admin/alerts -> 異常アラート（GPS途絶・未割当便・大幅遅延・予測計算失敗・GTFS取得失敗）
 router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
   try {
@@ -1210,7 +1266,8 @@ router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
         vehicleId: row.vehicle_id,
         carId: row.car_id,
         routeId: row.route_id,
-        lastGpsAt: row.last_gps_at
+        lastGpsAt: row.last_gps_at,
+        key: buildAlertKey('staleGps', row.vehicle_id, row.last_gps_at)
       });
     }
 
@@ -1231,7 +1288,8 @@ router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
         routeId: row.route_id,
         startTime: row.start_time,
         headsign: row.headsign || null,
-        minutesOverdue: Math.round((Date.now() - new Date(row.start_at).getTime()) / 60000)
+        minutesOverdue: Math.round((Date.now() - new Date(row.start_at).getTime()) / 60000),
+        key: buildAlertKey('unassignedTrip', row.trip_id)
       });
     }
 
@@ -1255,7 +1313,8 @@ router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
         carId: row.car_id,
         startTime: row.start_time,
         headsign: row.headsign || null,
-        delayMinutes: row.delay_minutes
+        delayMinutes: row.delay_minutes,
+        key: buildAlertKey('severeDelay', row.assignment_id)
       });
     }
 
@@ -1280,7 +1339,8 @@ router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
         tripId: row.daily_trip_id,
         carId: row.car_id,
         startTime: row.start_time,
-        lastComputedAt: row.last_computed_at
+        lastComputedAt: row.last_computed_at,
+        key: buildAlertKey('etaComputeFailure', row.assignment_id)
       });
     }
 
@@ -1300,21 +1360,60 @@ router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
         feedId: row.id,
         feedName: row.name,
         lastFetchedAt: row.last_fetched_at,
-        lastError: row.last_error
+        lastError: row.last_error,
+        key: buildAlertKey('gtfsFetchFailure', row.id)
       });
     }
 
-    const counts = alerts.reduce((acc, a) => {
+    // 現存する異常のキー以外の確認済み記録はガベージコレクトする。
+    // これにより、いったん解消してから再発した異常は改めて表示される。
+    const liveKeys = alerts.map((a) => a.key);
+    if (liveKeys.length > 0) {
+      await pool.query(
+        `DELETE FROM admin_alert_acknowledgements WHERE NOT (alert_key = ANY($1::text[]))`,
+        [liveKeys]
+      );
+    } else {
+      await pool.query(`DELETE FROM admin_alert_acknowledgements`);
+    }
+
+    const ackRes = await pool.query(
+      `SELECT alert_key FROM admin_alert_acknowledgements WHERE alert_key = ANY($1::text[])`,
+      [liveKeys]
+    );
+    const ackedKeys = new Set(ackRes.rows.map((r) => r.alert_key));
+    const visibleAlerts = alerts.filter((a) => !ackedKeys.has(a.key));
+
+    const counts = visibleAlerts.reduce((acc, a) => {
       acc[a.type] = (acc[a.type] || 0) + 1;
       return acc;
     }, {});
 
-    alerts.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'critical' ? -1 : 1));
+    visibleAlerts.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'critical' ? -1 : 1));
 
-    res.json({ alerts, counts, generatedAt: new Date().toISOString() });
+    res.json({ alerts: visibleAlerts, counts, generatedAt: new Date().toISOString() });
   } catch (err) {
     console.error('[api] /admin/alerts エラー:', err);
     res.status(500).json({ error: '異常アラートの取得に失敗しました。' });
+  }
+});
+
+// POST /api/admin/alerts/ack -> 異常アラートを確認済みにする（同じ異常が解消・再発するまで再表示しない）
+router.post('/admin/alerts/ack', requireAdminAuth, async (req, res) => {
+  try {
+    const { key } = req.body || {};
+    if (!key || typeof key !== 'string') {
+      return res.status(400).json({ error: 'keyは必須です。' });
+    }
+    await pool.query(
+      `INSERT INTO admin_alert_acknowledgements (alert_key) VALUES ($1)
+       ON CONFLICT (alert_key) DO NOTHING`,
+      [key]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/alerts/ack エラー:', err);
+    res.status(500).json({ error: 'アラートの確認処理に失敗しました。' });
   }
 });
 
@@ -1467,61 +1566,80 @@ router.get('/admin/job-monitor', requireAdminAuth, (req, res) => {
 });
 
 // ==========================================================
-// ETA予測の根拠表示・精度監視・運行実績ダウンロード
+// ETA予測の精度監視・運行実績ダウンロード
 // いずれも既存のETA計算(etaPredictor.js)・パイプラインには書き込みを行わない、
 // 読み取り専用の追加API。予測精度監視はtrip_arrival_prediction_log（追記専用の
 // 履歴テーブル）を参照する。
 // ==========================================================
 
-// GET /api/admin/eta-basis?date=YYYY-MM-DD
-// -> 稼働中の便・停留所ごとに、ETA予測が何を根拠にしたか（時刻表／過去統計／
-//    直近走行ペースのどれを使ったか）を表示する。
-router.get('/admin/eta-basis', requireAdminAuth, async (req, res) => {
+// GET /api/admin/eta-route-overview?date=YYYY-MM-DD
+// -> 管理画面「当日の状況」の路線別サマリ。路線ごとに、稼働中の担当車両数と、
+//    現在ETA計算に使われているペース補正（liveFactor／今日の前便実績／周辺道路実績／
+//    それらを統合したcombinedPaceFactor）・平均予測遅延を集計する。
+//    「今日この路線がどの程度の遅れを見込んで計算されているか」を俯瞰するためのもの。
+router.get('/admin/eta-route-overview', requireAdminAuth, async (req, res) => {
   try {
     const serviceDate = parseServiceDateParam(req.query.date);
 
     const result = await pool.query(
-      `SELECT d.id AS trip_id, d.start_time, d.headsign, a.id AS assignment_id, a.role, v.car_id,
-              s.name AS stop_name, p.seq_order, p.status, p.scheduled_time, p.actual_time, p.delay_minutes,
-              tap.predicted_time, tap.predicted_delay_minutes, tap.source, tap.computed_at
-       FROM trip_stop_progress p
-       JOIN trip_vehicle_assignments a ON a.id = p.assignment_id
+      `SELECT r.id AS route_id, r.name AS route_name, r.short_name, r.color, r.text_color,
+              COUNT(DISTINCT a.id) AS active_assignments,
+              COUNT(*) FILTER (WHERE tap.combined_pace_factor IS NOT NULL) AS pace_sample_count,
+              AVG(tap.live_factor) FILTER (WHERE tap.combined_pace_factor IS NOT NULL) AS avg_live_factor,
+              AVG(tap.combined_pace_factor) FILTER (WHERE tap.combined_pace_factor IS NOT NULL) AS avg_combined_pace_factor,
+              COUNT(*) FILTER (WHERE tap.today_previous_trip_factor IS NOT NULL) AS today_previous_trip_usage_count,
+              AVG(tap.today_previous_trip_factor) FILTER (WHERE tap.today_previous_trip_factor IS NOT NULL) AS avg_today_previous_trip_factor,
+              COUNT(*) FILTER (WHERE tap.nearby_factor IS NOT NULL) AS nearby_usage_count,
+              AVG(tap.nearby_factor) FILTER (WHERE tap.nearby_factor IS NOT NULL) AS avg_nearby_factor,
+              AVG(tap.predicted_delay_minutes) AS avg_predicted_delay_minutes,
+              MAX(tap.predicted_delay_minutes) AS max_predicted_delay_minutes
+       FROM trip_vehicle_assignments a
        JOIN daily_trips d ON d.id = a.daily_trip_id
-       JOIN stops s ON s.id = p.stop_id
-       JOIN vehicles v ON v.id = a.vehicle_id
-       LEFT JOIN trip_arrival_predictions tap ON tap.assignment_id = a.id AND tap.stop_id = p.stop_id
-       WHERE a.state = 'active' AND d.service_date = $1 AND d.closed_at IS NULL
-       ORDER BY d.start_at ASC, a.id ASC, p.seq_order ASC`,
+       JOIN routes r ON r.id = d.route_id
+       LEFT JOIN trip_arrival_predictions tap ON tap.assignment_id = a.id
+       WHERE a.role = 'assigned' AND a.state = 'active' AND d.service_date = $1 AND d.closed_at IS NULL
+       GROUP BY r.id, r.name, r.short_name, r.color, r.text_color
+       ORDER BY r.id ASC`,
       [serviceDate]
     );
 
-    const rows = result.rows.map((row) => {
-      const info = describeSource(row.source);
-      return {
-        tripId: row.trip_id,
-        startTime: row.start_time,
-        headsign: row.headsign || null,
-        assignmentId: row.assignment_id,
-        role: row.role,
-        carId: row.car_id,
-        stopName: row.stop_name,
-        seqOrder: row.seq_order,
-        status: row.status,
-        scheduledTime: row.scheduled_time,
-        actualTime: row.actual_time,
-        predictedTime: row.predicted_time,
-        predictedDelayMinutes: row.predicted_delay_minutes,
-        source: row.source,
-        basisCategory: info.category,
-        basisLabel: info.label,
-        computedAt: row.computed_at
-      };
-    });
+    const num = (v) => (v === null ? null : Number(v));
+    const routes = result.rows.map((row) => ({
+      routeId: row.route_id,
+      routeName: row.route_name,
+      shortName: row.short_name,
+      color: row.color,
+      textColor: row.text_color,
+      activeAssignments: Number(row.active_assignments),
+      paceSampleCount: Number(row.pace_sample_count),
+      avgLiveFactor: num(row.avg_live_factor),
+      avgCombinedPaceFactor: num(row.avg_combined_pace_factor),
+      todayPreviousTripUsageCount: Number(row.today_previous_trip_usage_count),
+      avgTodayPreviousTripFactor: num(row.avg_today_previous_trip_factor),
+      nearbyUsageCount: Number(row.nearby_usage_count),
+      avgNearbyFactor: num(row.avg_nearby_factor),
+      avgPredictedDelayMinutes: num(row.avg_predicted_delay_minutes),
+      maxPredictedDelayMinutes: row.max_predicted_delay_minutes === null ? null : Number(row.max_predicted_delay_minutes)
+    }));
 
-    res.json({ date: serviceDate, sourceLegend: SOURCE_INFO, rows });
+    res.json({ date: serviceDate, routes });
   } catch (err) {
-    console.error('[api] /admin/eta-basis エラー:', err);
-    res.status(500).json({ error: 'ETA予測根拠データの取得に失敗しました。' });
+    console.error('[api] /admin/eta-route-overview エラー:', err);
+    res.status(500).json({ error: '路線別ETA状況の取得に失敗しました。' });
+  }
+});
+
+// GET /api/admin/delay-mesh?cellMeters=300
+// -> 管理画面「当日の状況」の地図メッシュ表示。対象区間を限定せず、直近の区間実績
+//    （ETA予測の「周辺道路実績」と同じデータソース）を格子(メッシュ)に集約し、
+//    セルごとの平均ペース比率（1.0=定刻通り、大きいほど遅い）を返す。
+router.get('/admin/delay-mesh', requireAdminAuth, async (req, res) => {
+  try {
+    const mesh = await getDelayMesh(pool, { cellMeters: req.query.cellMeters });
+    res.json(mesh);
+  } catch (err) {
+    console.error('[api] /admin/delay-mesh エラー:', err);
+    res.status(500).json({ error: '遅延メッシュデータの取得に失敗しました。' });
   }
 });
 

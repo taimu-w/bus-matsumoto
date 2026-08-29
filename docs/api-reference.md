@@ -48,17 +48,19 @@
 | GET / POST / DELETE | `/api/admin/holidays`（`/:date`） | 祝日カレンダーの取得・追加・削除（ETA統計の曜日区分に使用） |
 | GET / POST / DELETE | `/api/admin/route-mappings`（`/:externalId`） | 外部ID⇔GTFS route_id対応の取得・追加更新（UPSERT）・削除。`route_id`は`routes`テーブルへの実在チェックあり（路線名による解決はしない） |
 | GET / PUT / DELETE | `/api/admin/tourist-spots`（`/:id`） | 観光スポット情報の一覧・テキスト一括登録（全件洗い替え）・1件削除 |
-| GET | `/api/admin/bus-positions` | 直近3分以内のバス位置情報（Yahoo!リバースジオコーダによる住所付き） |
-| GET | `/api/admin/dashboard-summary` | 運行ダッシュボード（稼働車両数・未割当便数・遅延便数・GPS途絶車両数・GTFSフィード状態） |
+| GET | `/api/admin/vehicle-positions-map` | 運行ダッシュボード（地図）の「全車両（直近3分）」モード用。便に割り当てられていない・候補にすらなっていない車両も含め、直近3分以内にGPSを受信した全車両を1台につき最新の1件だけ返す |
+| GET | `/api/admin/assignments/:assignmentId` | 運行ダッシュボード（地図）の詳細パネル用。便のリアルタイム時刻表（停車バス停・定刻・実績・予測）と、その車両がこの便を担当してから記録した位置履歴 |
+| GET | `/api/admin/assignments/:assignmentId/stops/:stopId` | バス停別詳細モーダル用。到着済なら判定方法（`付近経由`/`ベクトル判定`/`手動` 等）と根拠（内積・線分距離・前後GPS点／最接近距離・GPS時刻）＋遅れ、未到着ならETA予測根拠（`source`＋ペース補正の内訳）。いずれもETA予測の推移（`trip_arrival_prediction_log`。実績確定時は`actual`行）を返す |
+| PUT | `/api/admin/assignments/:assignmentId/stops/:stopId` | 到着判定時刻（`trip_stop_progress.actual_time`）の手動編集。`actualTime`が`H:mm`なら`到着済`へ手動確定（未到着のバス停も可）、**空なら未到着へ差し戻し**（到着判定・実績・遅れ・判定根拠を消去。`trip_gps_matches`は消さない） |
 | GET | `/api/admin/assignment-monitor` | 便ごとの担当・候補・割当時刻・距離・未割当理由（`?date=YYYY-MM-DD`） |
-| GET | `/api/admin/pass-status` | 通過判定の現在状態スナップショット（履歴ではない。`?date=YYYY-MM-DD`） |
 | GET | `/api/admin/alerts` | 異常アラート（GPS途絶・未割当便・大幅遅延・予測計算失敗・GTFS取得失敗） |
 | GET | `/api/admin/gtfs-feeds` | GTFSフィード監視（最終取得時刻・ファイル件数・エラー内容） |
 | POST | `/api/admin/gtfs-feeds/:feedId/refetch` | GTFSフィードの手動再取得 |
 | GET | `/api/admin/location-feeds` | 位置情報フィード監視（最終受信時刻・受信件数・形式異常） |
 | GET | `/api/admin/api-stats` | API稼働監視（応答時間・エラー率・アクセス数・失敗したエンドポイント） |
 | GET | `/api/admin/job-monitor` | ジョブ監視（各パイプライン工程の最終成功時刻・所要時間・失敗履歴） |
-| GET | `/api/admin/eta-basis` | ETA予測の根拠表示（`?date=YYYY-MM-DD`） |
+| GET | `/api/admin/eta-route-overview` | 「当日の状況」の路線別サマリ（`?date=YYYY-MM-DD`）。路線ごとの稼働中車両数・平均ペース補正（本便／今日の前便実績／周辺道路実績／総合）・平均/最大予測遅延 |
+| GET | `/api/admin/delay-mesh` | 「当日の状況」の地図メッシュ（`?cellMeters=100..2000`、既定300）。直近60分の区間実績（他路線含む）を格子に集約し、セルごとの平均ペース比率を返す（`services/delayMesh.js`） |
 | GET | `/api/admin/prediction-accuracy` | 予測精度の集計（`?days=7&routeId=...&thresholdMinutes=3&leadBucket=...&stopsBeforeBucket=...`） |
 | GET | `/api/admin/operation-records/export` | 運行実績のエクスポート（`?from=YYYY-MM-DD&to=YYYY-MM-DD&routeId=...`） |
 

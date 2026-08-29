@@ -6,7 +6,8 @@ const {
   buildNearbyTrackingState,
   findNextUnarrivedStop,
   evaluateVectorCrossing,
-  findVectorConfirmation
+  findVectorConfirmation,
+  describeArrivalMethod
 } = require('../src/services/passDetection');
 
 test('shouldConfirmDeparture: マージン以内は到着確定しない', () => {
@@ -62,6 +63,9 @@ test('passStepConfirm: 最小距離+マージンを超えて離れたら到着�
   assert.equal(results[0].type, 'confirm');
   assert.equal(results[0].stopId, 1);
   assert.equal(results[0].actualTime, '8:01'); // 遠ざかりを検知した8:02ではなく、最小距離の8:01
+  // arrival_evidence 用に最接近の距離・GPS時刻も confirm 結果へ含める
+  assert.ok(Math.abs(results[0].minDist - 40) < 1, `minDist was ${results[0].minDist}`);
+  assert.equal(results[0].minGpsTime, '8:01');
 });
 
 test('passStepConfirm: 記録済み最小距離より前のGPS点は評価しない（古い未消費pingによる巻き戻り防止）', () => {
@@ -152,10 +156,10 @@ test('evaluateVectorCrossing: バス停から50m以内をかすめて通過し�
   assert.ok(Math.abs(result.debug.segDist - 20) < 1, `segDist was ${result.debug.segDist}`);
 });
 
-test('evaluateVectorCrossing: バス停から50mより離れた経路は確定しない（線分条件）', () => {
+test('evaluateVectorCrossing: バス停から100mより離れた経路は確定しない（線分条件）', () => {
   const stop = { lat: STOP.lat, lon: STOP.lon };
-  const p1 = gpsAt2DOffsetMeters(-100, 80, '8:10', '2026-08-25T08:10:00+09:00');
-  const p2 = gpsAt2DOffsetMeters(80, 80, '8:12', '2026-08-25T08:12:00+09:00');
+  const p1 = gpsAt2DOffsetMeters(-100, 150, '8:10', '2026-08-25T08:10:00+09:00');
+  const p2 = gpsAt2DOffsetMeters(80, 150, '8:12', '2026-08-25T08:12:00+09:00');
   const result = evaluateVectorCrossing(p1, p2, stop);
   assert.equal(result.confirmed, false);
   assert.equal(result.reason, 'segment_too_far');
@@ -181,28 +185,28 @@ test('evaluateVectorCrossing: P1-P2間の距離が10m未満なら判定しない
   assert.equal(result.reason, 'step_distance_out_of_range');
 });
 
-test('evaluateVectorCrossing: P1-P2間の距離が250mを超えたら判定しない（フォールバック）', () => {
+test('evaluateVectorCrossing: P1-P2間の距離が700mを超えたら判定しない（フォールバック）', () => {
   const stop = { lat: STOP.lat, lon: STOP.lon };
-  const p1 = gpsAt2DOffsetMeters(-200, 0, '8:10', '2026-08-25T08:10:00+09:00');
-  const p2 = gpsAt2DOffsetMeters(200, 0, '8:11', '2026-08-25T08:11:00+09:00');
+  const p1 = gpsAt2DOffsetMeters(-400, 0, '8:10', '2026-08-25T08:10:00+09:00');
+  const p2 = gpsAt2DOffsetMeters(400, 0, '8:11', '2026-08-25T08:11:00+09:00');
   const result = evaluateVectorCrossing(p1, p2, stop);
   assert.equal(result.confirmed, false);
   assert.equal(result.reason, 'step_distance_out_of_range');
 });
 
-test('evaluateVectorCrossing: P1・P2ともにバス停から500mを超えたら判定しない（フォールバック）', () => {
+test('evaluateVectorCrossing: P1・P2ともにバス停から600mを超えたら判定しない（フォールバック）', () => {
   const stop = { lat: STOP.lat, lon: STOP.lon };
-  const p1 = gpsAt2DOffsetMeters(-600, 0, '8:10', '2026-08-25T08:10:00+09:00');
-  const p2 = gpsAt2DOffsetMeters(-450, 0, '8:11', '2026-08-25T08:11:00+09:00');
+  const p1 = gpsAt2DOffsetMeters(-700, 0, '8:10', '2026-08-25T08:10:00+09:00');
+  const p2 = gpsAt2DOffsetMeters(-650, 0, '8:11', '2026-08-25T08:11:00+09:00');
   const result = evaluateVectorCrossing(p1, p2, stop);
   assert.equal(result.confirmed, false);
   assert.equal(result.reason, 'too_far_from_stop');
 });
 
-test('evaluateVectorCrossing: 500m以内だがどちらも300mより遠い場合は判定しない（フォールバック）', () => {
+test('evaluateVectorCrossing: 600m以内だがどちらも500mより遠い場合は判定しない（フォールバック）', () => {
   const stop = { lat: STOP.lat, lon: STOP.lon };
-  const p1 = gpsAt2DOffsetMeters(-350, 0, '8:10', '2026-08-25T08:10:00+09:00');
-  const p2 = gpsAt2DOffsetMeters(-320, 0, '8:11', '2026-08-25T08:11:00+09:00');
+  const p1 = gpsAt2DOffsetMeters(-550, 0, '8:10', '2026-08-25T08:10:00+09:00');
+  const p2 = gpsAt2DOffsetMeters(-520, 0, '8:11', '2026-08-25T08:11:00+09:00');
   const result = evaluateVectorCrossing(p1, p2, stop);
   assert.equal(result.confirmed, false);
   assert.equal(result.reason, 'not_close_enough');
@@ -217,7 +221,7 @@ test('findVectorConfirmation: 履歴が1点以下ならnull（フォールバッ
 test('findVectorConfirmation: 最初に条件を満たしたペアで確定し、actual_timeはt補間したH:mm形式になる', () => {
   const stop = { stop_id: 3, seq_order: 3, name: 'テスト停', lat: STOP.lat, lon: STOP.lon };
   const gpsRows = [
-    gpsAt2DOffsetMeters(-400, 0, '8:05', '2026-08-25T08:05:00+09:00'), // 遠すぎて対象外(too_far_from_stop等)
+    gpsAt2DOffsetMeters(-820, 0, '8:05', '2026-08-25T08:05:00+09:00'), // ペア距離が700mを超え対象外(step_distance_out_of_range)
     gpsAt2DOffsetMeters(-100, 0, '8:10', '2026-08-25T08:10:00+09:00'), // P1（このペアから条件成立）
     gpsAt2DOffsetMeters(100, 0, '8:12', '2026-08-25T08:12:00+09:00')   // P2
   ];
@@ -235,4 +239,17 @@ test('findVectorConfirmation: 条件を満たすペアが無ければnull（フ�
     gpsAt2DOffsetMeters(-50, 0, '8:11', '2026-08-25T08:11:00+09:00') // まだ反対側に抜けていない
   ];
   assert.equal(findVectorConfirmation(gpsRows, stop), null);
+});
+
+test('describeArrivalMethod: 既知の判定方法は日本語ラベルを返す', () => {
+  assert.equal(describeArrivalMethod('vector').label, 'ベクトル判定');
+  assert.equal(describeArrivalMethod('nearby').label, '付近経由');
+  assert.equal(describeArrivalMethod('manual').label, '手動確定');
+  assert.ok(describeArrivalMethod('interpolated').description.length > 0);
+});
+
+test('describeArrivalMethod: 未知値・null はフォールバックする', () => {
+  assert.equal(describeArrivalMethod(null).label, '記録なし');
+  assert.equal(describeArrivalMethod('なにか未知の値').label, 'なにか未知の値');
+  assert.equal(describeArrivalMethod('なにか未知の値').description, '');
 });

@@ -258,3 +258,20 @@ summary.list-none::-webkit-details-marker {
 #rs-advanced[open] .rs-adv-close {
   display: inline;
 }
+
+/* ==========================================================
+   マップ画面（バスマップ #map・バス停マップ #stopmap）の地図キャンバス
+   スマートフォンでできるだけ大きく地図を見せたいので、固定の 24rem では
+   なく画面の高さに追従させる。正方形にはこだわらず縦長で構わない。
+   - height は dvh 非対応ブラウザ向けに vh 版・固定値の順でフォールバックする。
+   - 差し引く 13.5rem はヘッダー・見出し・ステータス帯・下部ナビ等の実測概算。
+   - 極端に縦長の端末や大画面PCで間延びしないよう min/max を設ける。
+   ========================================================== */
+.map-canvas {
+  width: 100%;
+  height: 24rem;
+  height: calc(100vh - 13.5rem);
+  height: calc(100dvh - 13.5rem);
+  min-height: 22rem;
+  max-height: 46rem;
+}

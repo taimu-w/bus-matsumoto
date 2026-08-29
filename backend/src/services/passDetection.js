@@ -4,7 +4,7 @@
 // 担当車両・候補車両を区別せず、有効な割り当てすべてに対して同じ処理を行う（仕様書 9）。
 // 判定アルゴリズム本体（循環線対策・巻き戻り防止・重複解消・欠落補完）は
 // 従来のまま変更していない（仕様書 14）。
-//   ① 直近の到着済バス停インデックスから4つ先までしか探索しない
+//   ① 直近の到着済バス停インデックスから6つ先までしか探索しない
 //   ② 始発時刻から一定時間以内は、便全体の後半80%のバス停を候補から除外する。
 //      除外時間は固定値ではなく、その便の時刻表上の所要時間（終着予定時刻－始発予定時刻）の
 //      50%を便ごとに動的に算出する（例: 所要20分の便なら10分、40分の便なら20分）。
@@ -38,11 +38,11 @@
 // バス停通過から到着確定までにタイムラグがある。これを短縮するため、離脱判定とは別に
 // 「GPSの移動がバス停を挟んで反対側へ抜けた」ことを直接検知する補助判定を追加する。
 // 対象は「まだ到着済になっていない次の1停留所」1件のみ（findNextUnarrivedStop）。
-// 循環線対策①（passStepEntryのlastArrivedIdx+4先までの探索）とは無関係で、そちらの
+// 循環線対策①（passStepEntryのlastArrivedIdx+6先までの探索）とは無関係で、そちらの
 // 探索範囲・ロジックは変更しない。
 //   ・過去位置P1・現在位置P2（同一assignmentのGPSログを時系列で隣接する2点）が、
-//     ①P1-P2間の距離が10〜250m、②P1・P2ともに対象バス停から500m以内、
-//     ③P1またはP2のどちらかが300m以内、④線分P1-P2と対象バス停の最短距離が50m以内、
+//     ①P1-P2間の距離が10〜700m、②P1・P2ともに対象バス停から600m以内、
+//     ③P1またはP2のどちらかが500m以内、④線分P1-P2と対象バス停の最短距離が100m以内、
 //     ⑤対象バス停を挟んでP1とP2が反対側にいる、をすべて満たした場合のみ到着確定する
 //     （evaluateVectorCrossing）。⑤の判定は、対象バス停を原点とする局所平面座標での
 //     P1・P2それぞれの位置ベクトル（＝S→P1、S→P2）の内積が負であること＝符号反転＝
@@ -75,13 +75,13 @@ const EARLY_EXCLUSION_FALLBACK_MIN = 20;
 // P1-P2間の距離がこの範囲外の場合は判定しない（近すぎる＝停車中等のノイズ、
 // 遠すぎる＝GPS途絶やフィード欠測による飛びの可能性があるため）。
 const VECTOR_STEP_MIN_METERS = 10;
-const VECTOR_STEP_MAX_METERS = 250;
+const VECTOR_STEP_MAX_METERS = 700;
 // P1・P2ともにこの距離以内であること（大きく外れた無関係な移動を除外する）。
-const VECTOR_STOP_RANGE_METERS = 500;
+const VECTOR_STOP_RANGE_METERS = 600;
 // P1またはP2のどちらかがこの距離以内であること（バス停に十分近づいた移動に限定する）。
-const VECTOR_STOP_CLOSE_METERS = 300;
+const VECTOR_STOP_CLOSE_METERS = 500;
 // 線分P1-P2と対象バス停の最短距離がこの距離以内であること。
-const VECTOR_SEGMENT_DISTANCE_METERS = 50;
+const VECTOR_SEGMENT_DISTANCE_METERS = 100;
 
 /**
  * 2つの"H:mm"由来の分数の差（a - b）を、日跨ぎを考慮して正規化する。
@@ -219,8 +219,8 @@ function passStepEntry(assignment, stopMaster, gpsRows, radiusMeters, etaByStopI
       // 【巻き戻り防止】すでに通過した（またはこのバッチ内で通過判定が出た）バス停は除外
       if (stop.seq_order <= currentMaxIdx) continue;
 
-      // 【循環線対策①】探索範囲の制限（確定している直近バス停の4つ先まで）
-      if (lastArrivedIdx !== -1 && stop.seq_order > lastArrivedIdx + 4) continue;
+      // 【循環線対策①】探索範囲の制限（確定している直近バス停の6つ先まで）
+      if (lastArrivedIdx !== -1 && stop.seq_order > lastArrivedIdx + 6) continue;
 
       // 【循環線対策②】初期の誤判定防止（始発からearlyExclusionMin分以内は後半80%を除外）
       if (!Number.isNaN(minSinceStart) && minSinceStart < earlyExclusionMin && stop.seq_order / totalStops > 0.8) continue;
@@ -388,7 +388,15 @@ function passStepConfirm(nearbyStops, gpsRows, marginMeters) {
     }
 
     if (confirmedActualTime) {
-      results.push({ type: 'confirm', stopId: stop.stopId, seqOrder: stop.seqOrder, actualTime: confirmedActualTime });
+      results.push({
+        type: 'confirm',
+        stopId: stop.stopId,
+        seqOrder: stop.seqOrder,
+        actualTime: confirmedActualTime,
+        // 到着判定の根拠（arrival_evidence用）：最接近を観測した距離とそのGPS時刻。
+        minDist: currentMinDist,
+        minGpsTime: currentMinGpsTime
+      });
     } else if (currentMinDist !== stop.minDist) {
       results.push({
         type: 'refine',
@@ -407,7 +415,7 @@ function passStepConfirm(nearbyStops, gpsRows, marginMeters) {
  * 【ベクトル判定の対象選定】まだ「到着済」になっていない次の1停留所だけを返す（純粋関数）。
  * stopMasterはseq_order昇順であることが前提（getStopMasterのORDER BY seq_order ASCで保証）。
  *
- * passStepEntryの「lastArrivedIdx+4先まで」の探索とは別の独立したロジックであり、
+ * passStepEntryの「lastArrivedIdx+6先まで」の探索とは別の独立したロジックであり、
  * 複数候補ではなく単一の対象（DB確定済みの最後の到着済バス停の直後の1停留所）だけを返す。
  * 該当する停留所がない場合（全停留所が到着済＝実質終点到達済み）はnullを返す。
  *
@@ -545,7 +553,8 @@ function findVectorConfirmation(gpsRows, stop) {
  */
 async function promoteStuckNearbyStops(client, assignmentId) {
   const rows = await client.query(
-    `SELECT stop_id, seq_order, status, nearby_min_distance_gps_time FROM trip_stop_progress
+    `SELECT stop_id, seq_order, status, nearby_min_distance_gps_time, nearby_min_distance_meters
+     FROM trip_stop_progress
      WHERE assignment_id = $1 ORDER BY seq_order ASC`,
     [assignmentId]
   );
@@ -564,9 +573,19 @@ async function promoteStuckNearbyStops(client, assignmentId) {
 
     await client.query(
       `UPDATE trip_stop_progress
-       SET status = '到着済', actual_time = $1, interpolated = FALSE
+       SET status = '到着済', actual_time = $1, interpolated = FALSE,
+           arrival_method = 'promoted', arrival_evidence = $4
        WHERE assignment_id = $2 AND stop_id = $3 AND status = '付近'`,
-      [r.nearby_min_distance_gps_time, assignmentId, r.stop_id]
+      [
+        r.nearby_min_distance_gps_time,
+        assignmentId,
+        r.stop_id,
+        {
+          minDistanceMeters: r.nearby_min_distance_meters,
+          gpsTime: r.nearby_min_distance_gps_time,
+          trigger: 'より先のバス停が到着済のため付近状態から遡及昇格'
+        }
+      ]
     );
     await client.query(
       `UPDATE trip_vehicle_assignments SET last_arrived_seq = GREATEST(last_arrived_seq, $1) WHERE id = $2`,
@@ -619,14 +638,241 @@ async function passInterpolate(client, assignmentId) {
       const timeStr = minutesToTimeStr(interpolatedMins);
       await client.query(
         `UPDATE trip_stop_progress
-         SET status = '到着済', actual_time = $1, interpolated = TRUE
+         SET status = '到着済', actual_time = $1, interpolated = TRUE,
+             arrival_method = 'interpolated', arrival_evidence = $4
          WHERE assignment_id = $2 AND stop_id = $3`,
-        [timeStr, assignmentId, target.stop_id]
+        [
+          timeStr,
+          assignmentId,
+          target.stop_id,
+          {
+            trigger: 'GPS途絶などで通過検知が飛んだ区間を前後の到着実績から線形補間',
+            fromSeqOrder: prev.seqOrder,
+            fromActualTime: minutesToTimeStr(prev.mins),
+            toSeqOrder: next.seqOrder,
+            toActualTime: minutesToTimeStr(next.mins)
+          }
+        ]
       );
       filled++;
     }
   }
   return promoted + filled;
+}
+
+/**
+ * 1件の割り当てに対する通過判定処理本体（①付近入り→②到着確定→③ベクトル判定→欠落補完）。
+ * pass()のループ本体を切り出したもの。freshnessMinをnull/undefinedにすると「直近◯分以内」の
+ * 絞り込みを行わず、windowStart（始発時刻の候補判定ウィンドウ分だけ前）〜現在までの
+ * 全GPS履歴を対象にする（手動紐づけ直後のキャッチアップ用。GPSログ自体は車両単位で
+ * 割り当てと無関係に記録され続けているため、途中から紐づけても既存ログをそのまま使える）。
+ */
+async function processAssignmentPass(client, assignment, { radiusMeters, marginMeters, gpsWindowMin, freshnessMin }) {
+  const result = { nearby: 0, passed: 0, interpolated: 0, vectorConfirmed: 0 };
+
+  const stopMaster = await getStopMaster(client, assignment.assignment_id);
+  if (stopMaster.length === 0) return result;
+
+  // この割り当てでまだ消費していないGPSログ。
+  // 「どのGPSを処理済みか」は車両ではなく割り当てごとに管理する必要がある
+  // （1台の車両が複数便の候補になり得るため）。
+  const windowStart = new Date(new Date(assignment.start_at).getTime() - gpsWindowMin * 60 * 1000);
+  const freshnessClause = freshnessMin != null ? `AND g.gps_time_ts >= now() - ($3::int * INTERVAL '1 minute')` : '';
+  const gpsRes = await client.query(
+    `SELECT g.id, g.gps_time, g.gps_time_ts, g.lat, g.lon
+     FROM vehicle_gps_log g
+     WHERE g.vehicle_id = $1
+       AND g.gps_time_ts >= $2
+       ${freshnessClause}
+       AND NOT EXISTS (
+         SELECT 1 FROM trip_gps_matches m
+         WHERE m.assignment_id = ${freshnessMin != null ? '$4' : '$3'} AND m.gps_log_id = g.id
+       )
+     ORDER BY g.gps_time_ts ASC`,
+    freshnessMin != null
+      ? [assignment.vehicle_id, windowStart, freshnessMin, assignment.assignment_id]
+      : [assignment.vehicle_id, windowStart, assignment.assignment_id]
+  );
+
+  if (gpsRes.rows.length === 0) {
+    result.interpolated += await passInterpolate(client, assignment.assignment_id);
+    return result;
+  }
+
+  // 【時間制約(ETA)】DBに保存済みのETA（前回のパイプライン実行分）を読み取る。
+  // ここで読むのは必ず「今回のpass()より前」に確定した値であり、今回のpass()の
+  // 結果を使って計算される今回のETA（パイプライン⑧）とは循環依存しない。
+  const etaByStopId = await getEtaMap(client, assignment.assignment_id);
+
+  // --- ① 付近入り(entry): 判定アルゴリズム本体(①②③)は従来のまま ---
+  const tentative = passStepEntry(assignment, stopMaster, gpsRes.rows, radiusMeters, etaByStopId);
+  const kept = passStep2Dedup(tentative, stopMaster);
+
+  for (const m of kept) {
+    await client.query('BEGIN');
+    try {
+      await client.query(
+        `INSERT INTO trip_gps_matches (assignment_id, gps_log_id, stop_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (assignment_id, gps_log_id) DO NOTHING`,
+        [assignment.assignment_id, m.gpsRowId, m.stopId]
+      );
+      await client.query(
+        `UPDATE trip_stop_progress
+         SET status = '付近',
+             nearby_min_distance_meters = $1,
+             nearby_min_distance_gps_time = $2,
+             nearby_min_distance_gps_time_ts = $3
+         WHERE assignment_id = $4 AND stop_id = $5 AND status NOT IN ('到着済', '付近')`,
+        [m.dist, m.gpsTime, m.gpsTimeTs, assignment.assignment_id, m.stopId]
+      );
+      await client.query(
+        `UPDATE trip_vehicle_assignments
+         SET last_arrived_seq = GREATEST(last_arrived_seq, $1)
+         WHERE id = $2`,
+        [m.seqOrder, assignment.assignment_id]
+      );
+      await client.query('COMMIT');
+      result.nearby++;
+      console.log(
+        `[pass] 付近入り: 便=${assignment.start_time}発 carId=${assignment.car_id} ` +
+        `バス停=${m.stopName} 距離=${Math.round(m.dist)}m 時刻=${m.gpsTime}`
+      );
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error(`[pass] エラー carId=${assignment.car_id}:`, err.message);
+    }
+  }
+
+  // 重複除去で外れたGPSログは trip_gps_matches に記録しないため、
+  // 次回のバッチで自動的に再評価される（旧実装の matched_label 戻し処理に相当）。
+
+  // --- ② 付近→到着済確認(confirm): 最小距離からの離脱を検知して到着確定する ---
+  // GPS点はここではtrip_gps_matchesに消費しないため、未消費のまま次バッチでも
+  // 再評価され続ける（最小距離の更新・離脱判定を継続するため意図的）。
+  const nearbyStops = buildNearbyTrackingState(stopMaster, kept);
+  const confirmations = passStepConfirm(nearbyStops, gpsRes.rows, marginMeters);
+
+  for (const c of confirmations) {
+    if (c.type === 'confirm') {
+      await client.query('BEGIN');
+      try {
+        await client.query(
+          `UPDATE trip_stop_progress
+           SET status = '到着済', actual_time = $1,
+               arrival_method = 'nearby', arrival_evidence = $4
+           WHERE assignment_id = $2 AND stop_id = $3 AND status = '付近'`,
+          [
+            c.actualTime,
+            assignment.assignment_id,
+            c.stopId,
+            {
+              minDistanceMeters: c.minDist,
+              gpsTime: c.minGpsTime,
+              marginMeters,
+              trigger: `最接近後に +${marginMeters}m 離れたため到着確定`
+            }
+          ]
+        );
+        await client.query(
+          `UPDATE trip_vehicle_assignments
+           SET last_arrived_seq = GREATEST(last_arrived_seq, $1)
+           WHERE id = $2`,
+          [c.seqOrder, assignment.assignment_id]
+        );
+        await client.query('COMMIT');
+        result.passed++;
+        console.log(
+          `[pass] 到着確定（付近経由）: 便=${assignment.start_time}発 carId=${assignment.car_id} ` +
+          `stopId=${c.stopId} 時刻=${c.actualTime} 最小距離=${c.minDist != null ? Math.round(c.minDist) : '?'}m`
+        );
+      } catch (err) {
+        await client.query('ROLLBACK');
+        console.error(`[pass] エラー carId=${assignment.car_id}:`, err.message);
+      }
+    } else {
+      // refine: 最小距離の更新のみ。まだ到着未確定なのでトランザクションは不要。
+      await client.query(
+        `UPDATE trip_stop_progress
+         SET nearby_min_distance_meters = $1,
+             nearby_min_distance_gps_time = $2,
+             nearby_min_distance_gps_time_ts = $3
+         WHERE assignment_id = $4 AND stop_id = $5 AND status = '付近'`,
+        [c.minDist, c.minGpsTime, c.minGpsTimeTs, assignment.assignment_id, c.stopId]
+      );
+    }
+  }
+
+  // --- ③ ベクトル通過判定(到着判定高速化): 従来の到着判定はそのまま①②で動作させたうえで、
+  // 「まだ到着済になっていない次の1停留所」だけを対象に、より早く到着確定できないかを追加で判定する。
+  // ②で今回のバッチ内で既に到着確定済みならスキップする（二重確定・二重ログの防止）。
+  const confirmedThisBatch = new Set(
+    confirmations.filter((c) => c.type === 'confirm').map((c) => c.stopId)
+  );
+  const confirmedSeqThisBatch = confirmations
+    .filter((c) => c.type === 'confirm')
+    .map((c) => c.seqOrder);
+  const vectorTargetStop = findNextUnarrivedStop(stopMaster, confirmedSeqThisBatch);
+  if (vectorTargetStop && !confirmedThisBatch.has(vectorTargetStop.stop_id)) {
+    const vectorMatch = findVectorConfirmation(gpsRes.rows, vectorTargetStop);
+    if (vectorMatch) {
+      // 到着判定の根拠（arrival_evidence用）。ログに出しているのと同じ値を残す
+      // （前後GPS点の座標・時刻／P1-P2距離／各点とバス停の距離／線分とバス停の距離／内積／線分内位置t）。
+      const d = vectorMatch.debug;
+      const vectorEvidence = {
+        stepDist: d.stepDist,
+        distP1Stop: d.distP1Stop,
+        distP2Stop: d.distP2Stop,
+        segDist: d.segDist,
+        dot: d.dot,
+        t: d.t,
+        p1: { lat: vectorMatch.p1.lat, lon: vectorMatch.p1.lon, gpsTime: vectorMatch.p1.gps_time },
+        p2: { lat: vectorMatch.p2.lat, lon: vectorMatch.p2.lon, gpsTime: vectorMatch.p2.gps_time }
+      };
+      await client.query('BEGIN');
+      try {
+        const upd = await client.query(
+          `UPDATE trip_stop_progress
+           SET status = '到着済', actual_time = $1,
+               arrival_method = 'vector', arrival_evidence = $4
+           WHERE assignment_id = $2 AND stop_id = $3 AND status != '到着済'`,
+          [vectorMatch.actualTime, assignment.assignment_id, vectorMatch.stopId, vectorEvidence]
+        );
+        if (upd.rowCount > 0) {
+          await client.query(
+            `UPDATE trip_vehicle_assignments
+             SET last_arrived_seq = GREATEST(last_arrived_seq, $1)
+             WHERE id = $2`,
+            [vectorMatch.seqOrder, assignment.assignment_id]
+          );
+        }
+        await client.query('COMMIT');
+        if (upd.rowCount > 0) {
+          result.passed++;
+          result.vectorConfirmed++;
+          console.log(
+            `[pass] 到着確定（ベクトル判定）: 便=${assignment.start_time}発 carId=${assignment.car_id} ` +
+            `バス停=${vectorMatch.stopName} stopId=${vectorMatch.stopId} 時刻=${vectorMatch.actualTime} ` +
+            `stepDist=${Math.round(d.stepDist)}m distP1=${Math.round(d.distP1Stop)}m distP2=${Math.round(d.distP2Stop)}m ` +
+            `segDist=${Math.round(d.segDist)}m dot=${Math.round(d.dot)} t=${d.t.toFixed(2)} ` +
+            `P1=(${vectorMatch.p1.lat},${vectorMatch.p1.lon},${vectorMatch.p1.gps_time}) ` +
+            `P2=(${vectorMatch.p2.lat},${vectorMatch.p2.lon},${vectorMatch.p2.gps_time})`
+          );
+        }
+      } catch (err) {
+        await client.query('ROLLBACK');
+        console.error(`[pass] エラー carId=${assignment.car_id}:`, err.message);
+      }
+    }
+  }
+
+  const filled = await passInterpolate(client, assignment.assignment_id);
+  result.interpolated += filled;
+  if (filled > 0) {
+    console.log(`[pass] 欠落補完: 便=${assignment.start_time}発 carId=${assignment.car_id} 件数=${filled}`);
+  }
+
+  return result;
 }
 
 async function pass() {
@@ -644,180 +890,16 @@ async function pass() {
     const assignments = await getActiveAssignments(client);
 
     for (const assignment of assignments) {
-      const stopMaster = await getStopMaster(client, assignment.assignment_id);
-      if (stopMaster.length === 0) continue;
-
-      // この割り当てでまだ消費していないGPSログ。
-      // 「どのGPSを処理済みか」は車両ではなく割り当てごとに管理する必要がある
-      // （1台の車両が複数便の候補になり得るため）。
-      const windowStart = new Date(new Date(assignment.start_at).getTime() - gpsWindowMin * 60 * 1000);
-      const gpsRes = await client.query(
-        `SELECT g.id, g.gps_time, g.gps_time_ts, g.lat, g.lon
-         FROM vehicle_gps_log g
-         WHERE g.vehicle_id = $1
-           AND g.gps_time_ts >= $2
-           AND g.gps_time_ts >= now() - ($3::int * INTERVAL '1 minute')
-           AND NOT EXISTS (
-             SELECT 1 FROM trip_gps_matches m
-             WHERE m.assignment_id = $4 AND m.gps_log_id = g.id
-           )
-         ORDER BY g.gps_time_ts ASC`,
-        [assignment.vehicle_id, windowStart, freshnessMin, assignment.assignment_id]
-      );
-
-      if (gpsRes.rows.length === 0) {
-        await passInterpolate(client, assignment.assignment_id);
-        continue;
-      }
-
-      // 【時間制約(ETA)】DBに保存済みのETA（前回のパイプライン実行分）を読み取る。
-      // ここで読むのは必ず「今回のpass()より前」に確定した値であり、今回のpass()の
-      // 結果を使って計算される今回のETA（パイプライン⑧）とは循環依存しない。
-      const etaByStopId = await getEtaMap(client, assignment.assignment_id);
-
-      // --- ① 付近入り(entry): 判定アルゴリズム本体(①②③)は従来のまま ---
-      const tentative = passStepEntry(assignment, stopMaster, gpsRes.rows, radiusMeters, etaByStopId);
-      const kept = passStep2Dedup(tentative, stopMaster);
-
-      for (const m of kept) {
-        await client.query('BEGIN');
-        try {
-          await client.query(
-            `INSERT INTO trip_gps_matches (assignment_id, gps_log_id, stop_id)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (assignment_id, gps_log_id) DO NOTHING`,
-            [assignment.assignment_id, m.gpsRowId, m.stopId]
-          );
-          await client.query(
-            `UPDATE trip_stop_progress
-             SET status = '付近',
-                 nearby_min_distance_meters = $1,
-                 nearby_min_distance_gps_time = $2,
-                 nearby_min_distance_gps_time_ts = $3
-             WHERE assignment_id = $4 AND stop_id = $5 AND status NOT IN ('到着済', '付近')`,
-            [m.dist, m.gpsTime, m.gpsTimeTs, assignment.assignment_id, m.stopId]
-          );
-          await client.query(
-            `UPDATE trip_vehicle_assignments
-             SET last_arrived_seq = GREATEST(last_arrived_seq, $1)
-             WHERE id = $2`,
-            [m.seqOrder, assignment.assignment_id]
-          );
-          await client.query('COMMIT');
-          totalNearby++;
-          console.log(
-            `[pass] 付近入り: 便=${assignment.start_time}発 carId=${assignment.car_id} ` +
-            `バス停=${m.stopName} 距離=${Math.round(m.dist)}m 時刻=${m.gpsTime}`
-          );
-        } catch (err) {
-          await client.query('ROLLBACK');
-          console.error(`[pass] エラー carId=${assignment.car_id}:`, err.message);
-        }
-      }
-
-      // 重複除去で外れたGPSログは trip_gps_matches に記録しないため、
-      // 次回のバッチで自動的に再評価される（旧実装の matched_label 戻し処理に相当）。
-
-      // --- ② 付近→到着済確認(confirm): 最小距離からの離脱を検知して到着確定する ---
-      // GPS点はここではtrip_gps_matchesに消費しないため、未消費のまま次バッチでも
-      // 再評価され続ける（最小距離の更新・離脱判定を継続するため意図的）。
-      const nearbyStops = buildNearbyTrackingState(stopMaster, kept);
-      const confirmations = passStepConfirm(nearbyStops, gpsRes.rows, marginMeters);
-
-      for (const c of confirmations) {
-        if (c.type === 'confirm') {
-          await client.query('BEGIN');
-          try {
-            await client.query(
-              `UPDATE trip_stop_progress
-               SET status = '到着済', actual_time = $1
-               WHERE assignment_id = $2 AND stop_id = $3 AND status = '付近'`,
-              [c.actualTime, assignment.assignment_id, c.stopId]
-            );
-            await client.query(
-              `UPDATE trip_vehicle_assignments
-               SET last_arrived_seq = GREATEST(last_arrived_seq, $1)
-               WHERE id = $2`,
-              [c.seqOrder, assignment.assignment_id]
-            );
-            await client.query('COMMIT');
-            totalPassed++;
-            console.log(
-              `[pass] 到着確定（付近経由）: 便=${assignment.start_time}発 carId=${assignment.car_id} ` +
-              `stopId=${c.stopId} 時刻=${c.actualTime}`
-            );
-          } catch (err) {
-            await client.query('ROLLBACK');
-            console.error(`[pass] エラー carId=${assignment.car_id}:`, err.message);
-          }
-        } else {
-          // refine: 最小距離の更新のみ。まだ到着未確定なのでトランザクションは不要。
-          await client.query(
-            `UPDATE trip_stop_progress
-             SET nearby_min_distance_meters = $1,
-                 nearby_min_distance_gps_time = $2,
-                 nearby_min_distance_gps_time_ts = $3
-             WHERE assignment_id = $4 AND stop_id = $5 AND status = '付近'`,
-            [c.minDist, c.minGpsTime, c.minGpsTimeTs, assignment.assignment_id, c.stopId]
-          );
-        }
-      }
-
-      // --- ③ ベクトル通過判定(到着判定高速化): 従来の到着判定はそのまま①②で動作させたうえで、
-      // 「まだ到着済になっていない次の1停留所」だけを対象に、より早く到着確定できないかを追加で判定する。
-      // ②で今回のバッチ内で既に到着確定済みならスキップする（二重確定・二重ログの防止）。
-      const confirmedThisBatch = new Set(
-        confirmations.filter((c) => c.type === 'confirm').map((c) => c.stopId)
-      );
-      const confirmedSeqThisBatch = confirmations
-        .filter((c) => c.type === 'confirm')
-        .map((c) => c.seqOrder);
-      const vectorTargetStop = findNextUnarrivedStop(stopMaster, confirmedSeqThisBatch);
-      if (vectorTargetStop && !confirmedThisBatch.has(vectorTargetStop.stop_id)) {
-        const vectorMatch = findVectorConfirmation(gpsRes.rows, vectorTargetStop);
-        if (vectorMatch) {
-          await client.query('BEGIN');
-          try {
-            const upd = await client.query(
-              `UPDATE trip_stop_progress
-               SET status = '到着済', actual_time = $1
-               WHERE assignment_id = $2 AND stop_id = $3 AND status != '到着済'`,
-              [vectorMatch.actualTime, assignment.assignment_id, vectorMatch.stopId]
-            );
-            if (upd.rowCount > 0) {
-              await client.query(
-                `UPDATE trip_vehicle_assignments
-                 SET last_arrived_seq = GREATEST(last_arrived_seq, $1)
-                 WHERE id = $2`,
-                [vectorMatch.seqOrder, assignment.assignment_id]
-              );
-            }
-            await client.query('COMMIT');
-            if (upd.rowCount > 0) {
-              totalPassed++;
-              totalVectorConfirmed++;
-              const d = vectorMatch.debug;
-              console.log(
-                `[pass] 到着確定（ベクトル判定）: 便=${assignment.start_time}発 carId=${assignment.car_id} ` +
-                `バス停=${vectorMatch.stopName} stopId=${vectorMatch.stopId} 時刻=${vectorMatch.actualTime} ` +
-                `stepDist=${Math.round(d.stepDist)}m distP1=${Math.round(d.distP1Stop)}m distP2=${Math.round(d.distP2Stop)}m ` +
-                `segDist=${Math.round(d.segDist)}m dot=${Math.round(d.dot)} t=${d.t.toFixed(2)} ` +
-                `P1=(${vectorMatch.p1.lat},${vectorMatch.p1.lon},${vectorMatch.p1.gps_time}) ` +
-                `P2=(${vectorMatch.p2.lat},${vectorMatch.p2.lon},${vectorMatch.p2.gps_time})`
-              );
-            }
-          } catch (err) {
-            await client.query('ROLLBACK');
-            console.error(`[pass] エラー carId=${assignment.car_id}:`, err.message);
-          }
-        }
-      }
-
-      const filled = await passInterpolate(client, assignment.assignment_id);
-      totalInterpolated += filled;
-      if (filled > 0) {
-        console.log(`[pass] 欠落補完: 便=${assignment.start_time}発 carId=${assignment.car_id} 件数=${filled}`);
-      }
+      const result = await processAssignmentPass(client, assignment, {
+        radiusMeters,
+        marginMeters,
+        gpsWindowMin,
+        freshnessMin
+      });
+      totalNearby += result.nearby;
+      totalPassed += result.passed;
+      totalInterpolated += result.interpolated;
+      totalVectorConfirmed += result.vectorConfirmed;
     }
   } finally {
     client.release();
@@ -826,12 +908,32 @@ async function pass() {
   return { totalNearby, totalPassed, totalInterpolated, totalVectorConfirmed };
 }
 
+// trip_stop_progress.arrival_method の管理画面向け日本語説明。
+// 「なぜこのバス停が到着済になったか」をバス停別詳細モーダルに表示するために使う
+// （etaPredictor.js の describeSource() と同じ流儀）。
+const ARRIVAL_METHOD_INFO = {
+  vector: { label: 'ベクトル判定', description: '前後のGPS点がバス停を挟んで反対側へ抜けたことを検知して到着確定' },
+  nearby: { label: '付近経由', description: 'バス停付近で最接近を観測後、離脱（遠ざかり）を検知して到着確定' },
+  promoted: { label: '付近スタック昇格', description: 'より先のバス停が到着済のため、付近状態の観測値から遡及的に到着確定' },
+  interpolated: { label: '線形補間', description: '前後の到着実績から所要時間を按分して推定（GPS途絶区間の補完）' },
+  manual: { label: '手動確定', description: '管理画面で到着判定時刻を手動入力' },
+  start: { label: '始発バス停', description: '始発時刻の時点で始発バス停付近にいた観測事実をそのまま実績化' },
+  finish: { label: '運行終了時', description: '割り当て終了時の強制昇格、またはGPS途絶時の終点到着救済判定' }
+};
+
+function describeArrivalMethod(method) {
+  return ARRIVAL_METHOD_INFO[method] || { label: method ? String(method) : '記録なし', description: '' };
+}
+
 module.exports = {
   pass,
+  processAssignmentPass,
   shouldConfirmDeparture,
   passStepConfirm,
   buildNearbyTrackingState,
   findNextUnarrivedStop,
   evaluateVectorCrossing,
-  findVectorConfirmation
+  findVectorConfirmation,
+  ARRIVAL_METHOD_INFO,
+  describeArrivalMethod
 };

@@ -55,3 +55,108 @@ input:focus, select:focus, textarea:focus {
 /* セクション切替時に軽いフェードで表示 */
 .section:not(.hidden) { animation: section-fade .18s ease; }
 @keyframes section-fade { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ==========================================================
+   運行ダッシュボード（地図）
+   マーカーのDOMはLeafletが動的に挿入するため、Tailwind(CDN)の
+   クラス生成に依存せずここで直接スタイルを定義する。
+   .bus-marker-* は frontend/style.css の利用者向けバスマップと同じ見た目に揃えている。
+   ========================================================== */
+
+.dashboard-map-shell {
+  display: flex;
+  height: calc(100vh - 110px);
+  min-height: 480px;
+}
+
+/* 5分以上遅延の便数タイルをタップして絞込中であることを示す強調表示 */
+#dashboard-stats-bar [data-role="stat-delayed"].is-active {
+  border-color: #dc2626;
+  box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.25);
+}
+
+/* 当日の状況：遅延メッシュ地図（単体セクション内の固定高さマップ。分割パネルのdashboard-mapとは別） */
+.delay-mesh-map {
+  height: 480px;
+}
+.mesh-cell-tooltip {
+  font-weight: 700;
+  font-size: 11px;
+}
+
+.mode-toggle-btn {
+  color: #475569;
+  transition: background-color .15s ease, color .15s ease;
+}
+.mode-toggle-btn:hover { background-color: #f1f5f9; }
+.mode-toggle-btn.active { background-color: #1e3a8a; color: #ffffff; }
+
+.bus-marker-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  pointer-events: none;
+}
+
+.bus-marker-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9999px;
+  border: 2px solid #ffffff;
+  box-sizing: border-box;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.35);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.bus-marker-label {
+  margin-top: 2px;
+  max-width: 92px;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.35);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 選択中のバスを他と区別するための強調リング */
+.bus-marker-body.is-selected {
+  box-shadow: 0 0 0 3px #2563eb, 0 2px 6px rgba(15, 23, 42, 0.35);
+}
+
+/* その便が停車予定の全バス停（状態で配色：到着済=緑、付近=amber、未到着=既定は路線色） */
+.stop-marker {
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  border: 2px solid #ffffff;
+  box-sizing: border-box;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.4);
+}
+.stop-marker.arrived { background: #16a34a; }
+.stop-marker.nearby { background: #d97706; }
+.stop-marker.pending { background: #64748b; }
+
+/* その車両がこの便を担当してから記録された位置情報の履歴点 */
+.history-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: #2563eb;
+  border: 1px solid #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.35);
+}
+
+/* リアルタイム時刻表：バス停の行はタップで詳細モーダル（到着根拠 / ETA予測根拠 / ETA推移）を開く */
+.dashboard-stop-row { cursor: pointer; }
+.dashboard-stop-row:hover { background: #f8fafc; }
+.dashboard-stop-row [data-role="actual-time-cell"] { cursor: auto; }

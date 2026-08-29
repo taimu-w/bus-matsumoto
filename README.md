@@ -160,7 +160,7 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 
 - `frontend/index.html` + `frontend/app.js`: 利用者向け運行状況画面。`POLL_MS`（20秒）間隔で`/api/buses`等をポーリング、お気に入りはlocalStorage、SPAルーティングの入口。バスマップ（`#/busmap`、Leaflet + OpenStreetMap）も含む。
 - `frontend/timetable.js`（時刻表検索）・`frontend/busstop.js`（バス停検索）・`frontend/stopmap.js`（バス停マップ）・`frontend/routesearch.js`（経路検索）は、いずれもハッシュではなくパス（History API）でルーティングします。経路検索は「経路一覧（`/routesearch?…`）→ 経路詳細（`…&journey=N`）」の2階層で、乗り換え時刻や通過バス停は詳細側に表示します（[docs/経路検索機能_改善仕様書.md](docs/経路検索機能_改善仕様書.md) 6.3）。検索フォームには折りたたみの「詳細設定」があり、乗り換え回数（「乗り換えなし」など）・徒歩での乗り継ぎの有無・乗り換えの余裕時間を指定できます。**既定は従来どおりの条件**で、既定値の項目はURLにも載せません（同 5.8・6.2）。
-- `frontend/admin.html`: Basic認証で保護された管理画面（運行ダッシュボード・便の割当監視・通過判定・異常アラート・GTFS/位置情報フィード監視・API稼働監視・ジョブ監視・お知らせ編集・祝日カレンダー・外部IDマッピング・観光スポット編集・直近車両位置）。
+- `frontend/admin.html`: Basic認証で保護された管理画面（運行ダッシュボード・便の割当監視・予測精度の監視・当日の状況・異常アラート・GTFS/位置情報フィード監視・API稼働監視・ジョブ監視・お知らせ編集・祝日カレンダー・外部IDマッピング・観光スポット編集）。通過判定の状態・ETA予測根拠・直近車両位置は運行ダッシュボードに統合済み。
 - `frontend/style.css`: 共通スタイル。
 
 > **`index.html`の静的ファイル参照は必ず絶対パス（`/app.js`など）にすること。** 時刻表検索は`/timetable/stops/{stop_id}`のような階層のあるURLを使うため、相対パスだと`/timetable/stops/app.js`を読みに行き、サーバーのSPAフォールバックがindex.htmlを返してスクリプトが一切動かなくなります（実際に踏んだ）。
@@ -183,7 +183,6 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 | `ASSIGN_SAME_PERIOD_MIN`※ | `10` | 「同時刻帯」とみなす始発時刻の差（分）。この範囲では同じ車両を担当車両として重複させない |
 | `STOP_RADIUS_METERS`※ | `120` | バス停通過判定（「付近」入り）の半径（m） |
 | `DEPARTURE_MARGIN_METERS`※ | `20` | 2段階到着判定における到着確定の離脱マージン（m）。「付近」状態のバス停から、記録済み最小距離＋この距離だけ離れたことを検知した時点で「到着済」に確定する（[pass-detection.md](docs/pass-detection.md)） |
-| `END_AREA_RADIUS_METERS`※ | `150` | 終了エリア判定の半径（m） |
 | `GPS_TIMEOUT_TERMINAL_RADIUS_METERS`※ | `300` | GPS途絶時、未到達バス停が終点のみ残っている場合の「終点到着」救済判定の半径（m） |
 | `GPS_STALE_TIMEOUT_MIN`※ | `3` | GPSがこの時間（分）以上更新されていない車両を「GPS途絶」とみなす（点検所見 H-2） |
 | `VEHICLE_MAX_AGE_MIN`※ | `120` | 割り当ての強制終了までの経過時間（分） |
@@ -197,7 +196,6 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 | `SERVICE_STATUS_POLL_INTERVAL_MIN`※再起動要 | `60` | アルピコ運行状況スクレイピングの間隔（分） |
 | `ALPICO_STATUS_URL` | - | アルピコ交通「現在の運行状況」ページのURL |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin123` | 管理画面のBasic認証情報 |
-| `YAHOO_CLIENT_ID` | - | 管理画面の住所逆引き（Yahoo!リバースジオコーダ）用APIキー |
 
 > ※印の項目は、環境変数に加えて**管理画面「運用パラメータ設定」**（`GET/PUT/DELETE /api/admin/runtime-settings`）からも編集できます。優先順位は「管理画面での上書き値(DB) > 環境変数 > コード既定値」で、管理画面で編集しなければこれまでどおり環境変数（未設定ならコード既定値）だけで動きます。定義一覧は[backend/src/config/runtimeSettingsCatalog.js](backend/src/config/runtimeSettingsCatalog.js)。「再起動要」の2項目（ポーリング間隔）は`setInterval`の間隔として起動時にしか読まれないため、管理画面で変更してもサーバー再起動まで反映されません。それ以外は次回のパイプライン実行（既定60秒間隔）までに反映されます。
 >

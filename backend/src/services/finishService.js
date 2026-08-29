@@ -2,7 +2,7 @@
 //
 // 便起点方式では、終了判定の単位は「車両」ではなく「便への割り当て(assignment)」になる。
 // 1台の車両が複数便の候補になり得るため、車両単位で終了させると他便の処理まで巻き添えになる。
-// 判定条件そのもの（終点到着・終了エリア・経過時間・GPS途絶）は従来どおり。
+// 判定条件そのもの（終点到着・経過時間・GPS途絶）は従来どおり。
 // 各閾値（半径・経過時間）は既定値こそ従来どおりだが、2026-08-21以降は
 // services/runtimeSettings.js 経由で管理画面（運用パラメータ設定）から編集できる。
 //
@@ -15,6 +15,17 @@ const { getDayOfWeek, getDayType, timeStrToMinutes } = require('../utils/time');
 const { updateSegmentStats } = require('./etaPredictor');
 const { loadHolidaySet } = require('./holidayCalendar');
 const { refreshRuntimeSettingsCache, getRuntimeSetting } = require('./runtimeSettings');
+
+// 「終点まで到達して正常に終了した」とみなす end_reason。
+// - reassignOrphanTrips() はこれらを再割り当てせずそのままクローズする。
+// - 便の割り当て監視（/api/admin/assignment-monitor）では正常終了（緑）扱いにする。
+// GPS途絶時の終点到着救済判定（条件④）で終点到達が確認できたケースも、通常の終点到着と
+// 同じ正常終了として扱い、GPS途絶（ロスト）には含めない。
+const SUCCESS_END_REASONS = new Set([
+  '最終バス停到着済',
+  '終点到着（GPS途絶時判定）',
+  '終点到着（GPS途絶時判定・付近経由）'
+]);
 
 /**
  * 車両ごとの直近GPSを一括で読み込む。
@@ -70,7 +81,13 @@ async function getUnreachedStops(client, assignmentId) {
 async function promoteStuckNearbyOnEnd(client, assignmentId) {
   const promoted = await client.query(
     `UPDATE trip_stop_progress
-     SET status = '到着済', actual_time = nearby_min_distance_gps_time, interpolated = FALSE
+     SET status = '到着済', actual_time = nearby_min_distance_gps_time, interpolated = FALSE,
+         arrival_method = 'finish',
+         arrival_evidence = jsonb_build_object(
+           'minDistanceMeters', nearby_min_distance_meters,
+           'gpsTime', nearby_min_distance_gps_time,
+           'trigger', '割り当て終了時に付近状態のまま残っていたため強制昇格'
+         )
      WHERE assignment_id = $1 AND status = '付近' AND nearby_min_distance_gps_time IS NOT NULL
      RETURNING seq_order`,
     [assignmentId]
@@ -241,9 +258,8 @@ async function finishTrips() {
   await refreshRuntimeSettingsCache();
 
   const client = await pool.connect();
-  const endRadius = getRuntimeSetting('END_AREA_RADIUS_METERS');
   // GPS途絶時、未到達バス停が終点のみの場合に「終点到着」とみなす救済判定の半径。
-  // 途絶中は測位精度が落ちている前提のため、通常の終了エリア判定(END_AREA_RADIUS_METERS)より広くとる。
+  // 途絶中は測位精度が落ちている前提のため広めにとる。
   const gpsTimeoutTerminalRadius = getRuntimeSetting('GPS_TIMEOUT_TERMINAL_RADIUS_METERS');
   const maxAgeMin = getRuntimeSetting('VEHICLE_MAX_AGE_MIN');
   // 割り当て直後の終了誤判定をブロックする保護期間
@@ -289,7 +305,7 @@ async function finishTrips() {
         let reason = '';
         const elapsedMin = (Date.now() - new Date(a.created_at).getTime()) / 60000;
 
-        // 保護期間を過ぎている場合のみ、条件①②④を評価する
+        // 保護期間を過ぎている場合のみ、条件①④を評価する
         if (elapsedMin >= protectionMin) {
           const terminal = await getAssignmentTerminal(client, a.assignment_id);
 
@@ -299,13 +315,6 @@ async function finishTrips() {
           }
 
           const gps = latestGpsByVehicle.get(a.vehicle_id);
-          if (!reason && terminal && gps) {
-            // 条件②: 直近GPSが終了エリア内か
-            const dist = haversineDistanceMeters(gps.lat, gps.lon, terminal.lat, terminal.lon);
-            if (dist <= endRadius) {
-              reason = '終了エリア到達';
-            }
-          }
 
           // 条件④: GPS更新停止（途絶）
           if (!reason && staleVehicles.has(a.vehicle_id)) {
@@ -320,7 +329,13 @@ async function finishTrips() {
                 // distToTerminalの再チェックなしでそのまま昇格させる。
                 await client.query(
                   `UPDATE trip_stop_progress
-                   SET status = '到着済', actual_time = $1, interpolated = FALSE
+                   SET status = '到着済', actual_time = $1, interpolated = FALSE,
+                       arrival_method = 'finish',
+                       arrival_evidence = jsonb_build_object(
+                         'minDistanceMeters', nearby_min_distance_meters,
+                         'gpsTime', $1::text,
+                         'trigger', 'GPS途絶時の終点到着救済判定（終点が付近まで到達済み）'
+                       )
                    WHERE assignment_id = $2 AND stop_id = $3`,
                   [terminal.nearby_min_distance_gps_time, a.assignment_id, terminal.stop_id]
                 );
@@ -335,9 +350,15 @@ async function finishTrips() {
                   if (distToTerminal <= gpsTimeoutTerminalRadius) {
                     await client.query(
                       `UPDATE trip_stop_progress
-                       SET status = '到着済', actual_time = $1, interpolated = TRUE
+                       SET status = '到着済', actual_time = $1, interpolated = TRUE,
+                           arrival_method = 'finish',
+                           arrival_evidence = jsonb_build_object(
+                             'distanceMeters', $4::double precision,
+                             'gpsTime', $1::text,
+                             'trigger', 'GPS途絶時の終点到着救済判定（未到達は終点のみ・最終GPSが終点付近）'
+                           )
                        WHERE assignment_id = $2 AND stop_id = $3`,
-                      [gps.gps_time, a.assignment_id, terminal.stop_id]
+                      [gps.gps_time, a.assignment_id, terminal.stop_id, distToTerminal]
                     );
                     reason = '終点到着（GPS途絶時判定）';
                   }
@@ -389,4 +410,4 @@ async function finishTrips() {
   return { finished };
 }
 
-module.exports = { finishTrips, closeDailyTrip };
+module.exports = { finishTrips, closeDailyTrip, endAssignment, SUCCESS_END_REASONS };

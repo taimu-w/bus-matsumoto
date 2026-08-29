@@ -501,6 +501,54 @@ async function migrate() {
       ALTER TABLE trip_stop_progress ADD COLUMN IF NOT EXISTS nearby_min_distance_gps_time_ts TIMESTAMPTZ
     `);
 
+    // ==========================================================
+    // 25. ETA予測「今日の前便実績・周辺道路実績」対応（仕様書 第9項 追加要素①②）。
+    //     combinePaceFactor()が算出する内訳を trip_arrival_predictions に保存し、
+    //     管理画面「ETA予測根拠」「当日の状況」から参照できるようにする。
+    //     新規環境ではschema.sqlのCREATE TABLEに既に含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`
+      ALTER TABLE trip_arrival_predictions ADD COLUMN IF NOT EXISTS live_factor DOUBLE PRECISION
+    `);
+    await client.query(`
+      ALTER TABLE trip_arrival_predictions ADD COLUMN IF NOT EXISTS today_previous_trip_factor DOUBLE PRECISION
+    `);
+    await client.query(`
+      ALTER TABLE trip_arrival_predictions ADD COLUMN IF NOT EXISTS today_previous_trip_samples INTEGER
+    `);
+    await client.query(`
+      ALTER TABLE trip_arrival_predictions ADD COLUMN IF NOT EXISTS nearby_factor DOUBLE PRECISION
+    `);
+    await client.query(`
+      ALTER TABLE trip_arrival_predictions ADD COLUMN IF NOT EXISTS nearby_factor_samples INTEGER
+    `);
+    await client.query(`
+      ALTER TABLE trip_arrival_predictions ADD COLUMN IF NOT EXISTS nearby_weight_mass DOUBLE PRECISION
+    `);
+    await client.query(`
+      ALTER TABLE trip_arrival_predictions ADD COLUMN IF NOT EXISTS combined_pace_factor DOUBLE PRECISION
+    `);
+
+    // 26. 上記②「周辺道路実績」が運行終了直後の割り当てもRECENTLY_ENDED_MINUTES以内なら
+    //     候補に含められるようにするための索引。新規環境ではschema.sqlに含まれているため実質no-op。
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_assignments_recently_ended
+      ON trip_vehicle_assignments(ended_at) WHERE state = 'ended'
+    `);
+
+    // ==========================================================
+    // 27. trip_stop_progress に到着判定方法(arrival_method)と判定根拠の詳細(arrival_evidence JSONB)を
+    //     追加。管理画面「運行ダッシュボード」のバス停別詳細モーダルで「なぜ到着済になったか」
+    //     （付近経由／ベクトル判定／手動 等）と、ベクトル判定の内積・線分距離などの根拠を
+    //     表示するため。新規環境ではschema.sqlのCREATE TABLEに既に含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`
+      ALTER TABLE trip_stop_progress ADD COLUMN IF NOT EXISTS arrival_method TEXT
+    `);
+    await client.query(`
+      ALTER TABLE trip_stop_progress ADD COLUMN IF NOT EXISTS arrival_evidence JSONB
+    `);
+
     await client.query('COMMIT');
     console.log('[migrate] 複数事業者対応・便起点割り当てマイグレーション完了');
   } catch (err) {

@@ -7,13 +7,59 @@
 // 補正した所要時間を積み上げて残り各バス停の到着時刻を予測する。
 // 統計データが不足する区間・便については、時刻表上の所要時間 or 単純遅延加算に
 // 段階的にフォールバックし、常に何らかの予測値を返せるようにしている。
+//
+// 【今日の前便実績・周辺道路実績によるペース補正の強化】
+// 上記のliveFactor（当該便自身の直近3区間）に加え、
+//   ①今日の前便実績: 同一路線・同方向の当日直前便が実際にどのペースで走ったか
+//   ②周辺道路実績: 対象区間の周辺500m以内を走った他の便（他路線含む）の直近実績を
+//     距離・方位・新しさで重み付けしたもの
+// を「使えるデータがある場合だけ」動的な重みで加える（getTodayPreviousTripFactor /
+// getNearbyCandidateSegments・computeNearbyFactor / combinePaceFactor）。
+// どちらも欠損時はliveFactor単独にそのまま帰着するため、データが薄い状況でも
+// 既存の挙動から後退しない設計にしてある。詳細はdocs/eta-prediction-algorithm.md参照。
 const pool = require('../config/db');
-const { timeStrToMinutes, minutesToTimeStr, getDayType, computeDelayMinutes } = require('../utils/time');
+const { timeStrToMinutes, minutesToTimeStr, getDayType, computeDelayMinutes, nowInTokyo } = require('../utils/time');
+const { haversineDistanceMeters, bearingDegrees, angleDiffDegrees } = require('../utils/geo');
 const { loadHolidaySet } = require('./holidayCalendar');
 const { getRuntimeSetting } = require('./runtimeSettings');
 
 const MIN_SAMPLES_FOR_TRUST = 3;
 const LIVE_SEGMENTS_FOR_PACE = 3; // 直近何区間の実績からペースを算出するか
+
+// ペース比率（実績÷基準）のクランプ範囲。従来liveFactor専用だったクランプを、
+// 今日の前便実績・周辺道路実績にも同じ範囲で適用する。事故・運行乱れ等で単一区間が
+// 極端な値になっても、その比率をそのままETA全体へ伝播させないための歯止め。
+const PACE_RATIO_MIN = 0.5;
+const PACE_RATIO_MAX = 2.5;
+
+function clampPaceRatio(ratio) {
+  return Math.max(PACE_RATIO_MIN, Math.min(PACE_RATIO_MAX, ratio));
+}
+
+// 新シグナル（今日の前便実績・周辺道路実績）を採用する最低サンプル数。
+// 過去統計の信頼しきい値(MIN_SAMPLES_FOR_TRUST=3件)より緩い2件にしてある
+// （仕様指示：サンプル数は最低2であれば利用してよい）。これを下回る場合は
+// 「データが存在しない」のと同じ扱いにして無視し、他のシグナルへ重みを譲る。
+const NEW_SIGNAL_MIN_SAMPLES = 2;
+
+// 各新シグナルの基礎重み。liveFactor（当該便自身・直近3区間の一次情報）を常に
+// 基礎重み1.0で固定し、今日の前便実績・周辺道路実績はどれだけ確信度が満点でも
+// この基礎重みまでしか寄与できないようにする（寄与率の上限）。他便・周辺の
+// 実績はliveFactorより一段階間接的な情報のため、liveFactorを上回って支配しない
+// ようにする設計。
+const LIVE_FACTOR_BASE_WEIGHT = 1.0;
+const PREV_TRIP_BASE_WEIGHT = 0.6;
+const NEARBY_BASE_WEIGHT = 0.5;
+
+// 各新シグナルが「確信度満点」に達するまでのサンプル量。
+// 前便実績はマッチした隣接区間数、周辺実績は距離×方位×新しさの重みの合計値
+// （個々のマッチが弱い重みでも、マッチ数が多ければ確信度が積み上がる）で測る。
+const PREV_TRIP_FULL_CONFIDENCE_SAMPLES = 6;
+const NEARBY_FULL_CONFIDENCE_WEIGHT_MASS = 4;
+
+// 周辺道路実績の探索半径(m)・探索対象とする実績の新しさ(分)。
+const NEARBY_RADIUS_METERS = 500;
+const NEARBY_RECENCY_MINUTES = 60;
 
 // 遅延予測の暴走防止（仕様③、docs参照なし・口頭仕様）: 統計・ペース補正だけに
 // 任せると、データが薄い区間で誤差が連鎖的に積み上がり、起点ではわずか1分の
@@ -159,6 +205,257 @@ async function getSegmentStat(client, fromStopId, toStopId, dayType, hourBucket)
 }
 
 /**
+ * 【追加要素①: 今日の前便実績】
+ * 同一路線・同方向・当日の直前便（直前に始発時刻を迎えた便）が実際にどのくらいの
+ * ペースで走ったかを算出する。過去統計(segment_travel_stats)にも当日分のサンプルは
+ * 混ざっているが、曜日区分×時間帯の平均に薄められてしまうため、「今日この路線で
+ * 何が起きているか」を強く反映する独立シグナルとしてあえて別枠で扱う。
+ *
+ * 直前便が既に運行終了しclosed済み（completed_trips）ならその正実績を、まだ運行中
+ * （担当車両が付いてtrip_stop_progressが積み上がっている途中）であってもその時点までの
+ * 実績を使う。走行中の便の「ここまでの遅れ」も今日の状況を示す有効な手掛かりのため。
+ * 直前便が存在しない（当日この路線の最初の便）、車両が一度も割り当たらなかった、
+ * 隣接区間の実績が2件未満、のいずれかに該当する場合はnullを返し、呼び出し側
+ * （combinePaceFactor）が自然に他のシグナルへ重みを再配分する。
+ *
+ * @returns {Promise<{factor: number, sampleCount: number} | null>}
+ */
+async function getTodayPreviousTripFactor(client, tripContext, currentAssignmentId) {
+  const prevTripRes = await client.query(
+    `SELECT id FROM daily_trips
+      WHERE route_id = $1 AND direction_id = $2 AND service_date = $3 AND start_at < $4
+      ORDER BY start_at DESC, id DESC LIMIT 1`,
+    [tripContext.routeId, tripContext.directionId, tripContext.serviceDate, tripContext.startAt]
+  );
+  if (prevTripRes.rows.length === 0) return null;
+  const prevDailyTripId = prevTripRes.rows[0].id;
+
+  // 優先: 運行終了済みの正実績(completed_trips.is_official)
+  let stopRows = (
+    await client.query(
+      `SELECT cts.seq_order, cts.scheduled_time, cts.actual_time
+         FROM completed_trips ct
+         JOIN completed_trip_stop_times cts ON cts.completed_trip_id = ct.id
+        WHERE ct.daily_trip_id = $1 AND ct.is_official = TRUE
+        ORDER BY cts.seq_order ASC`,
+      [prevDailyTripId]
+    )
+  ).rows;
+
+  // フォールバック: まだ運行終了していない場合は、担当車両の現時点までの進捗を使う
+  // （is_officialと同じ「正実績」の考え方でrole='assigned'のみ対象にする）。
+  if (stopRows.length === 0) {
+    stopRows = (
+      await client.query(
+        `SELECT p.seq_order, p.scheduled_time, p.actual_time
+           FROM trip_vehicle_assignments a
+           JOIN trip_stop_progress p ON p.assignment_id = a.id
+          WHERE a.daily_trip_id = $1 AND a.role = 'assigned' AND a.id != $2
+            AND p.status = '到着済' AND p.actual_time IS NOT NULL
+          ORDER BY p.seq_order ASC`,
+        [prevDailyTripId, currentAssignmentId]
+      )
+    ).rows;
+  }
+
+  const ratios = [];
+  for (let i = 0; i < stopRows.length - 1; i++) {
+    const from = stopRows[i];
+    const to = stopRows[i + 1];
+    if (to.seq_order - from.seq_order !== 1) continue; // 隣接区間のみ対象
+    if (!isValidTime(from.scheduled_time) || !isValidTime(to.scheduled_time)) continue;
+    if (!isValidTime(from.actual_time) || !isValidTime(to.actual_time)) continue;
+
+    let scheduledDiff = timeStrToMinutes(to.scheduled_time) - timeStrToMinutes(from.scheduled_time);
+    if (scheduledDiff < 0) scheduledDiff += 24 * 60;
+    let actualDiff = timeStrToMinutes(to.actual_time) - timeStrToMinutes(from.actual_time);
+    if (actualDiff < 0) actualDiff += 24 * 60;
+    // updateSegmentStats()と同じ基準（1区間60分超は測定誤りとみなす）で異常値を除外
+    if (scheduledDiff <= 0 || actualDiff <= 0 || actualDiff > 60) continue;
+
+    ratios.push(clampPaceRatio(actualDiff / scheduledDiff));
+  }
+
+  if (ratios.length < NEW_SIGNAL_MIN_SAMPLES) return null;
+  const factor = clampPaceRatio(ratios.reduce((a, b) => a + b, 0) / ratios.length);
+  return { factor, sampleCount: ratios.length };
+}
+
+// 周辺道路実績の距離重み。「同一区間」（候補区間のfrom/to停留所が対象区間と完全一致。
+// 同一路線・同方向の別便が今まさにこの区間を走った場合に起きる）は、呼び出し側
+// (computeNearbyFactor)で別格の1.0として扱うため、ここでは純粋な距離帯だけを見る。
+function nearbyDistanceWeight(meters) {
+  if (meters <= 100) return 0.8;
+  if (meters <= 300) return 0.5;
+  if (meters <= NEARBY_RADIUS_METERS) return 0.2;
+  return 0;
+}
+
+// 周辺道路実績の方位重み。対象区間の進行方向と候補区間の進行方向がどれだけ
+// 近いかを見る。方位差45度超は「別方向の道路」とみなして除外する。
+function nearbyBearingWeight(angleDiffDeg) {
+  if (angleDiffDeg <= 20) return 1.0;
+  if (angleDiffDeg <= 45) return 0.5;
+  return 0;
+}
+
+// 周辺道路実績の新しさ重み。「今この瞬間の道路状況」を知りたいので、
+// NEARBY_RECENCY_MINUTES(60分)より古い実績は使わない。
+function nearbyRecencyWeight(minutesAgo) {
+  if (minutesAgo <= 5) return 1.0;
+  if (minutesAgo <= 15) return 0.7;
+  if (minutesAgo <= 30) return 0.4;
+  if (minutesAgo <= NEARBY_RECENCY_MINUTES) return 0.1;
+  return 0;
+}
+
+// 運行終了直後の割り当てを「周辺道路実績・メッシュ集計」の候補プールへ含める猶予時間(分)。
+// NEARBY_RECENCY_MINUTES(60分)より個々の区間の重みは後段(JS側)でさらに絞られるため、
+// ここではSQL側の粗いプレフィルタとして少し余裕を持たせてある。
+const RECENTLY_ENDED_MINUTES = 90;
+
+/**
+ * 【追加要素②の土台: 直近の区間実績（システム全体）】
+ * 現在アクティブな全割り当て、および運行終了直後（RECENTLY_ENDED_MINUTES以内）の
+ * 割り当て（担当・候補いずれも実在の車両のGPS実績であり、路面状況を知る手掛かりとしては
+ * 同格に扱う）のtrip_stop_progressから、隣接区間（seq_order差1）で実績が揃っている
+ * ものを抽出する。運行終了直後も含めるのは、便が終わった瞬間にその区間の実績が
+ * 「周辺道路実績」から消えてしまう（数分前の新しい実績なのに使われない）のを防ぐため。
+ *
+ * predictArrivals()の周辺道路補正（computeNearbyFactor）と、管理画面「当日の状況」の
+ * メッシュ可視化（services/delayMesh.js）の共通データソース。前者は対象の割り当て自身を
+ * 除外する（excludeAssignmentId）が、後者はシステム全体を俯瞰するため除外対象を持たない。
+ *
+ * @returns {Promise<Array<{fromStopId, toStopId, midLat, midLon, bearing, toMinutes, ratio}>>}
+ */
+async function getRecentSegmentPerformance(client, { excludeAssignmentId = null } = {}) {
+  const res = await client.query(
+    `SELECT p.assignment_id, p.stop_id, p.seq_order, p.scheduled_time, p.actual_time, s.lat, s.lon
+       FROM trip_stop_progress p
+       JOIN stops s ON s.id = p.stop_id
+       JOIN trip_vehicle_assignments a ON a.id = p.assignment_id
+      WHERE (a.state = 'active' OR (a.state = 'ended' AND a.ended_at > now() - make_interval(mins => $2)))
+        AND ($1::bigint IS NULL OR a.id != $1)
+        AND p.status = '到着済' AND p.actual_time IS NOT NULL AND p.scheduled_time IS NOT NULL
+      ORDER BY p.assignment_id ASC, p.seq_order ASC`,
+    [excludeAssignmentId, RECENTLY_ENDED_MINUTES]
+  );
+
+  const byAssignment = new Map();
+  for (const row of res.rows) {
+    if (!byAssignment.has(row.assignment_id)) byAssignment.set(row.assignment_id, []);
+    byAssignment.get(row.assignment_id).push(row);
+  }
+
+  const segments = [];
+  for (const stopRows of byAssignment.values()) {
+    for (let i = 0; i < stopRows.length - 1; i++) {
+      const from = stopRows[i];
+      const to = stopRows[i + 1];
+      if (to.seq_order - from.seq_order !== 1) continue;
+      if (!isValidTime(from.scheduled_time) || !isValidTime(to.scheduled_time)) continue;
+      if (!isValidTime(from.actual_time) || !isValidTime(to.actual_time)) continue;
+
+      let scheduledDiff = timeStrToMinutes(to.scheduled_time) - timeStrToMinutes(from.scheduled_time);
+      if (scheduledDiff < 0) scheduledDiff += 24 * 60;
+      let actualDiff = timeStrToMinutes(to.actual_time) - timeStrToMinutes(from.actual_time);
+      if (actualDiff < 0) actualDiff += 24 * 60;
+      if (scheduledDiff <= 0 || actualDiff <= 0 || actualDiff > 60) continue;
+
+      segments.push({
+        fromStopId: from.stop_id,
+        toStopId: to.stop_id,
+        midLat: (from.lat + to.lat) / 2,
+        midLon: (from.lon + to.lon) / 2,
+        bearing: bearingDegrees(from.lat, from.lon, to.lat, to.lon),
+        toMinutes: timeStrToMinutes(to.actual_time),
+        ratio: clampPaceRatio(actualDiff / scheduledDiff)
+      });
+    }
+  }
+  return segments;
+}
+
+/**
+ * 対象区間（fromStop→toStop）について、getNearbyCandidateSegments()で取得済みの
+ * 候補群から距離×方位×新しさで重み付けした補正係数を算出する。
+ * 距離重みだけは「同一区間」（候補区間のfrom/to停留所IDが対象区間と完全一致）を
+ * 別格の1.0として扱う。物理的に同じ2停留所間＝同一路線・同方向の他便が今まさに
+ * この区間を走った、という最も直接的な手掛かりのため。
+ *
+ * @returns {{factor: number, sampleCount: number, weightMass: number} | null}
+ */
+function computeNearbyFactor(candidateSegments, fromStop, toStop, nowMinutes) {
+  let weightedSum = 0;
+  let weightTotal = 0;
+  let matchCount = 0;
+  const targetMidLat = (fromStop.lat + toStop.lat) / 2;
+  const targetMidLon = (fromStop.lon + toStop.lon) / 2;
+  const targetBearing = bearingDegrees(fromStop.lat, fromStop.lon, toStop.lat, toStop.lon);
+
+  for (const seg of candidateSegments) {
+    const sameSegment = seg.fromStopId === fromStop.stop_id && seg.toStopId === toStop.stop_id;
+    const distanceWeight = sameSegment
+      ? 1.0
+      : nearbyDistanceWeight(haversineDistanceMeters(targetMidLat, targetMidLon, seg.midLat, seg.midLon));
+    if (distanceWeight === 0) continue;
+
+    const bearingWeight = nearbyBearingWeight(angleDiffDegrees(targetBearing, seg.bearing));
+    if (bearingWeight === 0) continue;
+
+    let minutesAgo = nowMinutes - seg.toMinutes;
+    if (minutesAgo < -700) minutesAgo += 24 * 60; // 日跨ぎ（例: 23:58の実績を0:03に参照）の補正
+    if (minutesAgo < 0) minutesAgo = 0;
+    const recencyWeight = nearbyRecencyWeight(minutesAgo);
+    if (recencyWeight === 0) continue;
+
+    const weight = distanceWeight * bearingWeight * recencyWeight;
+    weightedSum += weight * seg.ratio;
+    weightTotal += weight;
+    matchCount++;
+  }
+
+  if (matchCount < NEW_SIGNAL_MIN_SAMPLES || weightTotal === 0) return null;
+  return {
+    factor: clampPaceRatio(weightedSum / weightTotal),
+    sampleCount: matchCount,
+    weightMass: weightTotal
+  };
+}
+
+/**
+ * liveFactor（当該便自身・直近3区間の一次情報）を軸に、今日の前便実績・周辺道路実績を
+ * 「使える場合だけ」動的な重みで加えてブレンドする。
+ *
+ * 各シグナルの重み = 基礎重み(*_BASE_WEIGHT) × 確信度(0〜1、サンプル量に応じて頭打ち)。
+ * 新シグナルが両方とも欠損（null）の場合、weightTotalはLIVE_FACTOR_BASE_WEIGHTのみと
+ * なり結果はliveFactorそのものに一致する＝新シグナル追加によって既存の挙動が
+ * 後退することは原理的に起きない。また各シグナルの基礎重みはliveFactorの1.0以下に
+ * 抑えてあるため、新シグナルがどれだけ確信度満点でもliveFactorを上回って結果を
+ * 支配することはない（異常値1件が全体を暴走させないための寄与率の上限）。
+ */
+function combinePaceFactor(liveFactor, prevTripSignal, nearbySignal) {
+  let weightedSum = liveFactor * LIVE_FACTOR_BASE_WEIGHT;
+  let weightTotal = LIVE_FACTOR_BASE_WEIGHT;
+
+  if (prevTripSignal) {
+    const confidence = Math.min(1, prevTripSignal.sampleCount / PREV_TRIP_FULL_CONFIDENCE_SAMPLES);
+    const weight = PREV_TRIP_BASE_WEIGHT * confidence;
+    weightedSum += prevTripSignal.factor * weight;
+    weightTotal += weight;
+  }
+
+  if (nearbySignal) {
+    const confidence = Math.min(1, nearbySignal.weightMass / NEARBY_FULL_CONFIDENCE_WEIGHT_MASS);
+    const weight = NEARBY_BASE_WEIGHT * confidence;
+    weightedSum += nearbySignal.factor * weight;
+    weightTotal += weight;
+  }
+
+  return clampPaceRatio(weightedSum / weightTotal);
+}
+
+/**
  * 指定した便への割り当て（assignment）の、残り各バス停に対する予測到着時刻を算出する。
  * 便起点方式では進捗が (便 × 車両) 単位になったため、車両IDではなく割り当てIDを受け取る。
  * 戻り値: [{ stopId, seqOrder, predictedTime, predictedDelayMinutes, source, stopsBefore }]
@@ -196,18 +493,50 @@ async function getSegmentStat(client, fromStopId, toStopId, dayType, hourBucket)
  *     上がり、起点はわずかな遅れでも終点では非現実的な大遅延になってしまう
  *     ことがあったための対策。遅れ解消方向の予測はさらにやや強調する
  *     （capPredictedDelay／DELAY_RECOVERY_BOOST）。scheduled_time欠損駅は対象外。
+ *   ④今日の前便実績（getTodayPreviousTripFactor）と⑤周辺道路の最近実績
+ *     （getNearbyCandidateSegments／computeNearbyFactor）を、liveFactorと
+ *     動的な重みでブレンドしたcombinedPaceFactorを算出し、'historical'/
+ *     'schedule_paced'の両分岐で従来liveFactor単体だった箇所に用いる
+ *     （combinePaceFactor）。データが無い新シグナルは重み0として自然に除外され、
+ *     両方欠損時はliveFactor単体の従来挙動に一致する。isThroughSegment分岐
+ *     （通常発生しない外部データ不備向けの保険）は対象外のまま変更しない。
  */
+// predictArrivals()の結果行に含めるETA根拠の内訳（管理画面「ETA予測根拠」「当日の状況」向け）。
+// combinedPaceFactorが実際に使われた('historical'/'schedule_paced')行だけ実値を持ち、
+// それ以外（'actual'/'schedule'/'naive'/'through_skip'/'naive_anchored'）は全項目null。
+const EMPTY_PACE_INFO = {
+  liveFactor: null,
+  todayPreviousTripFactor: null,
+  todayPreviousTripSamples: null,
+  nearbyFactor: null,
+  nearbyFactorSamples: null,
+  nearbyWeightMass: null,
+  combinedPaceFactor: null
+};
+
 async function predictArrivals(client, assignmentId) {
   const rows = await client.query(
-    `SELECT p.stop_id, p.seq_order, p.scheduled_time, p.status, p.actual_time, s.name
+    `SELECT p.stop_id, p.seq_order, p.scheduled_time, p.status, p.actual_time,
+            s.name, s.lat, s.lon,
+            a.daily_trip_id, d.route_id, d.direction_id, d.service_date, d.start_at
      FROM trip_stop_progress p
      JOIN stops s ON s.id = p.stop_id
+     JOIN trip_vehicle_assignments a ON a.id = p.assignment_id
+     JOIN daily_trips d ON d.id = a.daily_trip_id
      WHERE p.assignment_id = $1
      ORDER BY p.seq_order ASC`,
     [assignmentId]
   );
   const stops = rows.rows;
   if (stops.length === 0) return [];
+
+  // 今日の前便実績(①)の検索キー。全行が同じ便に属するため先頭行から取れば十分。
+  const tripContext = {
+    routeId: stops[0].route_id,
+    directionId: stops[0].direction_id,
+    serviceDate: stops[0].service_date,
+    startAt: stops[0].start_at
+  };
 
   const holidaySet = await loadHolidaySet(client);
   const dayType = getDayType(new Date(), holidaySet);
@@ -247,7 +576,7 @@ async function predictArrivals(client, assignmentId) {
     }
     if (recentPairs.length > 0) {
       liveFactor = recentPairs.reduce((a, b) => a + b, 0) / recentPairs.length;
-      liveFactor = Math.max(0.5, Math.min(2.5, liveFactor)); // 異常なペース補正を抑制
+      liveFactor = clampPaceRatio(liveFactor); // 異常なペース補正を抑制
     }
   }
 
@@ -269,9 +598,18 @@ async function predictArrivals(client, assignmentId) {
       predictedTime: s.scheduled_time,
       predictedDelayMinutes: 0,
       source: 'schedule',
-      stopsBefore: s.seq_order - cursorSeq // cursorSeq=-1（まだどこにも到着していない）
+      stopsBefore: s.seq_order - cursorSeq, // cursorSeq=-1（まだどこにも到着していない）
+      ...EMPTY_PACE_INFO
     }));
   }
+
+  // 【追加要素①②】今日の前便実績・周辺道路実績は、便全体を通して1回だけ取得し
+  // 以降の区間ループで使い回す（区間ごとにSQLを投げ直さない）。始発前（上のreturn）
+  // では不要なため、ここまで到達した＝実際に残り区間の計算が必要な便だけが取得する。
+  const todayPreviousTripFactor = await getTodayPreviousTripFactor(client, tripContext, assignmentId);
+  const nearbyCandidateSegments = await getRecentSegmentPerformance(client, { excludeAssignmentId: assignmentId });
+  const nowTokyo = nowInTokyo();
+  const nowMinutes = nowTokyo.hour * 60 + nowTokyo.minute;
 
   const results = [];
   let prevStop = lastArrived;
@@ -290,7 +628,8 @@ async function predictArrivals(client, assignmentId) {
           ? (computeDelayMinutes(s.scheduled_time, s.actual_time) || 0)
           : 0,
         source: 'actual',
-        stopsBefore: s.seq_order - cursorSeq // 実績確定行（0以下）。予測精度分析では参照しない
+        stopsBefore: s.seq_order - cursorSeq, // 実績確定行（0以下）。予測精度分析では参照しない
+        ...EMPTY_PACE_INFO
       });
       continue;
     }
@@ -311,6 +650,11 @@ async function predictArrivals(client, assignmentId) {
 
     let segmentMinutes;
     let source;
+    // combinedPaceFactorが実際に使われた場合だけ埋める（ETA根拠表示用）。
+    // isThroughSegment分岐、および同じelse分岐内でもnaiveフォールバックに落ちた場合は
+    // combinedPaceFactorを計算はするが最終的な所要時間には使っていないため、
+    // 結果に出さない（使っていないのに使ったかのように見せない）。
+    let paceInfo = null;
 
     if (isThroughSegment) {
       const sHasValidTime = isValidTime(s.scheduled_time);
@@ -340,10 +684,15 @@ async function predictArrivals(client, assignmentId) {
       const hourBucket = Math.floor(cursorMinutes / 60) % 24;
       const stat = await getSegmentStat(client, prevStop.stop_id, s.stop_id, dayType, hourBucket);
 
+      // 【追加要素①②の適用】liveFactorに、今日の前便実績・周辺道路実績を
+      // 動的な重みでブレンドした補正係数。両方欠損時はliveFactorそのものに一致する。
+      const nearbyFactorResult = computeNearbyFactor(nearbyCandidateSegments, prevStop, s, nowMinutes);
+      const combinedPace = combinePaceFactor(liveFactor, todayPreviousTripFactor, nearbyFactorResult);
+
       if (stat && stat.sample_count >= MIN_SAMPLES_FOR_TRUST) {
         const historicalMinutes = stat.avg_seconds / 60;
         const blendWeight = getRuntimeSetting('ETA_BLEND_WEIGHT');
-        segmentMinutes = historicalMinutes * (blendWeight + (1 - blendWeight) * liveFactor);
+        segmentMinutes = historicalMinutes * (blendWeight + (1 - blendWeight) * combinedPace);
         source = 'historical';
       } else if (prevStop.scheduled_time && s.scheduled_time) {
         const s1 = timeStrToMinutes(prevStop.scheduled_time);
@@ -351,7 +700,7 @@ async function predictArrivals(client, assignmentId) {
         let scheduledDiff = !Number.isNaN(s1) && !Number.isNaN(s2) ? s2 - s1 : NaN;
         if (!Number.isNaN(scheduledDiff)) {
           if (scheduledDiff < 0) scheduledDiff += 24 * 60;
-          segmentMinutes = scheduledDiff * liveFactor;
+          segmentMinutes = scheduledDiff * combinedPace;
           source = 'schedule_paced';
         }
       }
@@ -362,6 +711,18 @@ async function predictArrivals(client, assignmentId) {
           ? Math.max(0, timeStrToMinutes(s.scheduled_time) - timeStrToMinutes(prevStop.scheduled_time))
           : 5;
         source = 'naive';
+      } else {
+        // combinedPaceFactorが実際にsegmentMinutesへ反映された（historical/schedule_paced）
+        // 場合だけ、その内訳をETA根拠表示用に記録する。
+        paceInfo = {
+          liveFactor,
+          todayPreviousTripFactor: todayPreviousTripFactor ? todayPreviousTripFactor.factor : null,
+          todayPreviousTripSamples: todayPreviousTripFactor ? todayPreviousTripFactor.sampleCount : null,
+          nearbyFactor: nearbyFactorResult ? nearbyFactorResult.factor : null,
+          nearbyFactorSamples: nearbyFactorResult ? nearbyFactorResult.sampleCount : null,
+          nearbyWeightMass: nearbyFactorResult ? nearbyFactorResult.weightMass : null,
+          combinedPaceFactor: combinedPace
+        };
       }
     }
 
@@ -403,7 +764,8 @@ async function predictArrivals(client, assignmentId) {
       source,
       // 予測時点で、対象の停留所の何停留所手前に居たか（cursorSeqは実績到着済みの最後尾で
       // ループ中は変化しない）。予測精度監視で「何停留所前に出した予測か」の軸に使う。
-      stopsBefore: s.seq_order - cursorSeq
+      stopsBefore: s.seq_order - cursorSeq,
+      ...(paceInfo || EMPTY_PACE_INFO)
     });
 
     prevStop = { ...s, actual_time: predictedTime };
@@ -497,15 +859,33 @@ async function computeAndStoreAllArrivals() {
 
         await client.query(
           `INSERT INTO trip_arrival_predictions
-             (assignment_id, stop_id, seq_order, predicted_time, predicted_delay_minutes, source, computed_at, updated_at)
-           SELECT $1, t.stop_id, t.seq_order, t.predicted_time, t.predicted_delay_minutes, t.source, now(), now()
-           FROM unnest($2::int[], $3::int[], $4::text[], $5::int[], $6::text[])
-             AS t(stop_id, seq_order, predicted_time, predicted_delay_minutes, source)
+             (assignment_id, stop_id, seq_order, predicted_time, predicted_delay_minutes, source,
+              live_factor, today_previous_trip_factor, today_previous_trip_samples,
+              nearby_factor, nearby_factor_samples, nearby_weight_mass, combined_pace_factor,
+              computed_at, updated_at)
+           SELECT $1, t.stop_id, t.seq_order, t.predicted_time, t.predicted_delay_minutes, t.source,
+                  t.live_factor, t.today_previous_trip_factor, t.today_previous_trip_samples,
+                  t.nearby_factor, t.nearby_factor_samples, t.nearby_weight_mass, t.combined_pace_factor,
+                  now(), now()
+           FROM unnest(
+                  $2::int[], $3::int[], $4::text[], $5::int[], $6::text[],
+                  $7::float8[], $8::float8[], $9::int[], $10::float8[], $11::int[], $12::float8[], $13::float8[]
+                )
+             AS t(stop_id, seq_order, predicted_time, predicted_delay_minutes, source,
+                  live_factor, today_previous_trip_factor, today_previous_trip_samples,
+                  nearby_factor, nearby_factor_samples, nearby_weight_mass, combined_pace_factor)
            ON CONFLICT (assignment_id, stop_id) DO UPDATE SET
              seq_order = EXCLUDED.seq_order,
              predicted_time = EXCLUDED.predicted_time,
              predicted_delay_minutes = EXCLUDED.predicted_delay_minutes,
              source = EXCLUDED.source,
+             live_factor = EXCLUDED.live_factor,
+             today_previous_trip_factor = EXCLUDED.today_previous_trip_factor,
+             today_previous_trip_samples = EXCLUDED.today_previous_trip_samples,
+             nearby_factor = EXCLUDED.nearby_factor,
+             nearby_factor_samples = EXCLUDED.nearby_factor_samples,
+             nearby_weight_mass = EXCLUDED.nearby_weight_mass,
+             combined_pace_factor = EXCLUDED.combined_pace_factor,
              computed_at = EXCLUDED.computed_at,
              updated_at = now()`,
           [
@@ -514,7 +894,14 @@ async function computeAndStoreAllArrivals() {
             arrivals.map((a) => a.seqOrder),
             arrivals.map((a) => a.predictedTime),
             arrivals.map((a) => a.predictedDelayMinutes),
-            arrivals.map((a) => a.source)
+            arrivals.map((a) => a.source),
+            arrivals.map((a) => a.liveFactor),
+            arrivals.map((a) => a.todayPreviousTripFactor),
+            arrivals.map((a) => a.todayPreviousTripSamples),
+            arrivals.map((a) => a.nearbyFactor),
+            arrivals.map((a) => a.nearbyFactorSamples),
+            arrivals.map((a) => a.nearbyWeightMass),
+            arrivals.map((a) => a.combinedPaceFactor)
           ]
         );
         stored += arrivals.length;
@@ -600,5 +987,9 @@ module.exports = {
   computeAndStoreAllArrivals,
   getArrivalsForAssignment,
   describeSource,
-  SOURCE_INFO
+  SOURCE_INFO,
+  // 管理画面「当日の状況」のメッシュ可視化(services/delayMesh.js)向けに公開。
+  // 周辺道路実績（追加要素②）の下位データソースを、対象区間に限定せず取得できる。
+  getRecentSegmentPerformance,
+  nearbyRecencyWeight
 };

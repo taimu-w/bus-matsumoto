@@ -16,7 +16,7 @@
 ## `passStepEntry()` — 候補となる付近入りを探す（旧`passStep1And3()`）
 
 - DB上で確定している「最後に到着したバス停」のインデックス（`lastArrivedIdx`、`到着済`のみを対象。`付近`は含まない）を基準に、未処理のGPSログ1件ごとに「まだ到着済・付近になっていないバス停」の中から最も近いものを探す。バス停マスタは**その便の停車パターン**（`trip_stop_progress`）で、便が通らない停留所は最初から含まれない。
-- **循環線対策①（探索範囲の制限）**: `lastArrivedIdx + 4`より先のバス停は候補にしない。循環路線では出発直後に終点付近のバス停ともGPS距離が近くなってしまう場合があるため、直近から4つ先までしか見ないことで誤判定を防ぐ。
+- **循環線対策①（探索範囲の制限）**: `lastArrivedIdx + 6`より先のバス停は候補にしない（2026年8月、4→6に緩和。③のETA時間窓による絞り込みは維持したまま）。循環路線では出発直後に終点付近のバス停ともGPS距離が近くなってしまう場合があるため、直近から6つ先までしか見ないことで誤判定を防ぐ。
 - **循環線対策②（初期の誤判定防止）**: 便の始発時刻から一定時間以内は、便全体の後半80%のバス停を候補から除外する（旧方式では「出発時刻から」だった基準を、便の始発時刻に置き換えている）。
 - **巻き戻り防止**: バッチ処理内で一度マッチしたバス停より手前（`seq_order`が小さい側）は、以降のGPSログで再度候補にしない（`currentMaxIdx`で管理）。付近入りも到着確定と同じくこのカーソルを進める。
 - 半径`STOP_RADIUS_METERS`（既定120m）以内で最も距離が近いバス停を「暫定マッチ（付近入り候補）」として記録する。
@@ -33,14 +33,14 @@
 
 2026年8月、`passStepConfirm()`の離脱検知（最小距離＋`DEPARTURE_MARGIN_METERS`だけ遠ざかるのを待つ）とは別に、到着確定を早めるための補助判定を追加した。**既存の付近入り・離脱検知・付近スタックの遡及昇格・欠落補完は一切変更していない。** 双方を並行して動作させ、どちらか早く条件を満たした方で到着確定とする（ベクトル判定はDBへの`UPDATE`に`WHERE status != '到着済'`を付けており、離脱検知の側が同一バッチ内で先に確定していれば単純に0件更新になるだけで安全）。
 
-- **対象（`findNextUnarrivedStop()`）**: 「まだ`到着済`になっていない次の1停留所」だけを対象にする（複数候補ではなく単一）。DB確定済みの最後の到着済バス停（`lastArrivedSeq`）の直後、`seq_order`が最小の1件を返す。`passStepEntry()`の循環線対策①（`lastArrivedIdx+4`先までの探索）とは無関係で、そちらの探索範囲・ロジックには使わない。`stopMaster`はバッチ開始時点のスナップショットのため、同一バッチ内で`passStepConfirm()`が確定した`seq_order`を`extraArrivedSeqOrders`引数で追加考慮する（渡さないと、直前に確定したばかりのバス停をまだ未到着として誤って対象にし、次のバス停への切り替えが1周期分遅れる）。
-- **判定（`evaluateVectorCrossing(p1, p2, stop)`）**: 過去位置P1・現在位置P2（同一assignmentのGPSログを時系列で隣接する2点）を使い、以下をすべて満たした場合のみ`confirmed: true`を返す純粋関数。
-  1. 前提条件：P1-P2間の距離が10〜250m、P1・P2ともに対象バス停から500m以内、P1またはP2のどちらかが300m以内。
-  2. 線分条件：線分P1-P2と対象バス停の最短距離が50m以内（`VECTOR_SEGMENT_DISTANCE_METERS`）。
+- **対象（`findNextUnarrivedStop()`）**: 「まだ`到着済`になっていない次の1停留所」だけを対象にする（複数候補ではなく単一）。DB確定済みの最後の到着済バス停（`lastArrivedSeq`）の直後、`seq_order`が最小の1件を返す。`passStepEntry()`の循環線対策①（`lastArrivedIdx+6`先までの探索）とは無関係で、そちらの探索範囲・ロジックには使わない。`stopMaster`はバッチ開始時点のスナップショットのため、同一バッチ内で`passStepConfirm()`が確定した`seq_order`を`extraArrivedSeqOrders`引数で追加考慮する（渡さないと、直前に確定したばかりのバス停をまだ未到着として誤って対象にし、次のバス停への切り替えが1周期分遅れる）。
+- **判定（`evaluateVectorCrossing(p1, p2, stop)`）**: 過去位置P1・現在位置P2（同一assignmentのGPSログを時系列で隣接する2点）を使い、以下をすべて満たした場合のみ`confirmed: true`を返す純粋関数（2026年8月、条件を緩和：10〜250m→10〜700m、500m以内→600m以内、300m以内→500m以内、50m以内→100m以内）。
+  1. 前提条件：P1-P2間の距離が10〜700m、P1・P2ともに対象バス停から600m以内、P1またはP2のどちらかが500m以内。
+  2. 線分条件：線分P1-P2と対象バス停の最短距離が100m以内（`VECTOR_SEGMENT_DISTANCE_METERS`）。
   3. ベクトル条件：対象バス停を挟んでP1とP2が反対側にいること。対象バス停を原点とする局所平面座標（`utils/geo.js`の`toLocalXYMeters()`）でのP1・P2それぞれの位置ベクトル（S→P1、S→P2）の内積が負であることで判定する（符号反転＝反対側、という古典的な判定）。**元の仕様書ではA=P1→S・B=S→P2の内積として説明されているが、この2ベクトルの内積は符号が逆になるため、実装ではS基準の相対位置ベクトル同士の内積を使っている（`evaluateVectorCrossing()`内のコメント参照）。**
   4. 上記のいずれか一つでも満たさない場合は`confirmed: false`と`reason`（デバッグ・テスト用の理由コード）を返す。呼び出し側はこの場合ベクトル判定を行わず、従来の到着判定（付近入り→離脱検知）だけで判定を続ける（フォールバック）。履歴不足（GPSが1点以下）も同様にフォールバックする。
 - **確定時刻（`findVectorConfirmation(gpsRows, stop)`）**: `gpsRows`（`gps_time_ts`昇順）を先頭から走査し、時系列で隣接する2点ごとに`evaluateVectorCrossing()`を評価、最初に条件を満たした時点（＝最も早く到着確定できる時点）で確定する。`actual_time`は、線分P1-P2上で対象バス停に最も近い点の位置（`t`、0=P1・1=P2にクランプ）を使ってP1・P2の`gps_time_ts`を線形補間し、"H:mm"形式（`utils/time.js`の`formatTimeNoFormat()`）に変換したものを採用する。
-- **ログ**: ベクトル判定で到着確定した場合のみ`[pass] 到着確定（ベクトル判定）`のログを出力する（`stepDist`・`distP1Stop`・`distP2Stop`・`segDist`・`dot`・`t`・P1/P2の座標と時刻）。条件を満たさなかった場合（フォールバック）はログを出さない。
+- **ログ・根拠の保存**: ベクトル判定で到着確定した場合のみ`[pass] 到着確定（ベクトル判定）`のログを出力する（`stepDist`・`distP1Stop`・`distP2Stop`・`segDist`・`dot`・`t`・P1/P2の座標と時刻）。条件を満たさなかった場合（フォールバック）はログを出さない。**同じ値は`trip_stop_progress.arrival_evidence`（JSONB）にも保存され**、管理画面「運行ダッシュボード」のバス停別モーダルで後から確認できる（下記「到着判定方法の記録」）。
 
 ## `passInterpolate()` — 付近スタックの遡及昇格＋欠落バス停の補完
 
@@ -56,6 +56,26 @@
 6. 最後に`passInterpolate()`で付近スタックの遡及昇格・欠落区間の補完を行う。
 
 「どのGPSログを処理済みか」を`vehicle_gps_log.matched_label`（車両側の1列）ではなく`trip_gps_matches`（割り当て×GPSログ）で管理しているのは、**1台の車両が複数便の候補になり得る**ためです。同じGPSログ行が便ごとに別々のバス停へマッチし得るので、車両側の1列では表現できません。
+
+## 到着判定方法の記録（`arrival_method` / `arrival_evidence`）
+
+あるバス停が`到着済`になったとき、**どの判定で確定したか**（`arrival_method`）と**その根拠**（`arrival_evidence` JSONB）を`trip_stop_progress`に書き込みます。管理画面「運行ダッシュボード」のバス停別詳細モーダルで「なぜここが到着済になったのか」を確認するためのもので、通過判定のロジック自体には影響しません。
+
+| `arrival_method` | 書き込み箇所 | `arrival_evidence` の主な内容 |
+|---|---|---|
+| `nearby` | `passStepConfirm()`の離脱検知 → `processAssignmentPass()` | `minDistanceMeters`（最接近距離）・`gpsTime`（採用したGPS時刻）・`marginMeters` |
+| `vector` | ベクトル通過判定 → `processAssignmentPass()` | `stepDist`・`distP1Stop`・`distP2Stop`・`segDist`・`dot`・`t`・`p1`/`p2`（前後GPS点の座標・時刻）＝ログと同じ値 |
+| `promoted` | `promoteStuckNearbyStops()` | `minDistanceMeters`・`gpsTime` |
+| `interpolated` | `passInterpolate()`の線形補間（`interpolated=TRUE`と併記） | 基準にした前後のバス停の`seq_order`・実績時刻 |
+| `finish` | `finishService.js`の終了時強制昇格 / GPS途絶時の終点救済 | `minDistanceMeters` or `distanceMeters`・`gpsTime`・`trigger` |
+| `start` | `tripAssignment.openAssignment()`の始発バス停 | `distanceMeters`（始発時刻時点の始発バス停からの距離）・`gpsTime` |
+| `manual` | `PUT /api/admin/assignments/:id/stops/:stopId`（H:mm指定） | `note`・`editedAt` |
+
+`arrival_method`が`NULL`の`到着済`行は本機能導入前に確定したもので、モーダルでは「判定方法は記録されていません」と表示します（`interpolated=TRUE`なら線形補間だけは判別できます）。`arrival_method` / `arrival_evidence`は`nearby_min_distance_*`と同じく`openAssignment()`のON CONFLICT SET句に含めていないため、GTFS再取得のreseedでも保持されます。
+
+## 未到着への差し戻し（`PUT .../stops/:stopId` に空の `actualTime`）
+
+管理画面から到着判定時刻を空にして保存すると、そのバス停を未到着（真の通過バス停なら`通過`、それ以外は`''`）へ戻します。`status` / `actual_time` / `delay_minutes` / `interpolated` / `arrival_method` / `arrival_evidence` / `nearby_min_distance_*`をクリアし、`trip_vehicle_assignments.last_arrived_seq`と便レベルの`delay_minutes`を残った到着済から引き直します。**`trip_gps_matches`は消しません**（消すと直近48時間の生GPSが次回の`pass()`で即座に再判定を誘発するため）。そのため差し戻したバス停は原則そのまま未到着に留まりますが、前後が到着済で1停留所だけ空くと`passInterpolate()`の線形補間で再び埋まり得ます（仕様）。
 
 ## 通過バス停の扱い（`tripAssignment.js`の`openAssignment()` / `delayCalc.js`との関係）
 

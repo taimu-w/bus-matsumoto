@@ -1055,6 +1055,9 @@
      *     先にある場合は、そこまで（最大5停留所先まで）拡張する。
      * 同一バス停に「付近」「まもなく」の両方が該当する場合は「付近」を優先し「まもなく」は
      * 出さない（バッジのみの優先順位。背景の青帯とは独立）。
+     * また「まもなく」バッジは、青帯（bandIndices）の最も先のバス停の1つ先までにしか
+     * 付与しない。ETAだけで判定すると、実際の走行位置よりかなり先のバス停にまで
+     * 「まもなく」が誤ってつくケースがあったため。
      */
     function renderRealtimeRows(bus) {
       const stops = bus.stops || [];
@@ -1086,6 +1089,11 @@
         const remain = etaRemainingMin(stops[i]);
         if (!Number.isNaN(remain) && remain <= 5) bandIndices.add(i);
       }
+      // 「まもなく」バッジの上限インデックス。青帯（bandIndices）の最も先のバス停の
+      // 1つ先までしか付けない（実際の走行位置より先のバス停に誤って付くのを防ぐため）。
+      // 青帯が1件も無い場合は、直近到着済みの1つ先までに制限する。
+      const maxBandIndex = bandIndices.size ? Math.max(...bandIndices) : lastIdx;
+      const soonMaxIndex = maxBandIndex + 1;
 
       return stops
         .map((stop, index) => {
@@ -1095,7 +1103,8 @@
           const pending = !isArrived && !isThrough;
           const remain = pending ? etaRemainingMin(stop) : NaN;
           // 「まもなく」: ETA-2分 〜 ETA+1分未満。付近バッジがある場合は出さない（優先順位）。
-          const isSoon = pending && !isNearby && !Number.isNaN(remain) && remain >= 0 && remain <= 2;
+          // さらに、青帯（bandIndices）の最も先のバス停の1つ先までにしか付けない。
+          const isSoon = pending && !isNearby && !Number.isNaN(remain) && remain >= 0 && remain <= 2 && index <= soonMaxIndex;
           const isInBand = pending && bandIndices.has(index);
 
           // リアルタイム表示の停車行は便詳細の静的データ（data.stops）と同じ並び・件数になる

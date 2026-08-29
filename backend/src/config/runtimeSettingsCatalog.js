@@ -105,18 +105,6 @@ const SETTINGS_CATALOG = [
 
   // ---- 運行終了判定 ----
   {
-    key: 'END_AREA_RADIUS_METERS',
-    group: 'finish',
-    groupLabel: '運行終了判定',
-    type: 'number',
-    default: 150,
-    min: 1,
-    max: 2000,
-    unit: 'm',
-    label: '運行終了エリアの判定半径',
-    description: '車両の直近GPSが便の終点からこの距離以内なら、その便への割り当てを終了とみなします。'
-  },
-  {
     key: 'GPS_STALE_TIMEOUT_MIN',
     group: 'finish',
     groupLabel: '運行終了判定',
@@ -138,7 +126,7 @@ const SETTINGS_CATALOG = [
     max: 3000,
     unit: 'm',
     label: 'GPS途絶時の終点到着救済半径',
-    description: 'GPSが途絶した車両について、未到達バス停が終点のみ残っている場合に限り、直近GPSが終点からこの距離以内なら「終点到着」とみなして運行終了にします（途絶中は測位精度が落ちる前提のため、通常の終了エリア判定より広めにとります）。'
+    description: 'GPSが途絶した車両について、未到達バス停が終点のみ残っている場合に限り、直近GPSが終点からこの距離以内なら「終点到着」とみなして運行終了にします（途絶中は測位精度が落ちる前提のため広めにとります）。'
   },
   {
     key: 'VEHICLE_MAX_AGE_MIN',
@@ -162,7 +150,7 @@ const SETTINGS_CATALOG = [
     max: 120,
     unit: '分',
     label: '運行終了判定の保護期間',
-    description: '割り当て直後のこの期間は、終点到着・終了エリア・GPS途絶による終了判定を行いません（割り当て直後の誤判定を防ぐため）。'
+    description: '割り当て直後のこの期間は、終点到着・GPS途絶による終了判定を行いません（割り当て直後の誤判定を防ぐため）。'
   },
 
   // ---- ETA予測 ----
