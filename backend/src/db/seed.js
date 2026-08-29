@@ -505,8 +505,7 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
 
 async function seedSettings(client) {
   const defaults = [
-    ['notice1', ''],
-    ['notice2', ''],
+    ['notices', '[]'],
     ['important_notice', ''],
     ['route_name', '横田信大循環線'],
     ['operator_name', 'ぐるっと松本バス（アルピコ交通）']

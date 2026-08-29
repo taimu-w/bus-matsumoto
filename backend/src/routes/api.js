@@ -90,22 +90,54 @@ router.use((req, res, next) => {
   next();
 });
 
-function serializeSettings(settings) {
+// 通常のお知らせは system_settings の key='notices' に JSON 配列（最大3件）で保存する。
+// 各要素: { title, body, startDate, endDate }（startDate/endDate は "YYYY-MM-DD" または ""）。
+const MAX_NOTICES = 3;
+
+function parseNoticesJson(raw) {
+  if (!raw) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    console.warn('[api] system_settings.notices のJSON解釈に失敗しました。空として扱います。');
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.slice(0, MAX_NOTICES).map((n) => ({
+    title: typeof n?.title === 'string' ? n.title : '',
+    body: typeof n?.body === 'string' ? n.body : '',
+    startDate: /^\d{4}-\d{2}-\d{2}$/.test(n?.startDate) ? n.startDate : '',
+    endDate: /^\d{4}-\d{2}-\d{2}$/.test(n?.endDate) ? n.endDate : ''
+  }));
+}
+
+// 配信期間（startDate〜endDate、両端含む・未指定は無期限）で今日配信中のお知らせだけに絞る。
+function filterActiveNotices(notices, todayStr) {
+  return notices.filter((n) => {
+    if (!n.title) return false;
+    if (n.startDate && todayStr < n.startDate) return false;
+    if (n.endDate && todayStr > n.endDate) return false;
+    return true;
+  });
+}
+
+function serializeSettings(settings, { includeExpiredNotices = false } = {}) {
+  const notices = parseNoticesJson(settings.notices);
   return {
-    notice1: settings.notice1 || '',
-    notice2: settings.notice2 || '',
+    notices: includeExpiredNotices ? notices : filterActiveNotices(notices, getServiceDateString()),
     importantNotice: settings.important_notice || '',
     routeName: settings.route_name || '',
     operatorName: settings.operator_name || ''
   };
 }
 
-async function loadSystemSettings(routeId) {
+async function loadSystemSettings(routeId, options = {}) {
   const normalizedRouteId = resolveRouteId(routeId);
   const result = await pool.query('SELECT key, value FROM system_settings');
   const settings = {};
   for (const row of result.rows) settings[row.key] = row.value;
-  const serialized = serializeSettings(settings);
+  const serialized = serializeSettings(settings, options);
   serialized.routeId = normalizedRouteId;
   // settings の route_name は全路線共通のデフォルトとして使い、
   // 実際の路線名は routes テーブルから取得する
@@ -179,7 +211,7 @@ router.get('/server-load', (req, res) => {
 router.get('/admin/settings', requireAdminAuth, async (req, res) => {
   try {
     const routeId = resolveRouteId(req.query.routeId);
-    const settings = await loadSystemSettings(routeId);
+    const settings = await loadSystemSettings(routeId, { includeExpiredNotices: true });
     res.json(settings);
   } catch (err) {
     console.error('[api] /admin/settings エラー:', err);
@@ -275,6 +307,100 @@ router.delete('/admin/route-mappings/:externalId', requireAdminAuth, async (req,
   }
 });
 
+// ==========================================================
+// 車両名・メモ管理（車両ID＝car_id ⇔ 名前・メモ）。
+// vehicles は路線ごとに行が分かれ運行終了で行が増えるため、キーは car_id。
+// 運行ダッシュボードの便詳細セクションで、名前を持つ車両を名前表示・
+// 名前タップでメモ表示に使う。
+// ==========================================================
+
+// GET /api/admin/vehicle-labels -> 名前・メモの一覧＋現在観測されている車両ID一覧
+router.get('/admin/vehicle-labels', requireAdminAuth, async (req, res) => {
+  try {
+    const [labelsRes, knownRes] = await Promise.all([
+      pool.query(
+        `SELECT vl.car_id, vl.name, vl.memo, vl.updated_at
+         FROM vehicle_labels vl
+         ORDER BY vl.name ASC NULLS LAST, vl.car_id ASC`
+      ),
+      pool.query(
+        `SELECT v.car_id,
+                MAX(v.last_gps_at) AS last_gps_at,
+                array_agg(DISTINCT r.name) FILTER (WHERE r.name IS NOT NULL) AS route_names
+         FROM vehicles v
+         LEFT JOIN routes r ON r.id = v.route_id
+         GROUP BY v.car_id
+         ORDER BY MAX(v.last_gps_at) DESC NULLS LAST, v.car_id ASC`
+      )
+    ]);
+    res.json({
+      labels: labelsRes.rows.map((row) => ({
+        carId: row.car_id,
+        name: row.name,
+        memo: row.memo,
+        updatedAt: row.updated_at
+      })),
+      knownVehicles: knownRes.rows.map((row) => ({
+        carId: row.car_id,
+        lastGpsAt: row.last_gps_at,
+        routeNames: row.route_names || []
+      }))
+    });
+  } catch (err) {
+    console.error('[api] /admin/vehicle-labels 取得エラー:', err);
+    res.status(500).json({ error: '車両名・メモの取得に失敗しました。' });
+  }
+});
+
+// PUT /api/admin/vehicle-labels/:carId -> 追加・更新（car_idキーのUPSERT）。
+// 名前・メモともに空なら行ごと削除する（＝名前なし車両に戻す）。
+router.put('/admin/vehicle-labels/:carId', requireAdminAuth, async (req, res) => {
+  const carId = typeof req.params.carId === 'string' ? req.params.carId.trim() : '';
+  const { name, memo } = req.body || {};
+  const trimmedName = typeof name === 'string' ? name.trim() : '';
+  const trimmedMemo = typeof memo === 'string' ? memo.trim() : '';
+
+  if (!carId) {
+    return res.status(400).json({ error: '車両IDが不正です。' });
+  }
+  if (trimmedName.length > 100) {
+    return res.status(400).json({ error: '名前は100文字以内で入力してください。' });
+  }
+  if (trimmedMemo.length > 2000) {
+    return res.status(400).json({ error: 'メモは2000文字以内で入力してください。' });
+  }
+
+  try {
+    if (!trimmedName && !trimmedMemo) {
+      await pool.query('DELETE FROM vehicle_labels WHERE car_id = $1', [carId]);
+      return res.json({ ok: true, deleted: true });
+    }
+    await pool.query(
+      `INSERT INTO vehicle_labels (car_id, name, memo, updated_at)
+       VALUES ($1, $2, $3, now())
+       ON CONFLICT (car_id) DO UPDATE
+         SET name = EXCLUDED.name, memo = EXCLUDED.memo, updated_at = now()`,
+      [carId, trimmedName || null, trimmedMemo || null]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/vehicle-labels 保存エラー:', err);
+    res.status(500).json({ error: '車両名・メモの保存に失敗しました。' });
+  }
+});
+
+// DELETE /api/admin/vehicle-labels/:carId -> 1件削除
+router.delete('/admin/vehicle-labels/:carId', requireAdminAuth, async (req, res) => {
+  const carId = typeof req.params.carId === 'string' ? req.params.carId.trim() : '';
+  try {
+    await pool.query('DELETE FROM vehicle_labels WHERE car_id = $1', [carId]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/vehicle-labels 削除エラー:', err);
+    res.status(500).json({ error: '車両名・メモの削除に失敗しました。' });
+  }
+});
+
 // 運用パラメータ設定（判定半径・タイムアウト・しきい値など）の取得・編集API。
 //
 // これまで環境変数（.env）でしか調整できなかった値、および一部コードに直書きされていた値
@@ -363,10 +489,28 @@ router.delete('/admin/runtime-settings/:key', requireAdminAuth, async (req, res)
 
 // PUT /api/admin/settings -> 管理画面から配信お知らせを更新
 router.put('/admin/settings', requireAdminAuth, async (req, res) => {
-  const { notice1, notice2, importantNotice, routeName, operatorName } = req.body || {};
+  const { notices, importantNotice, routeName, operatorName } = req.body || {};
+
+  // 通常のお知らせ: 配列（最大3件）。題名・本文が両方空の要素は捨てる。日付は "YYYY-MM-DD" か空のみ許可。
+  const rawNotices = Array.isArray(notices) ? notices : [];
+  const normalizedNotices = [];
+  for (const n of rawNotices) {
+    const title = typeof n?.title === 'string' ? n.title.trim() : '';
+    const body = typeof n?.body === 'string' ? n.body : '';
+    if (!title && !body.trim()) continue;
+    const startDate = /^\d{4}-\d{2}-\d{2}$/.test(n?.startDate) ? n.startDate : '';
+    const endDate = /^\d{4}-\d{2}-\d{2}$/.test(n?.endDate) ? n.endDate : '';
+    if (startDate && endDate && startDate > endDate) {
+      return res.status(400).json({ error: '配信期間の開始日が終了日より後になっているお知らせがあります。' });
+    }
+    normalizedNotices.push({ title, body, startDate, endDate });
+  }
+  if (normalizedNotices.length > MAX_NOTICES) {
+    return res.status(400).json({ error: `通常のお知らせは最大${MAX_NOTICES}件までです。` });
+  }
+
   const settingsToSave = [
-    ['notice1', notice1 ?? ''],
-    ['notice2', notice2 ?? ''],
+    ['notices', JSON.stringify(normalizedNotices)],
     ['important_notice', importantNotice ?? ''],
     ['route_name', routeName ?? ''],
     ['operator_name', operatorName ?? '']
@@ -384,7 +528,7 @@ router.put('/admin/settings', requireAdminAuth, async (req, res) => {
     }
     await client.query('COMMIT');
 
-    const settings = await loadSystemSettings();
+    const settings = await loadSystemSettings(undefined, { includeExpiredNotices: true });
     res.json(settings);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -1251,13 +1395,17 @@ router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
     const serviceDate = getServiceDateString();
     const alerts = [];
 
+    // GPS途絶アラートは「本日（サービス日, JST）に一度でもGPSを受信した車両」に限定する。
+    // 前日以前が最終受信の車両や一度も受信していない車両は当日の運行監視の対象外。
     const staleGpsRes = await pool.query(
       `SELECT id AS vehicle_id, car_id, route_id, last_gps_at
        FROM vehicles
        WHERE status = 'active'
-         AND (last_gps_at IS NULL OR last_gps_at < now() - make_interval(secs => $1::double precision * 60))
-       ORDER BY last_gps_at ASC NULLS FIRST`,
-      [staleGpsMin()]
+         AND last_gps_at IS NOT NULL
+         AND (last_gps_at AT TIME ZONE 'Asia/Tokyo')::date = $2::date
+         AND last_gps_at < now() - make_interval(secs => $1::double precision * 60)
+       ORDER BY last_gps_at ASC`,
+      [staleGpsMin(), serviceDate]
     );
     for (const row of staleGpsRes.rows) {
       alerts.push({

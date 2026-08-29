@@ -109,7 +109,7 @@ const SETTINGS_CATALOG = [
     group: 'finish',
     groupLabel: '運行終了判定',
     type: 'number',
-    default: 3,
+    default: 6,
     min: 1,
     max: 60,
     unit: '分',
@@ -211,6 +211,30 @@ const SETTINGS_CATALOG = [
     unit: '時間',
     label: 'GPSログの保持時間',
     description: 'この時間を過ぎたGPSログ(vehicle_gps_log等)を掃除します（1時間ごとに実行）。'
+  },
+  {
+    key: 'COMPLETED_TRIP_RETENTION_DAYS',
+    group: 'retention',
+    groupLabel: 'データ保持・更新間隔',
+    type: 'integer',
+    default: 7,
+    min: 1,
+    max: 365,
+    unit: '日',
+    label: '運行実績アーカイブの保持日数',
+    description: 'この日数を過ぎた運行実績(completed_trips / completed_trip_stop_times)を掃除します（1時間ごとに実行）。ETA予測に使う区間別の平均(segment_travel_stats)は便のクローズ時に反映済みのため影響を受けませんが、管理画面「運行実績ダウンロード」でエクスポートできるのはこの日数以内の便だけになります。'
+  },
+  {
+    key: 'SEGMENT_STATS_MAX_SAMPLES',
+    group: 'retention',
+    groupLabel: 'データ保持・更新間隔',
+    type: 'integer',
+    default: 500,
+    min: 10,
+    max: 100000,
+    unit: '件',
+    label: '区間統計の実効サンプル数上限',
+    description: '区間別走行時間の平均(segment_travel_stats)を更新する際、1区間・1バケットあたりこの件数を超えると、それ以降は指数移動平均として古いサンプルを徐々に忘れます。生の走行データは保持期間を過ぎると消えるため、ダイヤ改正や道路事情の変化に平均が追従できるようにするための設定です。大きくすると平均は安定しますが変化への追従が遅くなります。'
   },
   {
     key: 'GTFS_UPDATE_INTERVAL_MIN',

@@ -321,22 +321,51 @@ function syncRouteSelector() {
  * ホーム画面（#/）に移した。 */
 const IMPORTANT_NOTICE_SHOWN_KEY = 'busTimeImportantNoticeShown';
 
+// お知らせ本文中のリンク記法をクリックできるリンクに変換する。
+// - 裸のURL（https://…）はそのまま表示（「リンクの表示」）
+// - [表示文字列](https://…) は表示文字列に置き換えて表示（「リンクをテキストに置き換えて表示」）
+// 運行状況画面（servicestatus.js）と同じ記法。全体をエスケープしてから置換するのでXSSの心配はない。
+const NOTICE_LINK_PATTERN = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<]+)/g;
+const NOTICE_TRAILING_PUNCT = /[、。，,．.）」』)\]]+$/;
+
+function linkifyNotice(text) {
+  return escapeHtml(text).replace(NOTICE_LINK_PATTERN, (match, label, bracketUrl, bareUrl) => {
+    const cls = 'text-blue-700 underline font-bold break-all';
+    if (bracketUrl) {
+      return `<a href="${bracketUrl}" target="_blank" rel="noopener noreferrer" class="${cls}">${label}</a>`;
+    }
+    const trailingMatch = bareUrl.match(NOTICE_TRAILING_PUNCT);
+    const trailing = trailingMatch ? trailingMatch[0] : '';
+    const url = trailing ? bareUrl.slice(0, bareUrl.length - trailing.length) : bareUrl;
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="${cls}">${url}</a>${trailing}`;
+  });
+}
+
+function openNoticeModal(notice) {
+  $('notice-modal-title').textContent = notice.title || 'お知らせ';
+  $('notice-modal-body').innerHTML = notice.body ? linkifyNotice(notice.body) : '';
+  openModal('notice-modal');
+}
+
 function renderNotices(settings) {
   const container = $('notices');
   container.innerHTML = '';
 
-  if (settings.notice1) {
-    const el = document.createElement('div');
-    el.className = 'bg-yellow-100 p-4 rounded-xl border-2 border-yellow-400 text-lg font-bold text-yellow-900';
-    el.textContent = settings.notice1;
-    container.appendChild(el);
-  }
-
-  if (settings.notice2) {
-    const el = document.createElement('div');
-    el.className = 'bg-white p-4 rounded-xl border border-gray-300 text-md font-medium';
-    el.textContent = settings.notice2;
-    container.appendChild(el);
+  // 通常のお知らせ（最大3件）。トップ画面では題名のみを表示し、タップで詳細ポップアップを開く。
+  // 配信期間によるフィルタはサーバー側（GET /api/settings）で済んでいる。
+  const notices = Array.isArray(settings.notices) ? settings.notices : [];
+  for (const notice of notices) {
+    if (!notice || !notice.title) continue;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'w-full text-left bg-white p-4 rounded-xl border border-gray-300 flex items-center gap-3 active:scale-[0.99] transition-transform';
+    btn.innerHTML = `
+      <span class="shrink-0 text-lg">📢</span>
+      <span class="flex-1 font-bold text-gray-900 leading-snug">${escapeHtml(notice.title)}</span>
+      <svg class="shrink-0 w-4 h-4 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
+    `;
+    btn.addEventListener('click', () => openNoticeModal(notice));
+    container.appendChild(btn);
   }
 
   // 重要なお知らせのポップアップは、同じ内容を毎回の更新のたびに出し直さないよう、

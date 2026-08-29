@@ -152,10 +152,12 @@ async function getAssignmentDetailForAdmin(assignmentId) {
     `SELECT a.id AS assignment_id, a.delay_minutes, a.became_assigned_at,
             d.id AS daily_trip_id, d.route_id, d.start_time, d.headsign,
             v.id AS vehicle_id, v.car_id,
+            vl.name AS car_name, vl.memo AS car_memo,
             r.name AS route_name, r.color AS route_color, r.text_color AS route_text_color
      FROM trip_vehicle_assignments a
      JOIN daily_trips d ON d.id = a.daily_trip_id
      JOIN vehicles v ON v.id = a.vehicle_id
+     LEFT JOIN vehicle_labels vl ON vl.car_id = v.car_id
      LEFT JOIN routes r ON r.id = d.route_id
      WHERE a.id = $1`,
     [assignmentId]
@@ -196,6 +198,8 @@ async function getAssignmentDetailForAdmin(assignmentId) {
     assignmentId: row.assignment_id,
     vehicleId: row.vehicle_id,
     carId: row.car_id,
+    carName: row.car_name || null,
+    carMemo: row.car_memo || null,
     routeId: row.route_id,
     routeName: row.route_name || '不明な路線',
     routeColor: row.route_color || null,

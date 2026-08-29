@@ -549,6 +549,34 @@ async function migrate() {
       ALTER TABLE trip_stop_progress ADD COLUMN IF NOT EXISTS arrival_evidence JSONB
     `);
 
+    // ==========================================================
+    // 28. 車両ID（car_id）に付ける名前・メモ（管理画面「車両名・メモ管理」）。
+    //     運行ダッシュボードの便詳細セクションで、名前を持つ車両を car_id ではなく
+    //     名前で表示するために使う。新規環境ではschema.sqlのCREATE TABLEに
+    //     既に含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS vehicle_labels (
+        car_id      TEXT PRIMARY KEY,
+        name        TEXT,
+        memo        TEXT,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    // ==========================================================
+    // 29. お知らせ機能の見直し（お知らせ1／お知らせ2の廃止）。
+    //     通常のお知らせは system_settings の key='notices' に JSON 配列（最大3件、
+    //     題名・本文・配信期間）で保存する方式へ移行。旧 notice1 / notice2 は
+    //     概念ごと廃止するため、行を削除する（内容は引き継がない）。
+    //     重要なお知らせ（key='important_notice'）はそのまま。
+    // ==========================================================
+    await client.query(`DELETE FROM system_settings WHERE key IN ('notice1', 'notice2')`);
+    await client.query(`
+      INSERT INTO system_settings (key, value) VALUES ('notices', '[]')
+      ON CONFLICT (key) DO NOTHING
+    `);
+
     await client.query('COMMIT');
     console.log('[migrate] 複数事業者対応・便起点割り当てマイグレーション完了');
   } catch (err) {

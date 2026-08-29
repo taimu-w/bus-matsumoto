@@ -302,6 +302,20 @@
   </div>
 </div>
 
+<!-- 通常のお知らせ詳細モーダル（トップ画面で題名をタップすると開く） -->
+<div id="notice-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center px-4" style="display:none;">
+  <div class="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
+    <div class="bg-blue-800 p-4 text-white font-bold text-lg flex items-start gap-2">
+      <span class="shrink-0 mt-0.5">📢</span>
+      <h3 id="notice-modal-title" class="leading-snug"></h3>
+    </div>
+    <div id="notice-modal-body" class="p-6 text-base text-gray-900 whitespace-pre-wrap leading-relaxed max-h-[60vh] overflow-y-auto"></div>
+    <div class="p-4 border-t bg-gray-50">
+      <button data-close="notice-modal" class="w-full bg-gray-900 text-white py-3.5 rounded-xl text-base font-bold">閉じる</button>
+    </div>
+  </div>
+</div>
+
 <!-- 地図ポップアップ（OpenStreetMap。便詳細ページのリアルタイム表示から使う。外部サイトへは遷移しない） -->
 <div id="tt-map-popup-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4" style="display:none;">
   <div class="bg-white rounded-t-3xl sm:rounded-2xl w-full max-w-md shadow-2xl p-4">

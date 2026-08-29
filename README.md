@@ -65,7 +65,7 @@ bussystem/
 |---|---|---|
 | メインパイプライン | `POLL_INTERVAL_SECONDS`（既定60秒） | `pipeline.js`の`runPipeline()` |
 | 運行終了バッチ | 1分 | `finishService.js`の`finishTrips()`（深夜帯は停止） |
-| データ掃除 | 1時間 | 古いGPSログ・古い当日便の削除 |
+| データ掃除 | 1時間 | 古いGPSログ・古い当日便・古い運行実績アーカイブ（`completed_trips`、既定7日）の削除 |
 
 `runPipeline()`（`jobs/pipeline.js`）は、以下の順序で各サービスを**必ずこの順番で**直列実行します。前段の処理結果（DBの状態）を次の処理が前提にしているため、順序を変えると壊れます。
 
@@ -159,8 +159,8 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 素のHTML/CSS/JS、ビルドステップなし。
 
 - `frontend/index.html` + `frontend/app.js`: 利用者向け運行状況画面。`POLL_MS`（20秒）間隔で`/api/buses`等をポーリング、お気に入りはlocalStorage、SPAルーティングの入口。バスマップ（`#/busmap`、Leaflet + OpenStreetMap）も含む。
-- `frontend/timetable.js`（時刻表検索）・`frontend/busstop.js`（バス停検索）・`frontend/stopmap.js`（バス停マップ）・`frontend/routesearch.js`（経路検索）は、いずれもハッシュではなくパス（History API）でルーティングします。経路検索は「経路一覧（`/routesearch?…`）→ 経路詳細（`…&journey=N`）」の2階層で、乗り換え時刻や通過バス停は詳細側に表示します（[docs/経路検索機能_改善仕様書.md](docs/経路検索機能_改善仕様書.md) 6.3）。検索フォームには折りたたみの「詳細設定」があり、乗り換え回数（「乗り換えなし」など）・徒歩での乗り継ぎの有無・乗り換えの余裕時間を指定できます。**既定は従来どおりの条件**で、既定値の項目はURLにも載せません（同 5.8・6.2）。
-- `frontend/admin.html`: Basic認証で保護された管理画面（運行ダッシュボード・便の割当監視・予測精度の監視・当日の状況・異常アラート・GTFS/位置情報フィード監視・API稼働監視・ジョブ監視・お知らせ編集・祝日カレンダー・外部IDマッピング・観光スポット編集）。通過判定の状態・ETA予測根拠・直近車両位置は運行ダッシュボードに統合済み。
+- `frontend/timetable.js`（時刻表検索）・`frontend/busstop.js`（バス停検索）・`frontend/stopmap.js`（バス停マップ）・`frontend/routesearch.js`（経路検索）は、いずれもハッシュではなくパス（History API）でルーティングします。経路検索は「経路一覧（`/routesearch?…`）→ 経路詳細（`…&journey=N`）」の2階層で、乗り換え時刻や通過バス停は詳細側に表示します（[docs/経路検索機能_改善仕様書.md](docs/経路検索機能_改善仕様書.md) 6.3）。経路一覧の上下には「1本前 / 1本後」ボタンがあり、先頭の経路を基準に1本ぶんずらして検索し直します（「1本前」は到着時刻指定へ切り替え。同 6.3.1）。検索フォームには折りたたみの「詳細設定」があり、乗り換え回数（「乗り換えなし」など）・徒歩での乗り継ぎの有無・乗り換えの余裕時間を指定できます。**既定は従来どおりの条件**で、既定値の項目はURLにも載せません（同 5.8・6.2）。
+- `frontend/admin.html`: Basic認証で保護された管理画面（運行ダッシュボード・便の割当監視・予測精度の監視・当日の状況・異常アラート・GTFS/位置情報フィード監視・API稼働監視・ジョブ監視・お知らせ編集・祝日カレンダー・外部IDマッピング・観光スポット編集・車両名・メモ管理）。通過判定の状態・ETA予測根拠・直近車両位置は運行ダッシュボードに統合済み。車両名・メモ管理（`vehicle_labels`テーブル、キーは`car_id`）で名前を付けた車両は、運行ダッシュボードの便詳細セクションで車両IDの代わりに名前で表示され、名前タップでメモが出ます。
 - `frontend/style.css`: 共通スタイル。
 
 > **`index.html`の静的ファイル参照は必ず絶対パス（`/app.js`など）にすること。** 時刻表検索は`/timetable/stops/{stop_id}`のような階層のあるURLを使うため、相対パスだと`/timetable/stops/app.js`を読みに行き、サーバーのSPAフォールバックがindex.htmlを返してスクリプトが一切動かなくなります（実際に踏んだ）。
@@ -184,11 +184,13 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 | `STOP_RADIUS_METERS`※ | `120` | バス停通過判定（「付近」入り）の半径（m） |
 | `DEPARTURE_MARGIN_METERS`※ | `20` | 2段階到着判定における到着確定の離脱マージン（m）。「付近」状態のバス停から、記録済み最小距離＋この距離だけ離れたことを検知した時点で「到着済」に確定する（[pass-detection.md](docs/pass-detection.md)） |
 | `GPS_TIMEOUT_TERMINAL_RADIUS_METERS`※ | `300` | GPS途絶時、未到達バス停が終点のみ残っている場合の「終点到着」救済判定の半径（m） |
-| `GPS_STALE_TIMEOUT_MIN`※ | `3` | GPSがこの時間（分）以上更新されていない車両を「GPS途絶」とみなす（点検所見 H-2） |
+| `GPS_STALE_TIMEOUT_MIN`※ | `6` | GPSがこの時間（分）以上更新されていない車両を「GPS途絶」とみなす（点検所見 H-2） |
 | `VEHICLE_MAX_AGE_MIN`※ | `120` | 割り当ての強制終了までの経過時間（分） |
 | `FINISH_PROTECTION_MIN`※ | `10` | 運行終了判定を開始しない保護期間（分） |
-| `DAILY_TRIP_RETENTION_DAYS`※ | `7` | 当日便（`daily_trips`）の保持日数 |
+| `DAILY_TRIP_RETENTION_DAYS`※ | `7` | 当日便（`daily_trips`）の保持日数。ETA予測根拠のログ（`trip_arrival_prediction_log`）もCASCADEでこの期間 |
 | `GPS_LOG_RETENTION_HOURS`※ | `48` | GPSログの保持時間（車両行を削除しなくなったため必要） |
+| `COMPLETED_TRIP_RETENTION_DAYS`※ | `7` | 運行実績アーカイブ（`completed_trips` / `completed_trip_stop_times`）の保持日数。区間平均（`segment_travel_stats`）はクローズ時に反映済みのため影響なし。管理画面「運行実績ダウンロード」でエクスポートできるのもこの期間内の便だけ |
+| `SEGMENT_STATS_MAX_SAMPLES`※ | `500` | 区間統計の実効サンプル数上限。超えると指数移動平均に切り替わり古い実績を徐々に忘れる（ダイヤ改正・道路事情の変化への追従用） |
 | `ETA_BLEND_WEIGHT`※ | `0.55` | ETA予測における過去統計への信頼度（0〜1） |
 | `NIGHT_START` / `NIGHT_END`※ | `23:00` / `05:00` | 深夜帯の範囲。**当日便の生成と車両割り当てはこの時間帯でも動く**（最早便が5:40発のため） |
 | `HIGH_LOAD_VIEWER_THRESHOLD`※ | `50` | サーバー高負荷とみなす同時アクティブ閲覧数 |

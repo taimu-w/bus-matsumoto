@@ -83,6 +83,10 @@
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M6 3v18"></path><path d="M6 4.5h12l-3 4 3 4H6z"></path></svg>
               <span>観光スポット管理</span>
             </button>
+            <button data-section="vehicle-labels" data-label="車両名・メモ管理" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M3 13l2-5a2 2 0 011.9-1.4h10.2A2 2 0 0119 8l2 5"></path><path d="M3 13h18v5a1 1 0 01-1 1h-1a1 1 0 01-1-1v-1H6v1a1 1 0 01-1 1H4a1 1 0 01-1-1z"></path><circle cx="7" cy="16" r="0.6" fill="currentColor"></circle><circle cx="17" cy="16" r="0.6" fill="currentColor"></circle></svg>
+              <span>車両名・メモ管理</span>
+            </button>
             <button data-section="viewers" data-label="サイト閲覧数" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M2.5 12S6.5 5.5 12 5.5 21.5 12 21.5 12 17.5 18.5 12 18.5 2.5 12 2.5 12z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>
               <span>サイト閲覧数</span>
@@ -224,8 +228,6 @@
                   <option value="1">当日</option>
                   <option value="3">直近3日</option>
                   <option value="7" selected>直近7日</option>
-                  <option value="14">直近14日</option>
-                  <option value="31">直近31日</option>
                 </select>
               </label>
               <label class="text-xs font-bold text-slate-500 bg-slate-50 border rounded-lg px-3 py-2">路線
@@ -543,18 +545,27 @@
         </section>
 
         <!-- お知らせ編集 -->
-        <section id="section-notices" class="section hidden space-y-4">
-          <h2 class="text-xl font-bold">お知らせ編集</h2>
-          <p class="text-sm text-slate-500">公開画面の表示用テキストを更新できます。</p>
-          <div class="grid gap-4 md:grid-cols-2">
-            <label class="block text-sm font-bold">お知らせ1
-              <textarea id="notice1" rows="3" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
-            </label>
-            <label class="block text-sm font-bold">お知らせ2
-              <textarea id="notice2" rows="3" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
-            </label>
+        <section id="section-notices" class="section hidden space-y-6">
+          <div>
+            <h2 class="text-xl font-bold">お知らせ編集</h2>
+            <p class="text-sm text-slate-500">公開画面（トップ画面）の表示内容を更新できます。</p>
           </div>
-          <label class="block text-sm font-bold">重要なお知らせ
+
+          <div class="space-y-4">
+            <div>
+              <h3 class="text-lg font-bold">通常のお知らせ（最大3件）</h3>
+              <p class="text-sm text-slate-500">
+                トップ画面では題名のみが一覧表示され、タップすると内容がポップアップで開きます。<br>
+                配信期間を指定すると、その期間中だけトップ画面に表示されます（未指定なら無期限）。<br>
+                本文中のリンク: <code>https://example.com</code> のように書くとURLがそのまま表示されます。
+                <code>[時刻表はこちら](https://example.com)</code> のように書くとテキストに置き換えて表示されます。
+              </p>
+            </div>
+            <div id="notices-editor" class="space-y-4"></div>
+          </div>
+
+          <label class="block text-sm font-bold border-t pt-5">重要なお知らせ
+            <p class="text-xs font-normal text-slate-500 mt-0.5">入力があるとトップ画面を開いた際に赤いポップアップで一度だけ表示されます（内容が変わるまで再表示されません）。</p>
             <textarea id="importantNotice" rows="4" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
           </label>
           <button id="save-btn" class="bg-green-700 hover:bg-green-800 text-white font-bold rounded-lg px-4 py-3">保存</button>
@@ -656,6 +667,52 @@
           </div>
         </section>
 
+        <!-- 車両名・メモ管理 -->
+        <section id="section-vehicle-labels" class="section hidden space-y-4">
+          <div>
+            <h2 class="text-xl font-bold">車両名・メモ管理</h2>
+            <p class="text-sm text-slate-500">
+              車両ID（位置情報フィードの車両ID）に、分かりやすい名前とメモを付けられます。<br>
+              名前を付けた車両は、運行ダッシュボードの便詳細セクション（バスアイコンをタップしたときに右側に出るもの）で車両IDの代わりに名前で表示され、名前をタップするとメモが表示されます。<br>
+              名前・メモをどちらも空にして保存すると、その車両の登録を削除します（車両IDのみの表示に戻ります）。
+            </p>
+          </div>
+          <div class="bg-white rounded-xl border p-4 flex flex-wrap gap-3 items-end">
+            <label class="text-sm font-bold">車両ID
+              <input id="vehicle-label-car-id" type="text" list="vehicle-label-known-ids" class="mt-1 border rounded-lg px-3 py-2 font-mono text-sm block" placeholder="例: 1234" />
+              <datalist id="vehicle-label-known-ids"></datalist>
+            </label>
+            <label class="text-sm font-bold">名前
+              <input id="vehicle-label-name" type="text" class="mt-1 border rounded-lg px-3 py-2 block min-w-[12rem]" placeholder="例: 松本200か1234号車" />
+            </label>
+            <label class="text-sm font-bold flex-1 min-w-[16rem]">メモ
+              <textarea id="vehicle-label-memo" rows="2" class="mt-1 border rounded-lg px-3 py-2 block w-full" placeholder="車種・装備・注意事項など"></textarea>
+            </label>
+            <button id="save-vehicle-label-btn" class="bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-lg px-4 py-2">保存</button>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-slate-600 mb-2">登録済みの車両名・メモ</h3>
+            <div class="bg-white rounded-xl border overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50 text-slate-500">
+                  <tr>
+                    <th class="text-left px-3 py-2 font-bold">車両ID</th>
+                    <th class="text-left px-3 py-2 font-bold">名前</th>
+                    <th class="text-left px-3 py-2 font-bold">メモ</th>
+                    <th class="text-left px-3 py-2 font-bold">更新日時</th>
+                    <th class="text-left px-3 py-2 font-bold"></th>
+                  </tr>
+                </thead>
+                <tbody id="vehicle-labels-list"></tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-slate-600 mb-2">最近観測された車両ID（未登録を含む）</h3>
+            <div id="vehicle-labels-known" class="flex flex-wrap gap-1.5 text-xs"></div>
+          </div>
+        </section>
+
         <!-- サイト閲覧数 -->
         <section id="section-viewers" class="section hidden space-y-4">
           <div class="flex items-center justify-between gap-3">
@@ -715,6 +772,7 @@
   <script src="/admin-route-mappings.js"></script>
   <script src="/admin-runtime-settings.js"></script>
   <script src="/admin-tourist-spots.js"></script>
+  <script src="/admin-vehicle-labels.js"></script>
   <script src="/admin-viewers.js"></script>
   <script src="/admin-operation-records.js"></script>
   <script src="/admin-router.js"></script>

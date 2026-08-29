@@ -128,7 +128,12 @@ CREATE TABLE IF NOT EXISTS schedule_stop_times (
   PRIMARY KEY (trip_id, stop_id)
 );
 
--- システム全体設定・お知らせ（GASの「設定 システム」シート相当）
+-- システム全体設定・お知らせ（key/value）。
+--   notices          … 通常のお知らせのJSON配列（最大3件。各要素 {title, body, startDate, endDate}。
+--                       startDate/endDate は "YYYY-MM-DD" または ""（無期限）。配信期間内のものだけ公開APIが返す）
+--   important_notice … 重要なお知らせ（トップ画面で赤いポップアップ表示）
+--   route_name / operator_name … 表示用の既定値
+--   （運用パラメータ設定の上書き値もこのテーブルに入る。services/runtimeSettings.js 参照）
 CREATE TABLE IF NOT EXISTS system_settings (
   key           TEXT PRIMARY KEY,
   value         TEXT
@@ -202,6 +207,18 @@ CREATE TABLE IF NOT EXISTS vehicles (
   finished_at         TIMESTAMPTZ,
   finish_reason       TEXT,
   UNIQUE (route_id, car_id)
+);
+
+-- 管理画面で車両ID（car_id）に付ける名前・メモ。
+-- vehicles は路線ごとに行が分かれ、運行終了で status='inactive' になって同じ車両が
+-- 別の行として現れうるため、名前・メモは物理的な車両IDである car_id をキーにする。
+-- 運行ダッシュボードの便詳細セクションでは、名前を持つ車両を car_id ではなく名前で表示し、
+-- 名前タップでメモを表示する。
+CREATE TABLE IF NOT EXISTS vehicle_labels (
+  car_id      TEXT PRIMARY KEY,
+  name        TEXT,
+  memo        TEXT,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- 位置情報最新（受信直後の生ログ。GASの「位置情報最新」シート相当）
@@ -369,7 +386,13 @@ CREATE TABLE IF NOT EXISTS trip_gps_matches (
   PRIMARY KEY (assignment_id, gps_log_id)
 );
 
--- 完了トリップのアーカイブ（統計・予測学習用）
+-- 完了トリップのアーカイブ（統計・予測学習用）。
+-- 区間統計(segment_travel_stats)へは便のクローズ直後に etaPredictor.updateSegmentStats() が
+-- インクリメンタルに反映するため、ここの生データは反映後は保持不要。
+-- COMPLETED_TRIP_RETENTION_DAYS（既定7日）を過ぎた行は finishService.purgeOldCompletedTrips()
+-- が掃除する（掃除対象は aggregated = TRUE または is_official = FALSE の行のみ。
+-- 未集計の正実績を取りこぼさないため）。管理画面「運行実績ダウンロード」でエクスポート
+-- できるのもこの保持期間内の便だけになる。completed_trip_stop_times は CASCADE で追従。
 CREATE TABLE IF NOT EXISTS completed_trips (
   id                  BIGSERIAL PRIMARY KEY,
   route_id            TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
@@ -409,12 +432,16 @@ CREATE TABLE IF NOT EXISTS completed_trip_stop_times (
 );
 
 -- 区間別走行時間の統計（曜日区分×時間帯×区間）。ETA高度化アルゴリズムが参照する。
+-- completed_trips の生データを保持期間で消しても、この平均は便のクローズ時に反映済みの
+-- ため影響を受けない。ただし累積平均のままだと古いサンプルの重みが永久に下がらないため、
+-- updateSegmentStats() は sample_count が SEGMENT_STATS_MAX_SAMPLES（既定500）に達したら
+-- 指数移動平均へ切り替え、古い実績を徐々に忘れる（ダイヤ改正・道路事情の変化への追従用）。
 CREATE TABLE IF NOT EXISTS segment_travel_stats (
   from_stop_id    INTEGER NOT NULL REFERENCES stops(id),
   to_stop_id      INTEGER NOT NULL REFERENCES stops(id),
   day_type        TEXT NOT NULL,      -- 'weekday' | 'saturday' | 'holiday'
   hour_bucket     INTEGER NOT NULL,   -- 0-23（区間の実績到着時刻の時）
-  sample_count    INTEGER NOT NULL DEFAULT 0,
+  sample_count    INTEGER NOT NULL DEFAULT 0,  -- SEGMENT_STATS_MAX_SAMPLES で頭打ち
   avg_seconds     DOUBLE PRECISION NOT NULL DEFAULT 0,
   variance_seconds DOUBLE PRECISION NOT NULL DEFAULT 0,
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),

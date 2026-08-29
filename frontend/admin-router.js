@@ -26,6 +26,7 @@ const SECTION_LOADERS = {
   'route-mappings': () => window.AdminRouteMappings.load(),
   'runtime-settings': () => window.AdminRuntimeSettings.load(),
   'tourist-spots': () => window.AdminTouristSpots.load(),
+  'vehicle-labels': () => window.AdminVehicleLabels.load(),
   viewers: () => window.AdminViewers.load(),
   'operation-records': () => window.AdminOperationRecords.load()
 };

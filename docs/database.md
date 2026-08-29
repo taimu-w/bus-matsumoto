@@ -11,7 +11,7 @@
 | `schedule_trips` | 時刻表の「便」（`service_id`＝曜日区分ごと、`gtfs_trip_id`＝GTFS原文のtrip_id、`headsign`＝行先表示） |
 | `schedule_stop_times` | 便ごとのバス停定刻（`scheduled_time`はGTFSの実時刻を常に保持。`is_through`はGTFSの`pickup_type=1`かつ`drop_off_type=1`＝真の通過を表す表示用メタデータで、時刻の有無には影響しない。`no_pickup`/`no_drop_off`は`pickup_type`/`drop_off_type`単独のフラグで「降車のみ」「乗車のみ」バッジの表示用）。`stop_sequence`が便自身の中での実際の停車順（0始まりの連番）で、`daily_trip_stop_times`以降の`seq_order`列はこれを引き継ぐ |
 | `schedule_trip_frequencies` | GTFS `frequencies.txt`（頻度ベース運行の定義。当日便生成時に仮想便へ展開する） |
-| `system_settings` | お知らせ文言など管理画面から編集する設定値 |
+| `system_settings` | 管理画面から編集する設定値（key/value）。`notices`＝通常のお知らせのJSON配列（最大3件・題名/本文/配信期間`YYYY-MM-DD`）、`important_notice`＝重要なお知らせ、`route_name`/`operator_name`＝表示用の既定値。運用パラメータの上書き値もここに入る |
 | `holidays` | 祝日カレンダー（`holiday_date`が主キー）。`getDayType()`の休日判定に使う。`seed.js`が国民の祝日を初期投入、以降は管理画面から追加・削除可能 |
 | `tourist_spots` | 観光スポット情報（GTFS由来データとは完全独立）。バス停との関連付けは保存時ではなく参照時の近接検索で解決するため外部キーは持たない。管理画面の一括テキスト入力を名称キーのUPSERTで行うため`tourist_spots_name_key`（`name`の一意インデックス）を持つ |
 | `daily_trips` | ★**当日の運行便**（`assignment_state`＝pending/assigned/unassigned、`start_at`＝実時刻、`origin`＝static/frequency） |
@@ -20,6 +20,7 @@
 | `trip_stop_progress` | ★**便×車両ごとのバス停進捗**（定刻・実績・遅延・通過/到着ステータス）。`nearby_min_distance_*`は「付近」中に観測した最小距離・GPS時刻。`arrival_method`（`vector`/`nearby`/`promoted`/`interpolated`/`manual`/`start`/`finish`）と`arrival_evidence`（JSONB。ベクトル判定の内積・線分距離・前後GPS点など）は「なぜ到着済になったか」を管理画面「運行ダッシュボード」のバス停別モーダルに出すための表示専用列。`nearby_min_distance_*`と同じく`openAssignment()`のON CONFLICT SET句には含めない |
 | `trip_gps_matches` | 通過判定で消費したGPSログ（割り当て単位。1台が複数便の候補になるため車両側の列では管理できない） |
 | `vehicles` | 観測されている物理車両（便との紐付けは持たない。運行終了でも削除せず`status='inactive'`にする） |
+| `vehicle_labels` | 車両ID（`car_id`が主キー）に管理画面「車両名・メモ管理」から付ける名前・メモ。`vehicles`は路線ごとに行が分かれ運行終了で行が増えるため`car_id`をキーにする。運行ダッシュボードの便詳細セクションで、名前を持つ車両を`car_id`ではなく名前で表示し、名前タップでメモを表示する。名前・メモがどちらも空になった時点で行を削除する |
 | `vehicle_positions_raw` | GPSフィードから取得した直後の生ログ（未処理分の一時置き場、取得元`feed_id`付き） |
 | `vehicle_gps_log` | 車両ごとに整理された走行ログ |
 | `vehicle_stop_status` | **未使用（旧・車両起点方式の名残）**。`trip_stop_progress`に置き換わったが移行のため残置 |

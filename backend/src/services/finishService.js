@@ -410,4 +410,38 @@ async function finishTrips() {
   return { finished };
 }
 
-module.exports = { finishTrips, closeDailyTrip, endAssignment, SUCCESS_END_REASONS };
+/**
+ * 保持期間を過ぎた運行実績アーカイブ(completed_trips / completed_trip_stop_times)を掃除する。
+ *
+ * 区間別の平均統計(segment_travel_stats)は便のクローズ直後に updateSegmentStats() が
+ * インクリメンタルに反映済みで、生データ(completed_trips)を消しても平均は変化しない。
+ *
+ * 安全のため、削除するのは次のいずれかを満たす行だけに限定する：
+ *   - aggregated = TRUE                 … 既に区間統計へ反映済み
+ *   - is_official = FALSE               … 候補車両止まりの参考記録。updateSegmentStats() は
+ *                                          is_official = TRUE しか集計しないため永久に
+ *                                          aggregated = FALSE のまま残る（この条件が無いと
+ *                                          参考記録だけが掃除されず溜まり続ける）
+ * これにより「まだ区間統計へ反映されていない正実績」を取りこぼすことはない
+ * （集計が遅れている行は保持期間を過ぎていても次回以降まで残る）。
+ * completed_trip_stop_times は ON DELETE CASCADE で追従する。
+ */
+async function purgeOldCompletedTrips(retentionDays = getRuntimeSetting('COMPLETED_TRIP_RETENTION_DAYS')) {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `DELETE FROM completed_trips
+        WHERE finished_at < now() - ($1::int * interval '1 day')
+          AND (aggregated = TRUE OR is_official = FALSE)`,
+      [retentionDays]
+    );
+    if (res.rowCount > 0) {
+      console.log(`[finish] 保持期間を過ぎた運行実績アーカイブ ${res.rowCount} 件を削除しました。`);
+    }
+    return { deleted: res.rowCount };
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = { finishTrips, closeDailyTrip, endAssignment, purgeOldCompletedTrips, SUCCESS_END_REASONS };

@@ -30,6 +30,7 @@
   let delayFilterOnly = false;   // true の間は5分以上遅延の便のアイコンだけを地図に表示する
   let lastUnassignedTrips = [];  // サマリー欄「本日の未割当便数」タップ時のポップアップ用
   let openStopModal = null;      // 表示中のバス停詳細モーダル { assignmentId, stopId }（ポーリング再取得用）
+  let carMemoExpanded = false;   // 便詳細セクションで車両メモを開いているか（15秒ポーリング再描画で畳まれないよう保持）
 
   /* ---------- app.js と同じ路線カラー処理（別JSスコープのため移植） ---------- */
   function normalizeRouteColor(color, fallback) {
@@ -256,6 +257,28 @@
     return sched + `<div class="text-xs font-bold text-blue-700 whitespace-nowrap">予測 ${escapeHtml(pt)} ${delayChipHtml(stop.predictedDelayMinutes)}</div>`;
   }
 
+  // 便詳細セクションの車両表示。名前が付いている車両は car_id ではなく名前で表示し、
+  // 名前タップでメモ（別ブロック）をトグル表示する。名前が無ければ従来どおり car_id 表示。
+  function carLabelHtml(detail) {
+    if (detail.carName) {
+      return `車両 <button type="button" data-role="toggle-car-memo"
+                class="font-bold text-blue-700 hover:text-blue-900 underline decoration-dotted"
+                title="タップでメモを表示">${escapeHtml(detail.carName)}</button>`;
+    }
+    return `車両 ${escapeHtml(detail.carId)}`;
+  }
+
+  function carMemoBlockHtml(detail) {
+    if (!detail.carName) return '';
+    const memo = detail.carMemo
+      ? `<div class="whitespace-pre-wrap">${escapeHtml(detail.carMemo)}</div>`
+      : '<span class="text-slate-400">メモは登録されていません。</span>';
+    return `<div data-role="car-memo" class="${carMemoExpanded ? '' : 'hidden'} mt-1.5 text-xs bg-slate-50 border rounded p-2 text-slate-600">
+        ${memo}
+        <div class="mt-1 text-[10px] text-slate-400">車両ID: ${escapeHtml(detail.carId)}</div>
+      </div>`;
+  }
+
   function showDetailPanel() {
     document.getElementById('dashboard-detail-empty').classList.add('hidden');
     document.getElementById('dashboard-detail-body').classList.remove('hidden');
@@ -296,7 +319,8 @@
                     class="text-slate-400 hover:text-slate-700 px-1 py-1 font-bold">✕</button>
           </div>
         </div>
-        <p class="text-xs text-slate-500 mt-1">${escapeHtml(detail.headsign || '')}行き ・ 車両 ${escapeHtml(detail.carId)} ・ ${escapeHtml(detail.startTime || '')}発</p>
+        <p class="text-xs text-slate-500 mt-1">${escapeHtml(detail.headsign || '')}行き ・ ${carLabelHtml(detail)} ・ ${escapeHtml(detail.startTime || '')}発</p>
+        ${carMemoBlockHtml(detail)}
         <div class="mt-2">
           <button type="button" data-role="unlink-assignment" data-assignment-id="${detail.assignmentId}"
                   class="text-xs font-bold text-red-700 hover:text-red-900 border border-red-300 hover:border-red-500 rounded px-2 py-1">
@@ -333,6 +357,15 @@
         }
       });
     });
+
+    // 車両名タップ → メモの表示/非表示トグル
+    const carMemoToggle = body.querySelector('[data-role="toggle-car-memo"]');
+    const carMemoBlock = body.querySelector('[data-role="car-memo"]');
+    if (carMemoToggle && carMemoBlock) {
+      carMemoToggle.addEventListener('click', () => {
+        carMemoExpanded = carMemoBlock.classList.toggle('hidden') === false;
+      });
+    }
 
     body.querySelectorAll('[data-role="actual-time-save"]').forEach((btn) => {
       btn.addEventListener('click', async (e) => {
@@ -465,6 +498,7 @@
     }
 
     closeStopDetailModal(); // 別のバスへ切り替えたら、前のバスのバス停詳細モーダルは閉じる
+    carMemoExpanded = false; // 別の便に切り替えたら車両メモは畳んだ状態から始める
     selectedKey = key;
     selectedBus = bus;
     updateBusMarkers(lastBuses); // 選択中のバス以外を地図上から隠す

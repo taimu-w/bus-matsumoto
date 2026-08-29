@@ -95,6 +95,13 @@
     return `${get('hour')}:${get('minute')}`;
   }
 
+  /** 通算秒（検索日の0時起点。翌日にまたがると86400以上、前日だと負にもなる）を "HH:MM" にする。
+   *  「1本前／1本後」の再検索でアンカー秒を時刻欄・URLの値へ戻すのに使う。 */
+  function secondsToHhmm(totalSeconds) {
+    const s = ((Math.round(totalSeconds) % 86400) + 86400) % 86400;
+    return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}`;
+  }
+
   function dateToUtc(dateStr) {
     const [y, m, d] = String(dateStr).split('-').map((v) => parseInt(v, 10));
     return new Date(Date.UTC(y, m - 1, d));
@@ -1198,6 +1205,63 @@
     }
   }
 
+  /* ==========================================================
+   * 「1本前 / 1本後」（検索結果一覧のページ送り）
+   *
+   * 一覧の先頭（journeys[0]）を基準に、1本ぶん前／後の便で検索し直す。
+   *   1本後: 先頭経路の「最初のバス区間の発車」の1分後以降を、出発時刻指定で再検索。
+   *   1本前: 先頭経路の「到着」の1分前までに到着、を到着時刻指定で再検索。
+   *
+   * 出発時刻指定の探索は時間軸を巻き戻せない（同じ便がまた先頭に出るだけ）ため、
+   * 「1本前」は到着時刻指定へ切り替える。結果ヘッダーの表記（「◯◯までに到着」）と
+   * 並び順もそれに追従する（時刻表アプリの「前の時刻」と同じ挙動）。
+   * 日付・時刻・timeMode はURLに載るので、リロード・共有・ブラウザの戻るはそのまま効く
+   * （ブラウザの戻るで直前の検索結果へ帰れる）。
+   * ========================================================== */
+
+  /**
+   * 現在の結果から「1本前 / 1本後」の再検索条件（date / time / timeMode）を作る。
+   * バス区間を1つも含まない結果（理論上は無い）や未確定の結果では null。
+   * @param {'prev'|'next'} dir
+   */
+  function nudgeTarget(result, dir) {
+    if (!result || !result.found || !result.journeys || result.journeys.length === 0) return null;
+    const journey = result.journeys[0];
+    const busLegs = (journey.legs || []).filter((leg) => leg.type === 'bus');
+    if (busLegs.length === 0) return null;
+    // 先頭のバス区間の発車 / 経路全体の到着（いずれも定刻ベースの通算秒。日跨ぎ込み）。
+    const anchorSeconds = dir === 'next'
+      ? busLegs[0].departureSeconds + 60
+      : journey.arrivalSeconds - 60;
+    if (!Number.isFinite(anchorSeconds)) return null;
+    return {
+      date: shiftDate(result.date, Math.floor(anchorSeconds / 86400)),
+      time: secondsToHhmm(anchorSeconds),
+      timeMode: dir === 'next' ? 'departure' : 'arrival'
+    };
+  }
+
+  /** 「1本前 / 1本後」ボタンの行（一覧の上下に同じものを置く。イベントは data-role で拾う）。 */
+  function nudgeRowHtml(position) {
+    const cls = 'flex-1 flex items-center justify-center gap-1.5 bg-white border-2 border-purple-200 '
+      + 'text-purple-700 rounded-xl px-3 py-2.5 text-sm font-bold hover:bg-purple-50 active:scale-95 transition-all';
+    return `
+      <div class="flex gap-2 ${position === 'top' ? 'mb-3' : 'mt-4'}">
+        <button type="button" data-role="rs-nudge" data-dir="prev" class="${cls}">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+          </svg>
+          1本前
+        </button>
+        <button type="button" data-role="rs-nudge" data-dir="next" class="${cls}">
+          1本後
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+          </svg>
+        </button>
+      </div>`;
+  }
+
   /* ---------- 結果一覧 ---------- */
   function renderResults(result) {
     const notes = [];
@@ -1234,9 +1298,11 @@
       </div>
       <div id="rs-fav-row" class="mb-4"></div>
       <p class="text-[11px] font-bold text-gray-500 mb-2 px-1">経路をタップすると、乗り換え時刻や通過するバス停を表示します。</p>
+      ${nudgeRowHtml('top')}
       <div class="space-y-3">
         ${result.journeys.map((journey, index) => renderJourneyListItem(journey, index)).join('')}
       </div>
+      ${nudgeRowHtml('bottom')}
       <p class="text-[11px] text-gray-500 font-bold mt-4 px-1">
         運賃・時刻はGTFSデータに基づく目安です。実際の運賃・ダイヤは事業者にご確認ください。
       </p>
@@ -1653,6 +1719,15 @@
           buildUrl({ ...state, journeyIndex: Number(button.dataset.index) }),
           { replace: state.journeyIndex !== null }
         );
+      });
+    });
+
+    // 一覧の「1本前 / 1本後」。先頭経路を基準に1本ぶんずらして検索し直す（pushState＝戻るで元の結果へ）。
+    container.querySelectorAll('[data-role="rs-nudge"]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const target = nudgeTarget(lastResult, button.dataset.dir);
+        if (!target) return;
+        navigate(buildUrl({ ...state, journeyIndex: null, ...target }));
       });
     });
 

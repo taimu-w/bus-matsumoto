@@ -7,7 +7,7 @@
 | メソッド | パス | 概要 |
 |---|---|---|
 | GET | `/api/routes` | 利用可能な路線一覧（GTFSの`routes.txt`由来） |
-| GET | `/api/settings` | お知らせ・重要なお知らせ |
+| GET | `/api/settings` | 通常のお知らせ（`notices`。最大3件・題名/本文/配信期間。**配信期間内のものだけ**を返す）・重要なお知らせ（`importantNotice`） |
 | GET | `/api/server-load` | 現在のサイト閲覧数とサーバー負荷状況（自動更新の自動OFF判定に使用） |
 | GET | `/api/stops` | 全バス停マスタ（時刻表画面・地図表示用） |
 | GET | `/api/stops/search` | バス停名の部分一致検索（全路線対応） |
@@ -43,13 +43,14 @@
 
 | メソッド | パス | 概要 |
 |---|---|---|
-| GET / PUT | `/api/admin/settings` | 配信お知らせ設定の取得・更新 |
+| GET / PUT | `/api/admin/settings` | お知らせ設定の取得・更新。`notices`（通常のお知らせ配列、最大3件。各要素`{title, body, startDate, endDate}`。`startDate`/`endDate`は`YYYY-MM-DD`または空＝無期限）と`importantNotice`（重要なお知らせ）。GETは配信期間切れも含めた全件を返す |
 | GET / PUT / DELETE | `/api/admin/runtime-settings`（`/:key`） | 運用パラメータ（判定半径・タイムアウト・しきい値等）の取得・上書き保存・上書き解除（既定値へ戻す）。定義一覧は[backend/src/config/runtimeSettingsCatalog.js](../backend/src/config/runtimeSettingsCatalog.js) |
 | GET / POST / DELETE | `/api/admin/holidays`（`/:date`） | 祝日カレンダーの取得・追加・削除（ETA統計の曜日区分に使用） |
 | GET / POST / DELETE | `/api/admin/route-mappings`（`/:externalId`） | 外部ID⇔GTFS route_id対応の取得・追加更新（UPSERT）・削除。`route_id`は`routes`テーブルへの実在チェックあり（路線名による解決はしない） |
 | GET / PUT / DELETE | `/api/admin/tourist-spots`（`/:id`） | 観光スポット情報の一覧・テキスト一括登録（全件洗い替え）・1件削除 |
+| GET / PUT / DELETE | `/api/admin/vehicle-labels`（`/:carId`） | 車両ID（`car_id`）ごとの名前・メモの取得・追加更新（UPSERT）・削除。GETは登録済み一覧に加えて最近観測された車両ID一覧（`knownVehicles`）も返す。PUTで名前・メモがどちらも空の場合は行を削除する。運行ダッシュボードの便詳細セクションで名前表示・名前タップでメモ表示に使う |
 | GET | `/api/admin/vehicle-positions-map` | 運行ダッシュボード（地図）の「全車両（直近3分）」モード用。便に割り当てられていない・候補にすらなっていない車両も含め、直近3分以内にGPSを受信した全車両を1台につき最新の1件だけ返す |
-| GET | `/api/admin/assignments/:assignmentId` | 運行ダッシュボード（地図）の詳細パネル用。便のリアルタイム時刻表（停車バス停・定刻・実績・予測）と、その車両がこの便を担当してから記録した位置履歴 |
+| GET | `/api/admin/assignments/:assignmentId` | 運行ダッシュボード（地図）の詳細パネル用。便のリアルタイム時刻表（停車バス停・定刻・実績・予測）と、その車両がこの便を担当してから記録した位置履歴。車両に名前が登録されていれば`carName`/`carMemo`も含む |
 | GET | `/api/admin/assignments/:assignmentId/stops/:stopId` | バス停別詳細モーダル用。到着済なら判定方法（`付近経由`/`ベクトル判定`/`手動` 等）と根拠（内積・線分距離・前後GPS点／最接近距離・GPS時刻）＋遅れ、未到着ならETA予測根拠（`source`＋ペース補正の内訳）。いずれもETA予測の推移（`trip_arrival_prediction_log`。実績確定時は`actual`行）を返す |
 | PUT | `/api/admin/assignments/:assignmentId/stops/:stopId` | 到着判定時刻（`trip_stop_progress.actual_time`）の手動編集。`actualTime`が`H:mm`なら`到着済`へ手動確定（未到着のバス停も可）、**空なら未到着へ差し戻し**（到着判定・実績・遅れ・判定根拠を消去。`trip_gps_matches`は消さない） |
 | GET | `/api/admin/assignment-monitor` | 便ごとの担当・候補・割当時刻・距離・未割当理由（`?date=YYYY-MM-DD`） |
@@ -67,6 +68,8 @@
 ### `GET /api/admin/prediction-accuracy` の集計方針
 
 集計は**すべてSQL側（GROUPING SETSで全軸を1パス）で行い、指定期間内の全サンプルを対象にします**。かつては突合結果を最大20000行だけNodeへ取り出してJSで集計しており、「全期間の集計」と表示しながら実際には最新の一部しか見ていませんでした（実測で全体の約20%。的中率が5ポイント近くずれていました）。行数に依存する処理をDB内に閉じ込めたため、レスポンスは軸ごとの集計値＋明細100件という固定サイズになります。
+
+`days`は**1〜7**にクランプします（`MAX_DAYS`）。突合結果（実績×予測履歴）はサンプル数が増えるほど突合とハッシュ集計が重くなり、期間を延ばすと計算に失敗するためです。実運用で必要なのは直近の傾向確認なので上限を7日にしています。予測側を突合するCTEも「集計期間＋2日」の範囲に絞っており（`DAILY_TRIP_RETENTION_DAYS`を延ばしてログが厚くなっても、このCTEだけ全期間をmaterializeしてメモリを溢れさせない）、2日の余裕は期間の境目をまたぐ予測を取りこぼさないためのものです。
 
 応答には集計値のほかに`totalSampleCount`（絞り込み前の総サンプル数）・`generatedAt`・`computeMs`・`cached`が含まれます。同一条件の結果は`POLL_INTERVAL_SECONDS`と同じ長さ（既定60秒）だけメモリにキャッシュされます。ログに行が増えるのはパイプラインが走ったときだけなので、絞り込み条件を切り替えて見比べる操作が即応になります。
 

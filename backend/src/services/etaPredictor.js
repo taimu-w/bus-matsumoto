@@ -140,6 +140,11 @@ async function updateSegmentStats(client) {
       return { aggregated: 0 };
     }
 
+    // 1区間・1バケットあたりの実効サンプル数上限。これを超えると累積平均から
+    // 指数移動平均へ切り替え、古いサンプルを徐々に忘れる（生の走行データは
+    // COMPLETED_TRIP_RETENTION_DAYS で消えるため、平均側で新陳代謝させる）。
+    const maxSamples = getRuntimeSetting('SEGMENT_STATS_MAX_SAMPLES');
+
     for (const trip of pending.rows) {
       const stopTimes = await client.query(
         `SELECT stop_id, seq_order, actual_minutes FROM completed_trip_stop_times
@@ -170,15 +175,19 @@ async function updateSegmentStats(client) {
         // completed_trips行の奪い合いは防ぐが、segment_travel_stats側の行までは
         // 保護しない）。ON CONFLICT DO UPDATEで加算そのものをSQL側の1文に
         // 閉じ込め、行ロックで直列化する。
+        // 実効重み k = LEAST(現sample_count, $6 - 1) を使い
+        //   新平均 = (旧平均 * k + 今回値) / (k + 1)
+        // とする。sample_count が上限($6)未満なら従来どおりの累積平均、
+        // 上限以降は直近 $6 件相当の指数移動平均になり、古い実績の重みが下がる。
         await client.query(
           `INSERT INTO segment_travel_stats (from_stop_id, to_stop_id, day_type, hour_bucket, sample_count, avg_seconds, updated_at)
            VALUES ($1, $2, $3, $4, 1, $5, now())
            ON CONFLICT (from_stop_id, to_stop_id, day_type, hour_bucket) DO UPDATE SET
-             avg_seconds = (segment_travel_stats.avg_seconds * segment_travel_stats.sample_count + EXCLUDED.avg_seconds)
-                            / (segment_travel_stats.sample_count + 1),
-             sample_count = segment_travel_stats.sample_count + 1,
+             avg_seconds = (segment_travel_stats.avg_seconds * LEAST(segment_travel_stats.sample_count, $6 - 1) + EXCLUDED.avg_seconds)
+                            / (LEAST(segment_travel_stats.sample_count, $6 - 1) + 1),
+             sample_count = LEAST(segment_travel_stats.sample_count + 1, $6),
              updated_at = now()`,
-          [from.stop_id, to.stop_id, dayType, hourBucket, seconds]
+          [from.stop_id, to.stop_id, dayType, hourBucket, seconds, maxSamples]
         );
       }
 

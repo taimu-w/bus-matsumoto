@@ -1,6 +1,6 @@
 // 定期実行の管理。メインパイプラインと、独立した運行終了バッチの2本立て。
 const { runPipeline } = require('./pipeline');
-const { finishTrips } = require('../services/finishService');
+const { finishTrips, purgeOldCompletedTrips } = require('../services/finishService');
 const { purgeOldDailyTrips } = require('../services/dailyTripBuilder');
 const { purgeOldGpsLogs } = require('../services/vehicleAssigner');
 const { isNightTime } = require('../utils/time');
@@ -57,6 +57,7 @@ function start() {
       await jobMonitor.track('scheduler.cleanup', async () => {
         await purgeOldGpsLogs();
         await purgeOldDailyTrips();
+        await purgeOldCompletedTrips();
       });
     } catch (err) {
       console.error('[scheduler] クリーンアップ実行エラー:', err);

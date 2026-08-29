@@ -24,7 +24,11 @@ const { loadHolidaySet } = require('./holidayCalendar');
 const { describeSource } = require('./etaPredictor');
 
 const DEFAULT_DAYS = 7;
-const MAX_DAYS = 31;
+// 集計期間の上限。サンプル数（実績×予測履歴の突合結果）が増えるほど、突合と
+// GROUPING SETS のハッシュ集計が重くなる。期間を延ばすと計算に失敗する
+// （管理画面から「サンプルが多いと計算できない」と報告があった）ため、
+// 実運用で必要な「直近の傾向確認」に絞って7日で頭打ちにする。
+const MAX_DAYS = 7;
 const DEFAULT_THRESHOLD_MIN = 3;
 const MAX_THRESHOLD_MIN = 30;
 const SAMPLE_LIMIT = 100;
@@ -191,13 +195,21 @@ function buildAggregateQuery({ routeFilter }) {
         ${routeFilter}
     ),
     preds AS MATERIALIZED (
-      -- 突き合わせる予測側。期間で絞らないのは、期間の境目をまたぐ予測
-      -- （予測は期間外・実績は期間内）も1サンプルとして数えるため。
-      -- ログ自体が daily_trips の保持期間で消えるので件数は自然に頭打ちになる。
+      -- 突き合わせる予測側。集計対象の実績（acts）は computed_at が $1 日以内なので、
+      -- それと突合し得る予測もその少し前までしか遡らない（予測が始まるのは便に車両が
+      -- 割り当たった当日の始発時刻以降で、実績はその日のうちに確定するため、
+      -- リードタイムが1日を超える予測は存在しない）。期間の境目をまたぐ予測
+      -- （予測は集計期間の外・実績は中）を取りこぼさないよう $1 に2日の余裕を足す。
+      --
+      -- ⚠️ この時刻の絞り込みを外さないこと。以前は一切絞っていなかったため、
+      -- DAILY_TRIP_RETENTION_DAYS を延ばしてログが厚くなると、集計期間を短くしても
+      -- このCTEだけは全期間を materialize してしまい、突合とハッシュ集計のメモリが
+      -- 溢れて計算そのものが失敗していた。
       SELECT p.assignment_id, p.stop_id, p.computed_at AS predicted_at, p.stops_before,
              ${timeToMinutesSql('p.predicted_time')} AS pred_min
       FROM trip_arrival_prediction_log p
       WHERE p.source <> 'actual'
+        AND p.computed_at >= now() - make_interval(days => $1::int + 2)
     ),
     raw_pairs AS MATERIALIZED (
       -- 実績1件 × その停留所に対して以前に出された予測すべて（1予測=1サンプル）
@@ -293,6 +305,7 @@ function buildSamplesQuery({ routeFilter }) {
        AND p.stop_id = a.stop_id
        AND p.source <> 'actual'
        AND p.computed_at < a.actual_logged_at
+       AND p.computed_at >= now() - make_interval(days => $1::int + 2)
       WHERE a.actual_min IS NOT NULL
     ),
     -- MATERIALIZED の理由は集計クエリ側のコメントを参照（式の重複展開を防ぐため）
@@ -486,7 +499,7 @@ function pruneCache(now) {
  * 「早い段階の予測ほど誤差が大きい」といった傾向も見える。
  *
  * @param {object} opts
- * @param {number} [opts.days=7] 何日前までのデータを対象にするか（1〜31）
+ * @param {number} [opts.days=7] 何日前までのデータを対象にするか（1〜7）
  * @param {string} [opts.routeId] 路線で絞り込み
  * @param {number} [opts.thresholdMinutes=3] 「誤差◯分以内」の◯分（1〜30。UIから変更可能）
  * @param {string} [opts.leadBucket] リードタイム区分で絞り込み（byLeadTimeの値のいずれか）
