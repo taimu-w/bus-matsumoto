@@ -4,11 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>使い方 | バスタイム</title>
-  <meta name="description" content="バスタイムの使い方。リアルタイム運行情報、時刻表検索、経路検索、バス停検索の確認方法を案内します。">
+  <meta name="description" content="バスタイムの使い方。リアルタイム運行情報、経路検索、時刻表検索、バス停検索の使い方と、よくある質問を案内します。">
   <meta name="theme-color" content="#1e40af">
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
+  <style>
+    /* よくある質問の開閉（<details>）。既定の三角マーカーを消し、右端のシェブロンだけで示す。 */
+    details.faq > summary { list-style: none; }
+    details.faq > summary::-webkit-details-marker { display: none; }
+    details.faq .faq-chevron { transition: transform .2s ease; }
+    details.faq[open] .faq-chevron { transform: rotate(180deg); }
+  </style>
 </head>
 <body class="bg-[#f0f4f8] text-gray-900" style="font-family:'Noto Sans JP',sans-serif;">
   <header class="bg-blue-800 text-white shadow-xl sticky top-0 z-40" style="padding-top:env(safe-area-inset-top,0px);">
@@ -22,117 +29,304 @@
   </header>
 
   <main class="max-w-3xl mx-auto px-4 py-6 pb-24">
+
+    <!-- ヒーロー：まず「使い方ツアー」（onboarding.js）へ誘導する -->
     <section class="bg-gradient-to-br from-blue-700 to-blue-900 text-white rounded-2xl shadow-lg p-5 mb-6">
       <p class="text-[10px] font-black tracking-widest text-blue-100 uppercase">How to use</p>
       <h2 class="text-2xl font-black mt-2">バスタイムの使い方</h2>
       <p class="text-sm text-blue-100 leading-relaxed mt-3">
-        このサイトは、バスの現在位置・時刻表・経路検索・バス停情報をまとめて確認できるページです。
-        まずは目的に合わせて、以下のどれかから使い始めてください。
+        松本市内の路線バスの「いま どこ？」「あと 何分？」がわかるサイトです。
+        目的に合わせて、下のどれかから使い始めてください。
       </p>
+      <a href="/?tutorial=1"
+         class="mt-4 inline-flex items-center gap-2 bg-white text-blue-800 px-4 py-2.5 rounded-xl text-sm font-bold shadow-md active:scale-[0.98] transition-transform">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+        使い方ツアーを見る（30秒）
+      </a>
       <div class="mt-4 flex flex-wrap gap-2">
-        <a href="/#/realtime" class="bg-white text-blue-800 px-3 py-2 rounded-lg text-xs font-bold">リアルタイムをみる</a>
-        <a href="/routesearch" class="bg-blue-500/30 text-white border border-white/20 px-3 py-2 rounded-lg text-xs font-bold">経路検索</a>
-        <a href="/timetable" class="bg-blue-500/30 text-white border border-white/20 px-3 py-2 rounded-lg text-xs font-bold">時刻表検索</a>
-        <a href="/busstop" class="bg-blue-500/30 text-white border border-white/20 px-3 py-2 rounded-lg text-xs font-bold">バス停検索</a>
+        <a href="/#/realtime" class="bg-blue-500/25 text-white border border-white/20 px-3 py-2 rounded-lg text-xs font-bold">リアルタイム</a>
+        <a href="/routesearch" class="bg-blue-500/25 text-white border border-white/20 px-3 py-2 rounded-lg text-xs font-bold">経路検索</a>
+        <a href="/timetable" class="bg-blue-500/25 text-white border border-white/20 px-3 py-2 rounded-lg text-xs font-bold">時刻表検索</a>
+        <a href="/busstop" class="bg-blue-500/25 text-white border border-white/20 px-3 py-2 rounded-lg text-xs font-bold">バス停検索</a>
+        <a href="/spotsearch" class="bg-blue-500/25 text-white border border-white/20 px-3 py-2 rounded-lg text-xs font-bold">スポット検索</a>
       </div>
     </section>
 
+    <!-- 目的から選ぶ：知りたいことから機能へ直接ジャンプする -->
+    <section class="mb-8">
+      <h3 class="text-sm font-black text-gray-500 tracking-wide mb-3 px-1">目的から選ぶ</h3>
+      <div class="grid grid-cols-2 gap-3">
+        <a href="/#/realtime" class="bg-white rounded-2xl border-2 border-gray-100 shadow-sm p-4 hover:border-blue-300 active:scale-[0.97] transition-all">
+          <span class="w-11 h-11 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center mb-2">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18,11H6V6h12M16.5,17A1.5,1.5 0 0,1 15,15.5A1.5,1.5 0 0,1 16.5,14A1.5,1.5 0 0,1 18,15.5A1.5,1.5 0 0,1 16.5,17M7.5,17A1.5,1.5 0 0,1 6,15.5A1.5,1.5 0 0,1 7.5,14A1.5,1.5 0 0,1 9,15.5A1.5,1.5 0 0,1 7.5,17M4,16c0,0.88 0.39,1.67 1,2.22V20a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1h8v1a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1.78c0.61-0.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8,0.5-8,4V16Z"/></svg>
+          </span>
+          <p class="font-bold text-gray-900 text-sm leading-snug">バスは今どこ？</p>
+          <p class="text-[11px] text-gray-500 font-bold mt-0.5">→ リアルタイム運行情報</p>
+        </a>
+        <a href="/routesearch" class="bg-white rounded-2xl border-2 border-gray-100 shadow-sm p-4 hover:border-blue-300 active:scale-[0.97] transition-all">
+          <span class="w-11 h-11 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center mb-2">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="6" cy="6.5" r="2.25"/><circle cx="18" cy="17.5" r="2.25"/><path d="M7.6 8 16.4 16" stroke-dasharray="2.4 2.6"/></svg>
+          </span>
+          <p class="font-bold text-gray-900 text-sm leading-snug">目的地までどう行く？</p>
+          <p class="text-[11px] text-gray-500 font-bold mt-0.5">→ 経路検索</p>
+        </a>
+        <a href="/timetable" class="bg-white rounded-2xl border-2 border-gray-100 shadow-sm p-4 hover:border-blue-300 active:scale-[0.97] transition-all">
+          <span class="w-11 h-11 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center mb-2">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.25"/><path d="M12 7.5V12l3 2"/></svg>
+          </span>
+          <p class="font-bold text-gray-900 text-sm leading-snug">次のバスは何時？</p>
+          <p class="text-[11px] text-gray-500 font-bold mt-0.5">→ 時刻表検索</p>
+        </a>
+        <a href="/busstop" class="bg-white rounded-2xl border-2 border-gray-100 shadow-sm p-4 hover:border-blue-300 active:scale-[0.97] transition-all">
+          <span class="w-11 h-11 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center mb-2">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s6.5-6.02 6.5-10.5A6.5 6.5 0 0 0 5.5 10.5C5.5 14.98 12 21 12 21z"/><circle cx="12" cy="10.4" r="2.15"/></svg>
+          </span>
+          <p class="font-bold text-gray-900 text-sm leading-snug">近くのバス停は？</p>
+          <p class="text-[11px] text-gray-500 font-bold mt-0.5">→ バス停検索・マップ</p>
+        </a>
+      </div>
+    </section>
+
+    <!-- 機能ごとの詳しい使い方 -->
     <section class="space-y-6">
+      <h3 class="text-sm font-black text-gray-500 tracking-wide px-1">機能ごとの使い方</h3>
+
       <article class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
         <div class="flex items-center gap-3 mb-3">
-          <span class="w-10 h-10 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center font-bold">1</span>
-          <h3 class="text-lg font-bold text-gray-900">まずは「リアルタイム運行情報」を確認する</h3>
+          <span class="w-10 h-10 shrink-0 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18,11H6V6h12M16.5,17A1.5,1.5 0 0,1 15,15.5A1.5,1.5 0 0,1 16.5,14A1.5,1.5 0 0,1 18,15.5A1.5,1.5 0 0,1 16.5,17M7.5,17A1.5,1.5 0 0,1 6,15.5A1.5,1.5 0 0,1 7.5,14A1.5,1.5 0 0,1 9,15.5A1.5,1.5 0 0,1 7.5,17M4,16c0,0.88 0.39,1.67 1,2.22V20a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1h8v1a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1.78c0.61-0.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8,0.5-8,4V16Z"/></svg>
+          </span>
+          <h4 class="text-lg font-bold text-gray-900 leading-snug">リアルタイム運行情報</h4>
         </div>
-        <p class="text-sm text-gray-700 leading-relaxed mb-3">
-          バスが今どこにいるか、遅れているか、予定どおりかを知りたいときは、ホーム画面の「リアルタイム運行情報」を開きます。
-        </p>
+        <p class="text-xs font-bold text-blue-800 bg-blue-50 rounded-lg px-3 py-2 mb-3">こんなときに：バスが遅れていないか、もう出発したかを知りたい</p>
         <ol class="list-decimal list-inside text-sm text-gray-700 leading-relaxed space-y-2 pl-1">
-          <li>ホームから「リアルタイム運行情報」をタップします。</li>
-          <li>路線を選択すると、現在運行中のバスの位置と遅延状況が表示されます。</li>
-          <li>下にある「時刻表（参考）」で、次の発車予定の目安も確認できます。</li>
+          <li>ホームの「リアルタイム運行情報」をタップします。</li>
+          <li>路線を選ぶと、運行中のバスの現在位置と遅れ具合が表示されます。</li>
+          <li>バスをタップすると、停留所ごとの到着予測・到着実績が確認できます。</li>
+          <li>同じ画面の下にある「時刻表（参考）」で、次の発車予定の目安も見られます。</li>
         </ol>
+        <a href="/#/realtime" class="mt-4 inline-flex items-center gap-1.5 text-sm font-bold text-blue-700">
+          リアルタイム運行情報をひらく
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>
+        </a>
       </article>
 
       <article class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
         <div class="flex items-center gap-3 mb-3">
-          <span class="w-10 h-10 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center font-bold">2</span>
-          <h3 class="text-lg font-bold text-gray-900">行き先が決まっているなら「経路検索」を使う</h3>
+          <span class="w-10 h-10 shrink-0 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="6" cy="6.5" r="2.25"/><circle cx="18" cy="17.5" r="2.25"/><path d="M7.6 8 16.4 16" stroke-dasharray="2.4 2.6"/></svg>
+          </span>
+          <h4 class="text-lg font-bold text-gray-900 leading-snug">経路検索</h4>
         </div>
-        <p class="text-sm text-gray-700 leading-relaxed mb-3">
-          出発地と目的地を入力すると、どの路線でどのくらいの時間で行けるかを案内します。乗り換え回数や徒歩の有無も確認できます。
-        </p>
+        <p class="text-xs font-bold text-blue-800 bg-blue-50 rounded-lg px-3 py-2 mb-3">こんなときに：出発地から目的地までの行き方を知りたい</p>
         <ol class="list-decimal list-inside text-sm text-gray-700 leading-relaxed space-y-2 pl-1">
           <li>ホームの「経路検索」を選びます。</li>
-          <li>出発地と目的地を入力して検索します。</li>
-          <li>候補を選ぶと、乗り換え回数、所要時間、各停留所の情報を確認できます。</li>
+          <li>出発地と目的地を入力し、必要なら日時を指定して検索します。</li>
+          <li>候補をタップすると、乗るバス・乗り換え・所要時間・運賃・通過するバス停を確認できます。</li>
+          <li>当日の検索なら、確定した経路にリアルタイムの遅れが反映されます。</li>
         </ol>
+        <p class="text-[11px] text-gray-500 leading-relaxed mt-3">
+          検索フォームの「詳細設定」で、乗り換え回数の上限・徒歩での乗り継ぎ・乗り換えの余裕時間を指定できます。
+        </p>
+        <a href="/routesearch" class="mt-4 inline-flex items-center gap-1.5 text-sm font-bold text-blue-700">
+          経路検索をひらく
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>
+        </a>
       </article>
 
       <article class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
         <div class="flex items-center gap-3 mb-3">
-          <span class="w-10 h-10 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center font-bold">3</span>
-          <h3 class="text-lg font-bold text-gray-900">バス停ごとの時刻表を見たいときは「時刻表検索」</h3>
+          <span class="w-10 h-10 shrink-0 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.25"/><path d="M12 7.5V12l3 2"/></svg>
+          </span>
+          <h4 class="text-lg font-bold text-gray-900 leading-snug">時刻表検索</h4>
         </div>
-        <p class="text-sm text-gray-700 leading-relaxed mb-3">
-          いつ発車するかを確認したい場合は、時刻表検索が便利です。行き先やバス停を絞って、予定時刻を確認できます。
-        </p>
+        <p class="text-xs font-bold text-blue-800 bg-blue-50 rounded-lg px-3 py-2 mb-3">こんなときに：あるバス停の発車時刻を一覧で見たい</p>
         <ol class="list-decimal list-inside text-sm text-gray-700 leading-relaxed space-y-2 pl-1">
           <li>ホームの「時刻表検索」を開きます。</li>
-          <li>路線やバス停を選ぶと、発車時刻一覧が出ます。</li>
-          <li>実際の遅れや運行状況と照らし合わせて、出発の目安を確認します。</li>
+          <li>路線やバス停を選ぶと、時・分で並んだ発車時刻の一覧が出ます。</li>
+          <li>時刻をタップすると、その便の全停留所の通過時刻や便の詳細を確認できます。</li>
         </ol>
+        <p class="text-[11px] text-gray-500 leading-relaxed mt-3">
+          選んだ日がダイヤデータの有効期間外のときは、注意メッセージが表示されます。最新の時刻は各バス事業者でご確認ください。
+        </p>
+        <a href="/timetable" class="mt-4 inline-flex items-center gap-1.5 text-sm font-bold text-blue-700">
+          時刻表検索をひらく
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>
+        </a>
       </article>
 
       <article class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
         <div class="flex items-center gap-3 mb-3">
-          <span class="w-10 h-10 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center font-bold">4</span>
-          <h3 class="text-lg font-bold text-gray-900">近くのバス停を知りたいときは「バス停検索」</h3>
+          <span class="w-10 h-10 shrink-0 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s6.5-6.02 6.5-10.5A6.5 6.5 0 0 0 5.5 10.5C5.5 14.98 12 21 12 21z"/><circle cx="12" cy="10.4" r="2.15"/></svg>
+          </span>
+          <h4 class="text-lg font-bold text-gray-900 leading-snug">バス停検索・バス停マップ</h4>
         </div>
-        <p class="text-sm text-gray-700 leading-relaxed mb-3">
-          地名や停留所名から探したり、地図から近くの停留所を見つけたりできます。バス停ごとの時刻表や到着予定も確認できます。
-        </p>
+        <p class="text-xs font-bold text-blue-800 bg-blue-50 rounded-lg px-3 py-2 mb-3">こんなときに：近くのバス停や乗り場を探したい</p>
         <ol class="list-decimal list-inside text-sm text-gray-700 leading-relaxed space-y-2 pl-1">
-          <li>ホームの「バス停検索」からバス停名を入力します。</li>
-          <li>候補の中から目的の停留所を選びます。</li>
-          <li>停留所詳細ページで、時刻表やバスの到着予定を確認します。</li>
+          <li>ホームの「バス停検索」でバス停名を入力するか、「マップ」から地図で探します。</li>
+          <li>目的のバス停を選ぶと、乗り場・時刻表・接近中のバスをまとめて確認できます。</li>
+          <li>そのバス停に向かうための地図表示や、乗り場ごとのお知らせも見られます。</li>
         </ol>
+        <div class="mt-4 flex flex-wrap gap-4">
+          <a href="/busstop" class="inline-flex items-center gap-1.5 text-sm font-bold text-blue-700">
+            バス停検索をひらく
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>
+          </a>
+          <a href="/stopmap" class="inline-flex items-center gap-1.5 text-sm font-bold text-blue-700">
+            バス停マップをひらく
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>
+          </a>
+        </div>
       </article>
 
       <article class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
         <div class="flex items-center gap-3 mb-3">
-          <span class="w-10 h-10 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center font-bold">5</span>
-          <h3 class="text-lg font-bold text-gray-900">運休や遅延の情報を見たいときは「運行状況」</h3>
+          <span class="w-10 h-10 shrink-0 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3v18"/><path d="M6 4.5h12l-3 4 3 4H6z"/></svg>
+          </span>
+          <h4 class="text-lg font-bold text-gray-900 leading-snug">スポット検索</h4>
         </div>
-        <p class="text-sm text-gray-700 leading-relaxed mb-3">
-          事前にダイヤが変わっている場合や、運休が出ている場合は、運行状況のページを確認すると、最新のアナウンスを確認できます。
-        </p>
+        <p class="text-xs font-bold text-blue-800 bg-blue-50 rounded-lg px-3 py-2 mb-3">こんなときに：観光地や施設の近くを通るバスの路線・バス停を知りたい</p>
+        <ol class="list-decimal list-inside text-sm text-gray-700 leading-relaxed space-y-2 pl-1">
+          <li>ホームの「スポット検索」で、観光スポット名・施設名・バス停名・路線名を入力します。</li>
+          <li>観光スポットを選ぶと、そのスポット情報と、付近のバス停・そのバス停を通る路線が表示されます。</li>
+          <li>路線名をタップするとその路線のリアルタイム時刻表へ、バス停名をタップするとそのバス停のページへ移動します。</li>
+        </ol>
+        <a href="/spotsearch" class="mt-4 inline-flex items-center gap-1.5 text-sm font-bold text-blue-700">
+          スポット検索をひらく
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>
+        </a>
+      </article>
+
+      <article class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="w-10 h-10 shrink-0 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.25"/><path d="M12 11v5"/><circle cx="12" cy="8.3" r="1" fill="currentColor" stroke="none"/></svg>
+          </span>
+          <h4 class="text-lg font-bold text-gray-900 leading-snug">路線バス運行状況</h4>
+        </div>
+        <p class="text-xs font-bold text-amber-800 bg-amber-50 rounded-lg px-3 py-2 mb-3">こんなときに：運休・ダイヤ変更などのお知らせを確認したい</p>
         <ol class="list-decimal list-inside text-sm text-gray-700 leading-relaxed space-y-2 pl-1">
           <li>ホームの「路線バス運行状況」を選びます。</li>
-          <li>公式サイトの最新情報が自動取得されて表示されます。</li>
-          <li>最終的な判断は公式サイトで確認するのがおすすめです。</li>
+          <li>アルピコ交通の公式ページの最新情報が自動で取得され、表示されます。</li>
+          <li>最終的な判断は、各バス事業者の公式サイトでご確認ください。</li>
         </ol>
+        <a href="/servicestatus" class="mt-4 inline-flex items-center gap-1.5 text-sm font-bold text-amber-700">
+          運行状況をひらく
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>
+        </a>
       </article>
     </section>
 
+    <!-- もっと便利に使う -->
     <section class="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 mt-8">
-      <h3 class="text-lg font-bold text-gray-900 mb-3">よくある使い分け</h3>
-      <div class="space-y-3 text-sm text-gray-700">
-        <div class="bg-blue-50 rounded-xl p-3">
-          <p class="font-bold text-blue-900">「今バスがどこにいるか知りたい」</p>
-          <p class="mt-1">→ リアルタイム運行情報</p>
+      <h3 class="text-lg font-bold text-gray-900 mb-4">もっと便利に使う</h3>
+      <div class="space-y-4 text-sm text-gray-700">
+        <div class="flex gap-3">
+          <span class="w-8 h-8 shrink-0 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center">
+            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3.5l2.6 5.4 5.9.7-4.3 4.1 1.1 5.9L12 16.9l-5.3 2.7 1.1-5.9-4.3-4.1 5.9-.7L12 3.5z"/></svg>
+          </span>
+          <p><span class="font-bold text-gray-900">お気に入り（★）</span><br>
+            路線・バス停・時刻表・経路の各画面にある★ボタンで登録すると、ホームの「お気に入り」からすぐ開けます。登録内容はこの端末内にのみ保存されます。</p>
         </div>
-        <div class="bg-blue-50 rounded-xl p-3">
-          <p class="font-bold text-blue-900">「自宅から駅までどう行くか知りたい」</p>
-          <p class="mt-1">→ 経路検索</p>
+        <div class="flex gap-3">
+          <span class="w-8 h-8 shrink-0 rounded-lg bg-blue-50 text-blue-700 flex items-center justify-center">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+          </span>
+          <p><span class="font-bold text-gray-900">自動更新</span><br>
+            画面右上のボタンで自動更新のON/OFFを切り替えられます。アクセスが集中しているときは、自動的に一時停止することがあります（「更新」ボタンで手動更新できます）。</p>
         </div>
-        <div class="bg-blue-50 rounded-xl p-3">
-          <p class="font-bold text-blue-900">「次のバスは何時に来るか知りたい」</p>
-          <p class="mt-1">→ 時刻表検索またはバス停詳細</p>
+        <div class="flex gap-3">
+          <span class="w-8 h-8 shrink-0 rounded-lg bg-blue-50 text-blue-700 flex items-center justify-center">
+            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M9 4.5 4 6.5v13l5-2 6 2 5-2v-13l-5 2-6-2Z"/><path d="M9 4.5v13M15 6.5v13"/></svg>
+          </span>
+          <p><span class="font-bold text-gray-900">マップ</span><br>
+            「マップ」から、運行中のバスを地図で見る「バスマップ」と、近くのバス停を地図で探す「バス停マップ」を開けます。</p>
         </div>
-        <div class="bg-blue-50 rounded-xl p-3">
-          <p class="font-bold text-blue-900">「近くのバス停を探したい」</p>
-          <p class="mt-1">→ バス停検索またはバス停マップ</p>
+        <div class="flex gap-3">
+          <span class="w-8 h-8 shrink-0 rounded-lg bg-amber-50 text-amber-700 flex items-center justify-center">
+            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4 3 20h18L12 4Z"/><path d="M12 10v4"/><circle cx="12" cy="17" r="0.9" fill="currentColor" stroke="none"/></svg>
+          </span>
+          <p><span class="font-bold text-gray-900">ダイヤ改正にご注意</span><br>
+            時刻表・経路検索で、選んだ日がダイヤデータの有効期間外のときは注意メッセージが出ます。改正直後などは、実際の運行と異なる場合があります。</p>
         </div>
+      </div>
+    </section>
+
+    <!-- よくある質問 -->
+    <section class="mt-8">
+      <h3 class="text-lg font-bold text-gray-900 mb-3 px-1">よくある質問</h3>
+      <div class="space-y-2">
+        <details class="faq bg-white rounded-xl border border-gray-200 shadow-sm">
+          <summary class="flex items-center justify-between gap-3 px-4 py-3.5 cursor-pointer font-bold text-gray-900 text-sm">
+            <span>リアルタイムでバスが表示されないのはなぜ？</span>
+            <svg class="faq-chevron w-5 h-5 text-gray-300 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"></path></svg>
+          </summary>
+          <div class="px-4 pb-4 text-sm text-gray-700 leading-relaxed">
+            その路線が運行していない時間帯や、便の始発時刻より前は、リアルタイムのバスは表示されません。早朝・深夜は運行情報の取得を休止しています。運行中でも、GPSがまだ届いていない場合は「検知中…」と表示されます。
+          </div>
+        </details>
+        <details class="faq bg-white rounded-xl border border-gray-200 shadow-sm">
+          <summary class="flex items-center justify-between gap-3 px-4 py-3.5 cursor-pointer font-bold text-gray-900 text-sm">
+            <span>到着予測はどのくらい正確ですか？</span>
+            <svg class="faq-chevron w-5 h-5 text-gray-300 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"></path></svg>
+          </summary>
+          <div class="px-4 pb-4 text-sm text-gray-700 leading-relaxed">
+            過去の走行実績とその日の走行ペースをもとに計算した目安です。渋滞・信号・乗降の状況で変わります。時間に余裕をもってご利用ください。
+          </div>
+        </details>
+        <details class="faq bg-white rounded-xl border border-gray-200 shadow-sm">
+          <summary class="flex items-center justify-between gap-3 px-4 py-3.5 cursor-pointer font-bold text-gray-900 text-sm">
+            <span>表示される時刻と実際の運行が違います</span>
+            <svg class="faq-chevron w-5 h-5 text-gray-300 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"></path></svg>
+          </summary>
+          <div class="px-4 pb-4 text-sm text-gray-700 leading-relaxed">
+            ダイヤ改正が反映される前の可能性があります。選んだ日が有効期間外のときは注意メッセージが出ます。このサイトの情報は目安のため、確実な時刻は各バス事業者の公式情報でご確認ください。
+          </div>
+        </details>
+        <details class="faq bg-white rounded-xl border border-gray-200 shadow-sm">
+          <summary class="flex items-center justify-between gap-3 px-4 py-3.5 cursor-pointer font-bold text-gray-900 text-sm">
+            <span>運賃は表示されますか？</span>
+            <svg class="faq-chevron w-5 h-5 text-gray-300 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"></path></svg>
+          </summary>
+          <div class="px-4 pb-4 text-sm text-gray-700 leading-relaxed">
+            経路検索の結果に運賃を表示します。運賃データがない区間は「運賃不明」と表示され、金額の推測は行いません。
+          </div>
+        </details>
+        <details class="faq bg-white rounded-xl border border-gray-200 shadow-sm">
+          <summary class="flex items-center justify-between gap-3 px-4 py-3.5 cursor-pointer font-bold text-gray-900 text-sm">
+            <span>どのエリア・どの路線に対応していますか？</span>
+            <svg class="faq-chevron w-5 h-5 text-gray-300 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"></path></svg>
+          </summary>
+          <div class="px-4 pb-4 text-sm text-gray-700 leading-relaxed">
+            松本市内の路線バス（ぐるっと松本バス・アルピコ交通・松本市営など）に対応しています。対応路線は順次拡充しています。
+          </div>
+        </details>
+        <details class="faq bg-white rounded-xl border border-gray-200 shadow-sm">
+          <summary class="flex items-center justify-between gap-3 px-4 py-3.5 cursor-pointer font-bold text-gray-900 text-sm">
+            <span>利用料金やアカウント登録は必要ですか？</span>
+            <svg class="faq-chevron w-5 h-5 text-gray-300 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"></path></svg>
+          </summary>
+          <div class="px-4 pb-4 text-sm text-gray-700 leading-relaxed">
+            無料で、登録も不要です。お気に入りや設定はこの端末内にのみ保存され、サーバーには送信されません。
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <!-- 注意事項 -->
+    <section class="bg-gray-200 p-5 rounded-2xl border border-gray-300 mt-8 mb-6">
+      <h3 class="text-md font-bold text-gray-700 mb-2 underline decoration-blue-500 decoration-2">ご利用にあたって</h3>
+      <p class="text-sm text-gray-700 leading-relaxed font-bold">このサイトの情報は目安です。時刻・運賃・運行状況は必ず各バス事業者の公式情報でご確認ください。</p>
+      <div class="mt-3 flex flex-col gap-3 sm:flex-row">
+        <a href="https://www.alpico.co.jp/traffic/trafficinfo/matsumoto/" target="_blank" rel="noopener noreferrer" class="flex-1 bg-white border border-blue-600 text-blue-700 p-3 rounded-lg font-bold flex justify-center items-center text-sm shadow-sm">
+          アルピコ交通公式サイトで詳しく見る
+        </a>
+        <a href="/?tutorial=1" class="flex-1 bg-blue-700 text-white p-3 rounded-lg font-bold flex justify-center items-center text-sm shadow-sm">
+          使い方ツアーをもう一度見る
+        </a>
       </div>
     </section>
 

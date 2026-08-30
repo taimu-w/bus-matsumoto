@@ -15,7 +15,8 @@ const {
   searchNearbyStops,
   getStopSummariesByKeys,
   getStopTimetable,
-  getTripDetail
+  getTripDetail,
+  resolvePlatformRef
 } = require('../services/gtfsTimetable');
 const {
   unqualifyRouteId,
@@ -29,14 +30,20 @@ const {
   buildBusEntry,
   getAssignmentDetailForAdmin,
   getStopArrivalDetailForAdmin,
+  getGpsOutageDetailForAdmin,
   startTimeToUrlHhmm
 } = require('../services/realtimeTripLookup');
 const { getApproachingBuses } = require('../services/busStopApproaching');
+const { getOperationHistoryByCarIds } = require('../services/vehicleOperationHistory');
 const { listLinkableTrips, linkVehicleToTrip, unlinkAssignment } = require('../services/manualAssignment');
 const { SUCCESS_END_REASONS } = require('../services/finishService');
 const touristSpots = require('../services/touristSpots');
+const spotSearch = require('../services/spotSearch');
+const platformNotices = require('../services/platformNotices');
 const { invalidateHolidayCache } = require('../services/holidayCalendar');
 const { invalidateRouteExternalIdCache } = require('../services/routeExternalIdMapping');
+const { invalidateDirectionRulesCache } = require('../services/directionRules');
+const { normalizeDirectionRuleInput } = require('../config/directionMapping');
 const visitorTracker = require('../services/visitorTracker');
 const jobMonitor = require('../services/jobMonitor');
 const apiMetrics = require('../services/apiMetrics');
@@ -307,6 +314,97 @@ router.delete('/admin/route-mappings/:externalId', requireAdminAuth, async (req,
   }
 });
 
+// 方向マッピング（位置情報CSVの方向列の値 ⇔ GTFS direction_id）の取得・編集API
+// （route_direction_rules）。
+//
+// 行が無い路線は既定で mode:'ignore'（方向で候補車両を絞り込まない）。方向で絞りたい
+// 路線にだけ mode:'map' の行を追加し、CSV方向値→direction_id の変換表とフォールバック値を
+// 設定する。route_id は routes テーブルへの実在チェックあり（管理画面は /api/routes の
+// 候補一覧から選ばせる）。入力の検証・正規化は config/directionMapping.js が担う。
+
+// GET /api/admin/direction-rules -> 方向マッピングの一覧＋未設定路線の既定
+router.get('/admin/direction-rules', requireAdminAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT d.route_id, d.mode, d.value_map, d.fallback, d.note, d.updated_at, r.name AS route_name
+       FROM route_direction_rules d
+       LEFT JOIN routes r ON r.id = d.route_id
+       ORDER BY d.route_id ASC`
+    );
+    res.json({
+      default: { mode: 'ignore' },
+      rules: result.rows.map((row) => ({
+        routeId: row.route_id,
+        routeName: row.route_name || null,
+        mode: row.mode,
+        valueMap: row.value_map || {},
+        fallback: row.fallback === undefined ? null : row.fallback,
+        note: row.note || '',
+        updatedAt: row.updated_at
+      }))
+    });
+  } catch (err) {
+    console.error('[api] /admin/direction-rules 取得エラー:', err);
+    res.status(500).json({ error: '方向マッピングの取得に失敗しました。' });
+  }
+});
+
+// POST /api/admin/direction-rules -> 追加・更新（route_idキーのUPSERT）
+router.post('/admin/direction-rules', requireAdminAuth, async (req, res) => {
+  const { routeId, mode, valueMap, fallback, note } = req.body || {};
+  const trimmedRouteId = typeof routeId === 'string' ? routeId.trim() : '';
+  const trimmedNote = typeof note === 'string' ? note.trim() : '';
+
+  if (!trimmedRouteId) {
+    return res.status(400).json({ error: '路線を選択してください。' });
+  }
+
+  const normalized = normalizeDirectionRuleInput({ mode, valueMap, fallback });
+  if (normalized.error) {
+    return res.status(400).json({ error: normalized.error });
+  }
+  const { rule } = normalized;
+
+  try {
+    const routeCheck = await pool.query('SELECT 1 FROM routes WHERE id = $1', [trimmedRouteId]);
+    if (routeCheck.rows.length === 0) {
+      return res.status(400).json({
+        error: `指定の路線ID「${trimmedRouteId}」は現在のGTFSデータに存在しません。候補一覧から選択してください。`
+      });
+    }
+
+    await pool.query(
+      `INSERT INTO route_direction_rules (route_id, mode, value_map, fallback, note, updated_at)
+       VALUES ($1, $2, $3::jsonb, $4, $5, now())
+       ON CONFLICT (route_id) DO UPDATE
+         SET mode = EXCLUDED.mode,
+             value_map = EXCLUDED.value_map,
+             fallback = EXCLUDED.fallback,
+             note = EXCLUDED.note,
+             updated_at = now()`,
+      [trimmedRouteId, rule.mode, JSON.stringify(rule.map || {}), rule.fallback ?? null, trimmedNote || null]
+    );
+    invalidateDirectionRulesCache();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/direction-rules 保存エラー:', err);
+    res.status(500).json({ error: '方向マッピングの保存に失敗しました。' });
+  }
+});
+
+// DELETE /api/admin/direction-rules/:routeId -> 1件削除（既定の ignore に戻る）
+router.delete('/admin/direction-rules/:routeId', requireAdminAuth, async (req, res) => {
+  const { routeId } = req.params;
+  try {
+    await pool.query('DELETE FROM route_direction_rules WHERE route_id = $1', [routeId]);
+    invalidateDirectionRulesCache();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/direction-rules 削除エラー:', err);
+    res.status(500).json({ error: '方向マッピングの削除に失敗しました。' });
+  }
+});
+
 // ==========================================================
 // 車両名・メモ管理（車両ID＝car_id ⇔ 名前・メモ）。
 // vehicles は路線ごとに行が分かれ運行終了で行が増えるため、キーは car_id。
@@ -398,6 +496,66 @@ router.delete('/admin/vehicle-labels/:carId', requireAdminAuth, async (req, res)
   } catch (err) {
     console.error('[api] /admin/vehicle-labels 削除エラー:', err);
     res.status(500).json({ error: '車両名・メモの削除に失敗しました。' });
+  }
+});
+
+// ==========================================================
+// 車両運用状況（車両ID＝car_id ごとの「直近の運行履歴」）。
+// 便のクローズ時に vehicle_operation_history へ car_id × 曜日区分で直近1件だけ記録される
+// （services/vehicleOperationHistory.js・finishService.closeDailyTrip）。
+// completed_trips と違い保持期間の影響を受けないため、たまにしか走らない車両の
+// 運用状況も確認できる。車両名（vehicle_labels）があれば名前を優先表示する。
+// ==========================================================
+
+// GET /api/admin/vehicle-operation-history/:carId -> 1台ぶんの直近運行履歴（平日1件・土休日1件）。
+// 運行ダッシュボードで車両名/車両IDをタップしたときの詳細展開に使う（車両名・メモも併せて返す）。
+router.get('/admin/vehicle-operation-history/:carId', requireAdminAuth, async (req, res) => {
+  const carId = typeof req.params.carId === 'string' ? req.params.carId.trim() : '';
+  if (!carId) return res.status(400).json({ error: '車両IDが不正です。' });
+  try {
+    const [historyMap, labelRes] = await Promise.all([
+      getOperationHistoryByCarIds(pool, [carId]),
+      pool.query('SELECT name, memo FROM vehicle_labels WHERE car_id = $1', [carId])
+    ]);
+    const label = labelRes.rows[0] || {};
+    res.json({
+      carId,
+      carName: label.name || null,
+      carMemo: label.memo || null,
+      history: historyMap.get(carId) || { weekday: [], weekendHoliday: [] }
+    });
+  } catch (err) {
+    console.error('[api] /admin/vehicle-operation-history/:carId エラー:', err);
+    res.status(500).json({ error: '車両の運行履歴の取得に失敗しました。' });
+  }
+});
+
+// GET /api/admin/vehicle-operation-status -> 管理画面「車両運用状況」。
+// 運行履歴のある車両、および名前を登録済みの車両ごとに、直近の平日・土休日運行履歴を返す。
+router.get('/admin/vehicle-operation-status', requireAdminAuth, async (req, res) => {
+  try {
+    const carsRes = await pool.query(
+      `SELECT c.car_id, vl.name
+       FROM (
+         SELECT car_id FROM vehicle_operation_history
+         UNION
+         SELECT car_id FROM vehicle_labels
+       ) c
+       LEFT JOIN vehicle_labels vl ON vl.car_id = c.car_id
+       ORDER BY vl.name ASC NULLS LAST, c.car_id ASC`
+    );
+    const carIds = carsRes.rows.map((row) => row.car_id);
+    const historyMap = await getOperationHistoryByCarIds(pool, carIds);
+    res.json({
+      vehicles: carsRes.rows.map((row) => ({
+        carId: row.car_id,
+        name: row.name || null,
+        history: historyMap.get(row.car_id) || { weekday: [], weekendHoliday: [] }
+      }))
+    });
+  } catch (err) {
+    console.error('[api] /admin/vehicle-operation-status エラー:', err);
+    res.status(500).json({ error: '車両運用状況の取得に失敗しました。' });
   }
 });
 
@@ -602,6 +760,35 @@ router.get('/admin/tourist-spots', requireAdminAuth, async (req, res) => {
   }
 });
 
+// GET /api/admin/tourist-spots/link-clicks?from=YYYY-MM-DD&to=YYYY-MM-DD
+// -> 管理画面「観光スポットの検索・アクセス数」用。スポット検索の検索回数（spot_search_counts）と
+//    公式サイトリンクのタップ回数（tourist_spot_link_clicks）をスポットごとに期間集計してマージする
+//    （掲載の有用性判断用。docs/tourist-spots.md / docs/spot-search.md）。
+//    期間は最大1年（366日）。未指定なら直近30日。
+router.get('/admin/tourist-spots/link-clicks', requireAdminAuth, async (req, res) => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : getServiceDateString();
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '')
+    ? req.query.from
+    : new Date(Date.parse(`${to}T00:00:00Z`) - 29 * DAY_MS).toISOString().slice(0, 10);
+
+  const spanDays = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS);
+  if (!Number.isFinite(spanDays) || spanDays < 0) {
+    return res.status(400).json({ error: '開始日は終了日以前の日付を指定してください。' });
+  }
+  if (spanDays > touristSpots.LINK_CLICK_MAX_RANGE_DAYS - 1) {
+    return res.status(400).json({ error: '期間は最大1年（366日）です。' });
+  }
+
+  try {
+    const stats = await spotSearch.getSpotEngagementStats({ from, to });
+    res.json(stats);
+  } catch (err) {
+    console.error('[api] /admin/tourist-spots/link-clicks エラー:', err);
+    res.status(500).json({ error: 'アクセス数の集計に失敗しました。' });
+  }
+});
+
 // PUT /api/admin/tourist-spots -> テキスト一括登録（全件洗い替え／UPSERT、観光スポット情報_仕様書）
 router.put('/admin/tourist-spots', requireAdminAuth, async (req, res) => {
   const { text } = req.body || {};
@@ -620,9 +807,9 @@ router.put('/admin/tourist-spots', requireAdminAuth, async (req, res) => {
 
 // PATCH /api/admin/tourist-spots/:id -> 有効/無効切り替え
 router.patch('/admin/tourist-spots/:id', requireAdminAuth, async (req, res) => {
-  const id = Number.parseInt(req.params.id, 10);
+  const id = String(req.params.id || '').trim();
   const { enabled } = req.body || {};
-  if (!Number.isInteger(id) || typeof enabled !== 'boolean') {
+  if (!id || typeof enabled !== 'boolean') {
     return res.status(400).json({ error: 'idとenabled（真偽値）を指定してください。' });
   }
   try {
@@ -637,14 +824,100 @@ router.patch('/admin/tourist-spots/:id', requireAdminAuth, async (req, res) => {
 
 // DELETE /api/admin/tourist-spots/:id -> 1件削除
 router.delete('/admin/tourist-spots/:id', requireAdminAuth, async (req, res) => {
-  const id = Number.parseInt(req.params.id, 10);
-  if (!Number.isInteger(id)) return res.status(400).json({ error: '不正なIDです。' });
+  const id = String(req.params.id || '').trim();
+  if (!id) return res.status(400).json({ error: '不正なIDです。' });
   try {
     await touristSpots.deleteSpot(id);
     res.json({ ok: true });
   } catch (err) {
     console.error('[api] /admin/tourist-spots/:id 削除エラー:', err);
     res.status(500).json({ error: '削除に失敗しました。' });
+  }
+});
+
+// ==========================================================
+// 乗り場（のりば）ごとのお知らせ配信（docs/platform-notices.md）。
+// バス停詳細ページの「このバス停でできること」の下に、乗り場別表示のときだけ出す。
+// 対象の乗り場は stopKey + platform（?platform= と同じ値）を gtfsTimetable.resolvePlatformRef()
+// で解決し、正規の feed_id + stop_id へ落としてから保存する（管理画面の入力ミスをその場で弾く）。
+// ==========================================================
+
+// GET /api/admin/platform-notices -> 全件（無効も含む。管理画面一覧用）
+router.get('/admin/platform-notices', requireAdminAuth, async (req, res) => {
+  try {
+    const notices = await platformNotices.listAll();
+    res.json({ notices });
+  } catch (err) {
+    console.error('[api] /admin/platform-notices 取得エラー:', err);
+    res.status(500).json({ error: '乗り場お知らせの取得に失敗しました。' });
+  }
+});
+
+// POST /api/admin/platform-notices -> 新規作成。body: { stopKey, platform, kind, title, imageUrl, linkBody, enabled }
+router.post('/admin/platform-notices', requireAdminAuth, async (req, res) => {
+  const { stopKey, platform } = req.body || {};
+  if (typeof stopKey !== 'string' || !stopKey.trim()) {
+    return res.status(400).json({ error: 'バス停を選択してください。' });
+  }
+  try {
+    const ref = await resolvePlatformRef(stopKey.trim(), typeof platform === 'string' ? platform.trim() : '');
+    if (!ref) return res.status(400).json({ error: '指定のバス停が見つかりませんでした。' });
+    if (!ref.platform) {
+      return res.status(400).json({ error: 'この停留所は乗り場が複数あります。お知らせを出す乗り場を選択してください。' });
+    }
+    const result = await platformNotices.createNotice(
+      { ...ref.platform, stopKey: ref.stopKey, stopName: ref.stopName },
+      req.body || {}
+    );
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    res.json({ ok: true, notice: result.notice });
+  } catch (err) {
+    console.error('[api] /admin/platform-notices 作成エラー:', err);
+    res.status(500).json({ error: '乗り場お知らせの保存に失敗しました。' });
+  }
+});
+
+// PUT /api/admin/platform-notices/:id -> 内容の更新（対象の乗り場は変えない）
+router.put('/admin/platform-notices/:id', requireAdminAuth, async (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: '不正なIDです。' });
+  try {
+    const result = await platformNotices.updateNotice(id, req.body || {});
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    res.json({ ok: true, notice: result.notice });
+  } catch (err) {
+    console.error('[api] /admin/platform-notices/:id 更新エラー:', err);
+    res.status(500).json({ error: '乗り場お知らせの更新に失敗しました。' });
+  }
+});
+
+// PATCH /api/admin/platform-notices/:id -> 有効/無効の切り替え
+router.patch('/admin/platform-notices/:id', requireAdminAuth, async (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: '不正なIDです。' });
+  if (typeof req.body?.enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled（真偽値）を指定してください。' });
+  }
+  try {
+    const updated = await platformNotices.setNoticeEnabled(id, req.body.enabled);
+    if (!updated) return res.status(404).json({ error: '指定のお知らせが見つかりませんでした。' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/platform-notices/:id 切替エラー:', err);
+    res.status(500).json({ error: '乗り場お知らせの更新に失敗しました。' });
+  }
+});
+
+// DELETE /api/admin/platform-notices/:id -> 1件削除
+router.delete('/admin/platform-notices/:id', requireAdminAuth, async (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: '不正なIDです。' });
+  try {
+    await platformNotices.deleteNotice(id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/platform-notices/:id 削除エラー:', err);
+    res.status(500).json({ error: '乗り場お知らせの削除に失敗しました。' });
   }
 });
 
@@ -1055,6 +1328,44 @@ router.get('/route-search', async (req, res) => {
   }
 });
 
+// ==========================================================
+// スポット検索（docs/spot-search.md / services/spotSearch.js / frontend/spotsearch.js）。
+// 地名（観光スポット・その他のスポット）・バス停・路線を1つ入力すると、
+// スポット情報＋付近のバス停＋周辺を通る路線を返す簡易的な路線・バス停検索。
+// ==========================================================
+
+// GET /api/spot-search/suggest?q=...&limit=... -> 入力候補（バス停・観光スポット・路線を混ぜて返す）
+router.get('/spot-search/suggest', async (req, res) => {
+  try {
+    const query = String(req.query.q || '').trim();
+    if (!query) return res.json({ stops: [], spots: [], routes: [] });
+    const result = await spotSearch.suggest(query, req.query.limit);
+    res.json(result);
+  } catch (err) {
+    console.error('[api] /spot-search/suggest エラー:', err);
+    res.status(500).json({ error: 'スポット候補の取得に失敗しました。' });
+  }
+});
+
+// GET /api/spot-search?spotId=... | stopKey=... | q=... -> スポット検索の実行。
+// 対象が観光スポット／その他のスポットに確定したら検索回数を +1 する（spot_search_counts）。
+// 対象が路線に解決した場合は found:true・resolvedFrom:'route' を返し、フロントがリアルタイム時刻表へ遷移する。
+router.get('/spot-search', async (req, res) => {
+  try {
+    const result = await spotSearch.search({
+      spotId: req.query.spotId || null,
+      stopKey: req.query.stopKey || null,
+      q: req.query.q || null,
+      radiusMeters: req.query.radius,
+      limit: req.query.limit
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[api] /spot-search エラー:', err);
+    res.status(500).json({ error: 'スポット検索に失敗しました。' });
+  }
+});
+
 // GET /api/admin/vehicle-positions-map -> 運行ダッシュボード（地図）の「全車両（直近3分）」モード用。
 // /api/buses-for-map（担当車両のみ）と異なり、便に割り当てられていない・候補にすらなっていない
 // 車両も含め、直近3分以内にGPSを受信した全車両を1台につき最新の1件だけ返す。
@@ -1127,6 +1438,25 @@ router.get('/admin/assignments/:assignmentId', requireAdminAuth, async (req, res
   } catch (err) {
     console.error('[api] /admin/assignments/:assignmentId エラー:', err);
     res.status(500).json({ error: '便の詳細情報の取得に失敗しました。' });
+  }
+});
+
+// GET /api/admin/gps-outage/:assignmentId -> 異常アラート「GPS途絶で便打ち切り」(gpsLostTrip)の
+// 「地図で検証」用。運行ダッシュボードの詳細（停車バス停・位置履歴・リアルタイム時刻表）に、
+// 途絶の一覧（途絶/復旧の時刻・地点、継続分数）と「途絶時点で時刻表のどこまで進んでいたか」を
+// 添えて返す。走行経路はGPS_LOG_RETENTION_HOURS（既定48時間）を過ぎると空になる。
+router.get('/admin/gps-outage/:assignmentId', requireAdminAuth, async (req, res) => {
+  try {
+    const assignmentId = Number(req.params.assignmentId);
+    if (!Number.isInteger(assignmentId)) {
+      return res.status(400).json({ error: '不正な assignmentId です。' });
+    }
+    const detail = await getGpsOutageDetailForAdmin(assignmentId);
+    if (!detail) return res.status(404).json({ error: '指定の割り当てが見つかりませんでした。' });
+    res.json(detail);
+  } catch (err) {
+    console.error('[api] /admin/gps-outage/:assignmentId エラー:', err);
+    res.status(500).json({ error: 'GPS途絶の詳細情報の取得に失敗しました。' });
   }
 });
 
@@ -1389,7 +1719,7 @@ router.get('/admin/assignment-monitor', requireAdminAuth, async (req, res) => {
   }
 });
 
-// GET /api/admin/alerts -> 異常アラート（GPS途絶・未割当便・大幅遅延・予測計算失敗・GTFS取得失敗）
+// GET /api/admin/alerts -> 異常アラート（GPS途絶・GPS途絶で便打ち切り・未割当便・大幅遅延・予測計算失敗・GTFS取得失敗）
 router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
   try {
     const serviceDate = getServiceDateString();
@@ -1397,14 +1727,26 @@ router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
 
     // GPS途絶アラートは「本日（サービス日, JST）に一度でもGPSを受信した車両」に限定する。
     // 前日以前が最終受信の車両や一度も受信していない車両は当日の運行監視の対象外。
+    // assignment_id は「地図で検証」用。その車両の本日の担当割り当てのうち、
+    // 稼働中（state='active'）を最優先、無ければGPS途絶で打ち切られたもの（end_reason='GPS更新停止'）を
+    // 直近順で1件。どちらも無ければ null（＝検証ボタンを出さない）。
     const staleGpsRes = await pool.query(
-      `SELECT id AS vehicle_id, car_id, route_id, last_gps_at
-       FROM vehicles
-       WHERE status = 'active'
-         AND last_gps_at IS NOT NULL
-         AND (last_gps_at AT TIME ZONE 'Asia/Tokyo')::date = $2::date
-         AND last_gps_at < now() - make_interval(secs => $1::double precision * 60)
-       ORDER BY last_gps_at ASC`,
+      `SELECT v.id AS vehicle_id, v.car_id, v.route_id, v.last_gps_at,
+              (SELECT a.id
+               FROM trip_vehicle_assignments a
+               JOIN daily_trips d ON d.id = a.daily_trip_id
+               WHERE a.vehicle_id = v.id
+                 AND a.role = 'assigned'
+                 AND d.service_date = $2::date
+                 AND (a.state = 'active' OR a.end_reason = 'GPS更新停止')
+               ORDER BY (a.state = 'active') DESC, a.became_assigned_at DESC NULLS LAST, a.id DESC
+               LIMIT 1) AS assignment_id
+       FROM vehicles v
+       WHERE v.status = 'active'
+         AND v.last_gps_at IS NOT NULL
+         AND (v.last_gps_at AT TIME ZONE 'Asia/Tokyo')::date = $2::date
+         AND v.last_gps_at < now() - make_interval(secs => $1::double precision * 60)
+       ORDER BY v.last_gps_at ASC`,
       [staleGpsMin(), serviceDate]
     );
     for (const row of staleGpsRes.rows) {
@@ -1415,7 +1757,42 @@ router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
         carId: row.car_id,
         routeId: row.route_id,
         lastGpsAt: row.last_gps_at,
+        assignmentId: row.assignment_id || null,
         key: buildAlertKey('staleGps', row.vehicle_id, row.last_gps_at)
+      });
+    }
+
+    // GPS途絶で打ち切られた便（trip_vehicle_assignments.end_reason='GPS更新停止'）。
+    // 車両単位のstaleGpsは6分の途絶タイムアウトでvehicles.status='inactive'になった時点で
+    // 消えてしまう（＝実質1〜2分しか出ない）ため、こちらは「割り当てが打ち切られた」事実を
+    // アンカーにして、復旧後（何分後にどこで復旧したか）も含めて地図で検証できるようにする。
+    // 便のデータはDAILY_TRIP_RETENTION_DAYS（既定7日）残る。
+    const gpsLostTripRes = await pool.query(
+      `SELECT a.id AS assignment_id, a.vehicle_id, a.daily_trip_id, a.ended_at,
+              d.route_id, d.start_time, d.headsign,
+              v.car_id, v.last_gps_at
+       FROM trip_vehicle_assignments a
+       JOIN daily_trips d ON d.id = a.daily_trip_id
+       JOIN vehicles v ON v.id = a.vehicle_id
+       WHERE a.role = 'assigned' AND a.state = 'ended' AND a.end_reason = 'GPS更新停止'
+         AND d.service_date = $1::date
+       ORDER BY a.ended_at DESC`,
+      [serviceDate]
+    );
+    for (const row of gpsLostTripRes.rows) {
+      alerts.push({
+        type: 'gpsLostTrip',
+        severity: 'warning',
+        assignmentId: row.assignment_id,
+        vehicleId: row.vehicle_id,
+        tripId: row.daily_trip_id,
+        carId: row.car_id,
+        routeId: row.route_id,
+        startTime: row.start_time,
+        headsign: row.headsign || null,
+        endedAt: row.ended_at,
+        lastGpsAt: row.last_gps_at,
+        key: buildAlertKey('gpsLostTrip', row.assignment_id, row.ended_at)
       });
     }
 
@@ -2085,11 +2462,31 @@ router.get('/busstop/:stopKey/nearby-spots', async (req, res) => {
   }
 });
 
+// GET /api/busstop/:stopKey/platform-notice?platform=... -> その乗り場のお知らせ（docs/platform-notices.md）
+// バス停詳細ページの「このバス停でできること」の下に、乗り場別表示のときだけ出す。
+// platform を省略しても、乗り場が1か所だけのバス停なら resolvePlatformRef がその1件を返す。
+// 乗り場が複数あって platform 未指定（＝全乗り場統合表示）のときは notices を空で返す。
+router.get('/busstop/:stopKey/platform-notice', async (req, res) => {
+  try {
+    const platformParam = typeof req.query.platform === 'string' ? req.query.platform.trim() : '';
+    const ref = await resolvePlatformRef(req.params.stopKey, platformParam);
+    if (!ref) return res.status(404).json({ error: '指定のバス停が見つかりませんでした。' });
+    if (!ref.platform) {
+      return res.json({ stopKey: ref.stopKey, platformKey: null, notices: [] });
+    }
+    const notices = await platformNotices.getActiveNoticesForPlatform(ref.platform.feedId, ref.platform.stopId);
+    res.json({ stopKey: ref.stopKey, platformKey: ref.platform.platformKey, notices });
+  } catch (err) {
+    console.error('[api] /busstop/:stopKey/platform-notice エラー:', err);
+    res.status(500).json({ error: '乗り場お知らせの取得に失敗しました。' });
+  }
+});
+
 // GET /api/tourist-spots/:id -> 観光スポット1件の詳細（enabled=trueのみ）
 // 経路検索結果でスポット名をタップしたときの詳細ポップアップ表示用（観光スポット情報_仕様書）。
 router.get('/tourist-spots/:id', async (req, res) => {
-  const id = Number.parseInt(req.params.id, 10);
-  if (!Number.isInteger(id)) return res.status(400).json({ error: '不正なIDです。' });
+  const id = String(req.params.id || '').trim();
+  if (!id) return res.status(400).json({ error: '不正なIDです。' });
   try {
     const spot = await touristSpots.getEnabledSpotById(id);
     if (!spot) return res.status(404).json({ error: '指定の観光スポットが見つかりませんでした。' });
@@ -2097,6 +2494,21 @@ router.get('/tourist-spots/:id', async (req, res) => {
   } catch (err) {
     console.error('[api] /tourist-spots/:id エラー:', err);
     res.status(500).json({ error: '観光スポット情報の取得に失敗しました。' });
+  }
+});
+
+// POST /api/tourist-spots/:id/link-click -> 公式サイトリンクのタップを記録する（観光スポット情報_仕様書）。
+// バス停ページ・経路検索ポップアップの「公式サイトを見る」リンクから navigator.sendBeacon で叩く。
+// 掲載の有用性を測るだけの用途なので、本文もクライアントIDも取らず、結果に関わらず 200 を返す（soft）。
+router.post('/tourist-spots/:id/link-click', async (req, res) => {
+  const id = String(req.params.id || '').trim();
+  if (!id) return res.status(400).json({ error: '不正なIDです。' });
+  try {
+    await touristSpots.recordLinkClick(id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /tourist-spots/:id/link-click エラー:', err);
+    res.status(500).json({ error: 'タップの記録に失敗しました。' });
   }
 });
 

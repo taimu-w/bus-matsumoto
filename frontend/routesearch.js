@@ -229,16 +229,35 @@
     }
   }
 
+  /** 観光スポットの写真（1枚以上）を横スクロールの帯で並べる。1枚だけなら全幅（busstop.jsと同じ考え方）。 */
+  function spotPhotoStrip(spot) {
+    const photos = Array.isArray(spot.photoUrls) ? spot.photoUrls : [];
+    if (photos.length === 0) return '';
+    return `<div class="flex gap-1 overflow-x-auto bg-gray-100 rounded-xl mb-3">${photos
+      .map((u) => `<img src="${esc(u)}" alt="${esc(spot.name)}" class="h-40 object-contain shrink-0${photos.length === 1 ? ' w-full' : ''}">`)
+      .join('')}</div>`;
+  }
+
+  /** 公式サイトリンクのタップを記録する（掲載の有用性計測用、観光スポット情報_仕様書）。soft-fail。 */
+  function sendSpotLinkBeacon(spotId) {
+    if (spotId == null || spotId === '') return;
+    const url = `${API_BASE}/tourist-spots/${encodeURIComponent(spotId)}/link-click`;
+    try {
+      if (navigator.sendBeacon && navigator.sendBeacon(url)) return;
+    } catch (_) { /* 続けて fetch でフォールバック */ }
+    try { fetch(url, { method: 'POST', keepalive: true }).catch(() => {}); } catch (_) {}
+  }
+
   function renderSpotModalBody(spot) {
     return `
-      ${spot.photoUrl ? `<img src="${esc(spot.photoUrl)}" alt="${esc(spot.name)}" class="w-full h-40 object-contain bg-gray-100 rounded-xl mb-3">` : ''}
+      ${spotPhotoStrip(spot)}
       <p class="text-lg font-bold text-gray-900">${esc(spot.name)}</p>
       ${spot.kana ? `<p class="text-xs text-gray-400 mt-0.5">${esc(spot.kana)}${spot.romaji ? ` / ${esc(spot.romaji)}` : ''}</p>` : ''}
       ${spot.hours ? `<p class="text-xs text-gray-500 mt-2">営業時間：${esc(spot.hours)}</p>` : ''}
       ${spot.stayDuration ? `<p class="text-xs text-gray-500">滞在目安：${esc(spot.stayDuration)}</p>` : ''}
       ${spot.description ? `<p class="text-sm text-gray-700 mt-2 leading-relaxed">${esc(spot.description)}</p>` : ''}
       ${spot.url ? `
-        <a href="${esc(spot.url)}" target="_blank" rel="noopener noreferrer"
+        <a href="${esc(spot.url)}" target="_blank" rel="noopener noreferrer" data-spot-link="${esc(spot.spotId)}"
            class="inline-flex items-center gap-1 mt-3 text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-full px-3 py-1 hover:bg-indigo-100">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
             <path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
@@ -256,6 +275,8 @@
     try {
       const res = await fetchJson(`${API_BASE}/tourist-spots/${encodeURIComponent(spotId)}`);
       body.innerHTML = renderSpotModalBody(res.spot);
+      const link = body.querySelector('a[data-spot-link]');
+      if (link) link.addEventListener('click', () => sendSpotLinkBeacon(link.dataset.spotLink));
     } catch (err) {
       // 取得失敗はポップアップ内にエラー文言を出すだけに留める（soft-fail）
       body.innerHTML = '<p class="text-sm font-bold text-gray-400 py-6 text-center">観光スポット情報を取得できませんでした。</p>';
@@ -1026,7 +1047,7 @@
     return `
       <button type="button" data-index="${index}"
               class="w-full text-left bg-white border-2 border-emerald-100 rounded-lg p-3 hover:bg-emerald-50 active:scale-95 transition-all flex items-center gap-2">
-        ${spot.photoUrl ? `<img src="${esc(spot.photoUrl)}" alt="" class="w-10 h-10 rounded-lg object-cover shrink-0">` : ''}
+        ${spot.photoUrls && spot.photoUrls[0] ? `<img src="${esc(spot.photoUrls[0])}" alt="" class="w-10 h-10 rounded-lg object-cover shrink-0">` : ''}
         <span class="min-w-0">
           <span class="flex items-center gap-1.5">
             <span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded shrink-0">観光スポット</span>

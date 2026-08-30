@@ -193,8 +193,8 @@ async function seedRouteExternalIds(client) {
 }
 
 /**
- * コード上の設定（config/feeds.js）・DB上の対応表（route_external_ids）と
- * 実際のGTFSデータの整合を検証し、問題があれば警告ログを出す（docs/外部IDマッピングのコード化_仕様書.md参照）。
+ * コード上の設定（config/feeds.js）・DB上の対応表（route_external_ids・route_direction_rules）と
+ * 実際のGTFSデータの整合を検証し、問題があれば警告ログを出す（詳細は docs/feed-config.md）。
  *
  * ⚠️ 問題があっても throw しないこと。GTFS更新でフィード側の route_id が一時的に
  * 消えたときに、システム全体が起動不能になるのを避けるため
@@ -211,10 +211,15 @@ async function validateCodeConfig(client) {
     .filter((row) => !knownRouteIds.has(row.route_id))
     .map((row) => `外部ID ${row.external_id} の参照先 route_id ${row.route_id} がGTFSデータに存在しません。`);
 
-  const problems = [...validateFeedConfig(), ...mappingProblems];
+  const directionRuleRows = await client.query(`SELECT route_id FROM route_direction_rules`);
+  const directionRuleProblems = directionRuleRows.rows
+    .filter((row) => !knownRouteIds.has(row.route_id))
+    .map((row) => `方向マッピングの route_id ${row.route_id} がGTFSデータに存在しません。`);
+
+  const problems = [...validateFeedConfig(), ...mappingProblems, ...directionRuleProblems];
 
   if (problems.length === 0) {
-    console.log('[seed] フィード構成・外部ID対応の検証: 問題ありません。');
+    console.log('[seed] フィード構成・外部ID対応・方向マッピングの検証: 問題ありません。');
     return;
   }
   for (const problem of problems) {

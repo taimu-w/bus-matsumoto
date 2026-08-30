@@ -97,6 +97,14 @@
         <p class="font-bold text-gray-900 text-sm leading-snug">バス停検索</p>
         <p class="text-[11px] text-gray-500 font-bold mt-0.5">乗り場・接近情報を確認</p>
       </a>
+      <a href="/spotsearch" data-spa
+         class="bg-white rounded-2xl border-2 border-gray-100 shadow-sm p-4 hover:border-blue-300 active:scale-[0.97] active:border-blue-300 transition-all">
+        <span class="w-11 h-11 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center mb-2">
+          <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3v18"/><path d="M6 4.5h12l-3 4 3 4H6z"/></svg>
+        </span>
+        <p class="font-bold text-gray-900 text-sm leading-snug">スポット検索</p>
+        <p class="text-[11px] text-gray-500 font-bold mt-0.5">観光地・施設から路線を探す</p>
+      </a>
       <a href="#/map"
          class="bg-white rounded-2xl border-2 border-gray-100 shadow-sm p-4 hover:border-blue-300 active:scale-[0.97] active:border-blue-300 transition-all">
         <span class="w-11 h-11 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center mb-2">
@@ -245,6 +253,11 @@
     <div id="routesearch-root"></div>
   </div>
 
+  <!-- スポット検索セクション（/spotsearch のパスルーティングで表示する） -->
+  <div id="section-spotsearch" class="mb-8" style="display:none;">
+    <div id="spotsearch-root"></div>
+  </div>
+
   <!-- 補足情報エリア -->
   <section class="bg-gray-200 p-5 rounded-2xl border border-gray-300 mt-8 mb-6">
     <h2 class="text-md font-bold text-gray-700 mb-2 underline decoration-blue-500 decoration-2">ご利用にあたって</h2>
@@ -388,13 +401,32 @@
   </div>
 </div>
 
+<!-- はじめての方向けチュートリアル（onboarding.js が制御。初回訪問時と /?tutorial=1 で表示する） -->
+<div id="onboarding" class="fixed inset-0 z-[70] bg-slate-900/75 backdrop-blur-sm flex items-center justify-center px-4"
+     style="display:none; padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);"
+     role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+  <div class="bg-white rounded-3xl w-full max-w-sm shadow-2xl overflow-hidden flex flex-col" style="max-height:calc(100vh - 2.5rem); max-height:calc(100dvh - 2.5rem);">
+    <div class="flex justify-end px-3 pt-3">
+      <button type="button" data-role="ob-skip" class="text-xs font-bold text-gray-400 px-3 py-1.5 rounded-lg hover:bg-gray-100">スキップ</button>
+    </div>
+    <div data-role="ob-slide" class="px-6 pt-1 pb-4 text-center overflow-y-auto"></div>
+    <div data-role="ob-dots" class="px-6 pb-4 flex justify-center items-center gap-1.5"></div>
+    <div class="p-4 pt-0 flex items-center gap-3">
+      <button type="button" data-role="ob-prev" class="text-sm font-bold text-gray-500 px-4 py-3 rounded-xl hover:bg-gray-100">戻る</button>
+      <button type="button" data-role="ob-next" class="flex-1 bg-blue-700 text-white font-bold py-3.5 rounded-xl shadow-sm active:scale-[0.98] transition-transform">次へ</button>
+    </div>
+  </div>
+</div>
 
-<!-- favorites.js・timetable.js・stopmap.js・busstop.js・routesearch.js は app.js より先に読み込む（app.js の初回ルーティングから参照するため） -->
+
+<!-- favorites.js・timetable.js・stopmap.js・busstop.js・routesearch.js・spotsearch.js・onboarding.js は app.js より先に読み込む（app.js の初回ルーティングから参照するため） -->
 <script src="/favorites.js"></script>
 <script src="/timetable.js"></script>
 <script src="/stopmap.js"></script>
 <script src="/busstop.js"></script>
 <script src="/routesearch.js"></script>
+<script src="/spotsearch.js"></script>
+<script src="/onboarding.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

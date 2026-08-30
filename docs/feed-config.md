@@ -1,6 +1,6 @@
 # フィード構成・外部IDマッピング
 
-位置情報とGTFSを結びつける設定を2つに分けて扱います。**この2つは似て非なる設定で、管理場所が違います。**
+位置情報とGTFSを結びつける設定を3つに分けて扱います。**いずれも似て非なる設定で、管理場所が違います。混同しないでください。**
 
 ## (1) 外部ID（位置情報CSVの系統ID）⇔ GTFS route_id の対応
 
@@ -11,7 +11,19 @@
 - 実行時の参照は`backend/src/services/routeExternalIdMapping.js`（TTL1時間のメモリキャッシュ）経由です。管理画面から編集した際は`invalidateRouteExternalIdCache()`で即時破棄します。
 - 起動時（`seed.js`の`validateCodeConfig()`）に、`route_external_ids.route_id`が実際の`routes`テーブルに存在するかを検証し、存在しなければ警告ログを出します（起動は止めません）。
 
-## (2) 位置情報フィード ⇔ GTFSフィードの対応、およびフィードURL構成
+## (2) 位置情報CSVの方向値 ⇔ GTFS direction_id の対応
+
+`route_direction_rules`テーブル（DB、`route_id`が主キー、qualified route id）で管理し、管理画面「方向マッピング」（`GET/POST/DELETE /api/admin/direction-rules`）から追加・変更・削除できます。位置情報CSVの「方向列の値」を、その路線でどう扱うかを決めます。
+
+- **行が無い路線は既定で`ignore`**（テーブルが空＝全路線`ignore`）。初期投入（seed）はしません。
+- `mode: 'ignore'`：方向値を便判定に使わない（路線一致＋始発バス停100m以内のみで候補とする。[vehicle-assignment.md](vehicle-assignment.md)）。
+- `mode: 'map'`：`value_map`（`{ "CSV方向値": direction_id(0|1) }`）でCSV値を`direction_id`へ変換し、便判定に使う。`value_map`に無いCSV値は`fallback`（`0`/`1`、`NULL`なら方向不明扱い）へ。
+- 保存時に`route_id`が`routes`テーブルに実在するか検証し、存在しなければ拒否します（管理画面は`/api/routes`の候補一覧から選ばせる）。
+- 実行時の参照は`backend/src/services/directionRules.js`のTTL付きメモリキャッシュ経由で、`isDirectionIgnored()`/`resolveDirectionId()`は**同期関数**です（`locationFetcher.js`のCSV行ループ・`tripAssignment.js`の候補ループから多数回呼ばれるため。`runtimeSettings.js`と同じ理由）。DB読み込み（非同期`refreshDirectionRulesCache()`、TTL30秒）は`jobs/pipeline.js`の先頭とサーバー起動直後に行われます。管理画面から保存/削除した際は`invalidateDirectionRulesCache()`でキャッシュを失効させ、次回のパイプライン実行（最大60秒）で反映されます。呼ばれる前・DB接続不可時は全路線`ignore`にフォールバックします。
+- 純粋な変換ロジック・入力検証は`backend/src/config/directionMapping.js`（DB非依存）が担います。
+- 起動時（`seed.js`の`validateCodeConfig()`）に、`route_direction_rules.route_id`が実際の`routes`テーブルに存在するかを検証し、存在しなければ警告ログを出します（起動は止めません）。
+
+## (3) 位置情報フィード ⇔ GTFSフィードの対応、およびフィードURL構成
 
 `backend/src/config/feeds.js`（コード）で管理します。変更頻度が低く、誤設定時の影響（違う路線に位置情報が紐づく）が大きいため、diffに残りレビューを経るコード管理にしています。変更にはコードの編集とデプロイが必要です（管理画面からは編集できません）。
 
@@ -43,5 +55,5 @@
 
 ## 関連ドキュメント
 
-- テーブル定義: [database.md](database.md)の`route_external_ids`・`feeds`の項
+- テーブル定義: [database.md](database.md)の`route_external_ids`・`route_direction_rules`・`feeds`の項
 - 開発ルール上の要点: [CLAUDE.md](../CLAUDE.md)「複数フィード対応の設計」節

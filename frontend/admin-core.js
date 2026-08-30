@@ -24,6 +24,16 @@ function fmtDateTime(value) {
   return d.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
 }
 
+// "YYYY-MM-DD"（運行日＝GTFSサービス日）を "M/D（曜）" で表示する。
+// Date.UTC ベースで曜日を出すため、閲覧側のタイムゾーンに依存しない。
+function fmtServiceDate(dateStr) {
+  if (!dateStr) return '—';
+  const [y, m, d] = String(dateStr).split('-').map(Number);
+  if (!y || !m || !d) return String(dateStr);
+  const wd = ['日', '月', '火', '水', '木', '金', '土'][new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
+  return `${m}/${d}（${wd}）`;
+}
+
 // ペース比率（実績÷定刻。1.0=定刻通り、大きいほど遅い。etaPredictor.jsのcombinePaceFactor等が
 // 0.5〜2.5にクランプ済み）を色分けする共通ヘルパー。「ETA予測根拠」「当日の状況」（路線別
 // サマリ・メッシュ地図）のいずれからも使うため、hex（Leafletの塗り色用）とTailwindクラス

@@ -17,7 +17,7 @@
 (function () {
   const API_BASE = '/api';
   // このズームレベル以上に拡大したら、常時バス停名を表示する（要望対応）。
-  const STOP_NAME_ZOOM_THRESHOLD = 17;
+  const STOP_NAME_ZOOM_THRESHOLD = 14;
 
   let mapInstance = null;
   let stopMarkers = [];

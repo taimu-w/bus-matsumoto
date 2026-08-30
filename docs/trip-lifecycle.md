@@ -10,9 +10,11 @@
 |---|---|---|
 | ① 終点到着済み | 割り当て | **その便の最終停留所**の`status`が`到着済`（路線の終点ではなく便ごとの終点なので、途中止まりの便も正しく終了できる） |
 | ③ 一定時間経過 | 割り当て | 割り当てから`VEHICLE_MAX_AGE_MIN`（既定120分）経過（保護期間の対象外＝強制終了） |
-| ④ GPS更新停止 | 車両 | 直近GPSの受信から3分以上経過。その車両の**全**割り当てを終了させ、`vehicles.status = 'inactive'`にする |
+| ④ GPS更新停止 | 車両 | 直近GPSの受信から`GPS_STALE_TIMEOUT_MIN`（既定6分）以上経過。その車両の**全**割り当てを終了させ、`vehicles.status = 'inactive'`にする |
 
 運行終了は条件①③④のみで判定します（「終了エリア到達」＝直近GPSが終点から一定距離以内、という判定は循環線・往復線の途中で誤発火するため持ちません）。
+
+条件④で担当割り当てを打ち切ると（`end_reason = 'GPS更新停止'`。救済判定で終点到着が確認できた場合は`SUCCESS_END_REASONS`扱いになりこれには入らない）、管理画面「異常アラート」に`gpsLostTrip`（GPS途絶で便打ち切り）が当日中は出続けます。車両単位の`staleGps`が`status='inactive'`になった時点で消える（＝実質1〜2分しか出ない）のに対し、`gpsLostTrip`は打ち切られた割り当て（`daily_trips`と同じく`DAILY_TRIP_RETENTION_DAYS`＝既定7日残る）をアンカーにするため、GPSが復旧した後でも「いつ・どこで途絶し、何分後にどこで復旧したか」「時刻表のどこまで進んでいたか」を地図で検証できます（`GET /api/admin/gps-outage/:assignmentId`。走行経路は`GPS_LOG_RETENTION_HOURS`＝既定48時間を過ぎると空になります）。
 
 **2段階到着判定（[pass-detection.md](pass-detection.md)）では、終点は`付近`のまま条件①が成立しないまま止まり続けることがあります。** 終点は到着後にバスがそのまま停車し続けることが多く、`DEPARTURE_MARGIN_METERS`分だけ離れる（＝到着確定のトリガー）が起きないためです。この場合は条件④（GPS途絶）が成立した際に、`endAssignment()`が`state='ended'`にする直前に`付近`のまま残っている終点を記録済みの最小距離の観測時刻で強制的に`到着済`へ昇格させます（`interpolated=FALSE`）。終点が`付近`まで来ていればその観測値を優先して昇格させます（`''`のままなら直近の生GPS時刻へフォールバックし`interpolated=TRUE`）。
 
@@ -30,8 +32,8 @@
 クローズ時の保存内容：
 
 1. その便の残った有効な割り当てをすべて`ended`にする。
-2. **最後に担当車両だった割り当て1件**を`is_official = TRUE`で`completed_trips`＋`completed_trip_stop_times`に保存する。`actual_time`（"H:mm"文字列）は`actual_minutes`（0時起点の分数）にも変換する（統計集計で使うため。詳細は[eta-prediction-algorithm.md](eta-prediction-algorithm.md)）。
-3. 担当を経験した他の車両（再割り当て前の旧担当など）は`is_official = FALSE`で監査用に保存する。
+2. **最後に担当車両だった割り当て1件**を`is_official = TRUE`で`completed_trips`＋`completed_trip_stop_times`に保存する。`actual_time`（"H:mm"文字列）は`actual_minutes`（0時起点の分数）にも変換する（統計集計で使うため。詳細は[eta-prediction-algorithm.md](eta-prediction-algorithm.md)）。あわせて、その車両の`vehicle_operation_history`に1便追記し、`car_id × 曜日区分バケット`（平日／土休日）で最新`service_date`より前の行を掃除する（管理画面「車両運用状況」・運行ダッシュボードの車両詳細用。掃除は冪等・クローズ順非依存で、平日1日分・土休日1日分だけが残る）。
+3. 担当を経験した他の車両（再割り当て前の旧担当など）は`is_official = FALSE`で監査用に保存する（`vehicle_operation_history`は更新しない）。
 4. **一度も担当にならなかった候補車両はアーカイブしない。** 別経路をたまたま走っていた可能性があり、区間統計を汚染するためです。
 5. `daily_trips.closed_at`を立てる。`closed_at`は「リアルタイム運行情報の対象から外れた」ことを表すだけで、便自体は時刻表上のデータとして存続します（経路検索はそもそもGTFSインデックス側を見るため影響を受けません）。
 

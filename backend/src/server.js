@@ -6,6 +6,7 @@ const apiRouter = require('./routes/api');
 const scheduler = require('./jobs/scheduler');
 const serviceStatusJob = require('./jobs/serviceStatusJob');
 const { refreshRuntimeSettingsCache } = require('./services/runtimeSettings');
+const { refreshDirectionRulesCache } = require('./services/directionRules');
 
 const app = express();
 app.use(cors());
@@ -47,6 +48,8 @@ app.listen(PORT, async () => {
   // 読まれない設定を含む）をscheduler/serviceStatusJob起動前に読み込んでおく。
   // 失敗しても環境変数/コード既定値で起動を継続する（runtimeSettings.js内でcatchずみ）。
   await refreshRuntimeSettingsCache(true);
+  // 方向マッピング（route_direction_rules）もウォームアップしておく（失敗しても全路線ignoreで継続）。
+  await refreshDirectionRulesCache(true);
 
   scheduler.start();
   serviceStatusJob.start();

@@ -13,7 +13,7 @@
 const pool = require('../config/db');
 const { haversineDistanceMeters } = require('../utils/geo');
 const { computeDelayMinutes, getServiceDateString } = require('../utils/time');
-const { isDirectionIgnored } = require('../config/directionMapping');
+const { isDirectionIgnored } = require('./directionRules');
 const { getRuntimeSetting } = require('./runtimeSettings');
 
 function assignRadiusMeters() {
@@ -108,8 +108,9 @@ async function findCandidates(client, trip, startStop) {
   const candidates = [];
 
   for (const row of res.rows) {
-    // direction条件（仕様書 6）。方向を使わない設定の路線、または
-    // 車両側の方向が不明（位置情報CSVに方向列が無い等）の場合は方向で絞り込まない。
+    // direction条件（route_direction_rules。管理画面「方向マッピング」で編集）。
+    // 方向を使わない設定の路線（既定）、または車両側の方向が不明（位置情報CSVに
+    // 方向列が無い等）の場合は方向で絞り込まない。
     if (!ignoreDirection && row.direction_id !== null && row.direction_id !== undefined) {
       if (row.direction_id !== trip.direction_id) continue;
     }

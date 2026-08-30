@@ -638,7 +638,7 @@ function setPageTitle(title, subtitle) {
 }
 
 function hideAllPages() {
-  ['section-home', 'section-favorites', 'section-route-list', 'section-realtime', 'section-routesearch', 'section-map', 'section-busmap', 'section-stopmap', 'section-timetable', 'section-busstop', 'notices'].forEach((id) => {
+  ['section-home', 'section-favorites', 'section-route-list', 'section-realtime', 'section-routesearch', 'section-spotsearch', 'section-map', 'section-busmap', 'section-stopmap', 'section-timetable', 'section-busstop', 'notices'].forEach((id) => {
     const el = $(id);
     if (el) el.style.display = 'none';
   });
@@ -714,9 +714,10 @@ function currentNavPage() {
   if (window.StopMapView && window.StopMapView.isStopMapPath()) return 'map';
   if (window.BusStopView && window.BusStopView.isBusStopPath()) return 'busstop';
   if (window.RouteSearchView && window.RouteSearchView.isRouteSearchPath()) return 'routesearch';
-  // 時刻表検索は下部タブから外した（タブは「マップ」に置き換え済み）ので、ここでは点灯対象にしない。
-  // ホーム画面等からの導線経由でこの画面へ来ても、下部タブはどれも点灯しない。
+  // 時刻表検索・スポット検索は下部タブに無いので、ホームからの導線経由で来ても
+  // 下部タブはどれも点灯させない（時刻表検索と同じ扱い）。
   if (window.TimetableView && window.TimetableView.isTimetablePath()) return null;
+  if (window.SpotSearchView && window.SpotSearchView.isSpotSearchPath()) return null;
   const state = parseHashRoute();
   if (state.page === 'home') return 'home';
   if (state.page === 'realtime-list' || state.page === 'realtime-detail') return 'realtime';
@@ -1007,6 +1008,12 @@ async function renderCurrentRoute() {
   }
   // 経路検索を離れたらリアルタイム更新も止める
   if (window.RouteSearchView) window.RouteSearchView.stopPolling();
+  // スポット検索も同様にパス（/spotsearch）でルーティングする。
+  if (window.SpotSearchView && window.SpotSearchView.isSpotSearchPath()) {
+    $('section-spotsearch').style.display = 'block';
+    await window.SpotSearchView.render();
+    return;
+  }
 
   const state = parseHashRoute();
   try {

@@ -56,6 +56,30 @@ CREATE TABLE IF NOT EXISTS route_external_ids (
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 位置情報CSVの「方向列の値」→ GTFS direction_id の対応を路線ごとに持つ。
+-- 管理画面「方向マッピング」（GET/POST/DELETE /api/admin/direction-rules）から編集する。
+--
+-- route_id は routes.id と同じ「feedId:routeId」形式の qualified route id。
+-- 保存時に routes テーブルへの実在チェックを行い、存在しないIDは拒否する
+-- （管理画面は /api/routes の候補一覧から選ばせる）。
+--
+-- mode:
+--   'ignore' … 方向値を便判定に使わない（路線一致＋始発バス停100m以内のみで候補とする）
+--   'map'    … value_map で CSV方向値を direction_id(0|1) に変換し、便判定に使う。
+--              value_map に無いCSV値は fallback(0|1) へ。fallback が NULL なら方向不明扱い。
+--
+-- 行が無い路線は既定で 'ignore'（テーブルが空＝全路線 ignore）。初期投入はしない。
+-- サービス層は backend/src/services/directionRules.js（TTL付きメモリキャッシュ。
+-- 管理画面からの変更時に invalidateDirectionRulesCache() で破棄）。詳細は docs/feed-config.md。
+CREATE TABLE IF NOT EXISTS route_direction_rules (
+  route_id    TEXT PRIMARY KEY,
+  mode        TEXT NOT NULL DEFAULT 'ignore' CHECK (mode IN ('ignore', 'map')),
+  value_map   JSONB NOT NULL DEFAULT '{}'::jsonb,
+  fallback    INTEGER,
+  note        TEXT,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- バス停マスタ。物理バス停（GTFSのstop_id）+ occurrence（同一route_id・direction_id内で
 -- その物理バス停を何回目の通過として登録したか。循環路線で1便が同じ停留所を複数回通る
 -- ケースの識別に使う。0始まり）で一意化する。この2列が実体キーであり、
@@ -154,8 +178,10 @@ CREATE TABLE IF NOT EXISTS admin_alert_acknowledgements (
 
 -- 観光スポット情報（docs/tourist-spots.md）。GTFS由来データ（stops等）とは完全独立。
 -- バス停との関連付けは保存時ではなく参照時に緯度経度の近接検索で都度解決するため、外部キーは持たない。
+-- id は管理画面のテキスト一括入力の1列目で管理者が指定する識別子。名称は変更可能で、
+-- 同一スポットの判定は id の一致だけで行う（名称による名寄せはしない）。
 CREATE TABLE IF NOT EXISTS tourist_spots (
-  id              SERIAL PRIMARY KEY,
+  id              TEXT PRIMARY KEY,
   name            TEXT NOT NULL,
   kana            TEXT,
   romaji          TEXT,
@@ -168,7 +194,9 @@ CREATE TABLE IF NOT EXISTS tourist_spots (
   hours_en        TEXT,
   stay_duration_en TEXT,
   description_en  TEXT,
-  photo_url       TEXT,
+  -- Cloudinary等の https:// 画像URL。複数枚は "," 区切りで連結して保持する
+  -- （管理画面の一括入力の「写真URL」列に "," 区切りで入れる）。表示は先頭から順に横スクロール。
+  photo_urls      TEXT,
   category        TEXT,
   -- 空欄、または「観光」「観光スポット」を含まない値は、バス停ページの周辺観光スポット表示
   -- （findNearbySpots）からのみ除外する（学校・病院等、経路検索の地点としては使うが観光スポット
@@ -179,8 +207,63 @@ CREATE TABLE IF NOT EXISTS tourist_spots (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- 全件洗い替え（管理画面のテキスト一括入力）を名称キーのUPSERTで行うために必須。
-CREATE UNIQUE INDEX IF NOT EXISTS tourist_spots_name_key ON tourist_spots (name);
+-- 観光スポットの公式サイトリンク（tourist_spots.url）のタップ回数（docs/tourist-spots.md）。
+-- 「その観光スポットの掲載が有用かどうか」を管理者が判断するための集計。Asia/Tokyo基準で日別に数える。
+-- 全件洗い替えでスポット行が消えても集計を残せるよう外部キーは張らず、記録時点の名称スナップショット
+-- （spot_name）を持つ。spot_id は tourist_spots.id（管理画面で指定する識別子）。
+-- 保持は約400日（services/touristSpots.js の purgeOldLinkClicks、1時間掃除）。
+CREATE TABLE IF NOT EXISTS tourist_spot_link_clicks (
+  spot_id      TEXT NOT NULL,
+  spot_name    TEXT NOT NULL,
+  click_date   DATE NOT NULL,
+  click_count  INTEGER NOT NULL DEFAULT 0,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (spot_id, click_date)
+);
+CREATE INDEX IF NOT EXISTS idx_tourist_spot_link_clicks_date ON tourist_spot_link_clicks (click_date);
+
+-- スポット検索（frontend/spotsearch.js・services/spotSearch.js、docs/spot-search.md）の検索回数。
+-- 観光スポット／その他のスポットが検索されて結果が表示された回数を Asia/Tokyo 基準で日別に数える。
+-- 管理画面「観光スポットの検索・アクセス数」で、リンクのタップ回数（tourist_spot_link_clicks）と
+-- 並べて掲載の有用性を判断するために使う。
+--   spot_id <> '' … tourist_spots.id（その観光スポットが検索対象に確定した検索）
+--   spot_id =  '' … 観光スポット以外（バス停・地名の自由文字列）に解決した検索。スポット別内訳には出さず総数だけに含める
+-- tourist_spot_link_clicks と同じく外部キーは張らず、記録時点の名称スナップショット（spot_name）を持つ。
+-- 保持は約400日（services/spotSearch.js の purgeOldSpotSearchCounts、scheduler.js の1時間掃除）。
+CREATE TABLE IF NOT EXISTS spot_search_counts (
+  spot_id       TEXT NOT NULL,
+  spot_name     TEXT NOT NULL,
+  search_date   DATE NOT NULL,
+  search_count  INTEGER NOT NULL DEFAULT 0,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (spot_id, search_date)
+);
+CREATE INDEX IF NOT EXISTS idx_spot_search_counts_date ON spot_search_counts (search_date);
+
+-- 乗り場（のりば）ごとのお知らせ配信（docs/platform-notices.md）。管理画面「乗り場お知らせ」で編集する。
+-- GTFS由来のバス停インデックス（gtfsTimetable.js）とは (feed_id, stop_id) だけで結びつく。
+-- GTFS再取込で stop_id が消えれば参照時に一致しなくなるだけ（実害なし）。
+-- stop_key / stop_name / platform_code は管理画面一覧の可読性のためのスナップショットで、
+-- 表示側の突合には使わない（正は feed_id + stop_id）。
+--   kind='image' … image_url（Cloudinary等の https:// 画像URL）
+--   kind='link'  … link_body（トップ画面のお知らせ本文と同じリンク記法）
+CREATE TABLE IF NOT EXISTS platform_notices (
+  id             SERIAL PRIMARY KEY,
+  feed_id        TEXT NOT NULL,
+  stop_id        TEXT NOT NULL,
+  stop_key       TEXT NOT NULL,
+  stop_name      TEXT NOT NULL,
+  platform_code  TEXT,
+  kind           TEXT NOT NULL CHECK (kind IN ('image', 'link')),
+  title          TEXT,
+  image_url      TEXT,
+  link_body      TEXT,
+  enabled        BOOLEAN NOT NULL DEFAULT TRUE,
+  sort_order     INTEGER NOT NULL DEFAULT 0,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_platform_notices_stop ON platform_notices (feed_id, stop_id);
 
 -- 観測されている物理車両。便との紐付けは trip_vehicle_assignments が持つ。
 -- 運行終了しても行は削除せず status='inactive' にする（1台が複数便に関与するため）。
@@ -206,6 +289,32 @@ CREATE TABLE IF NOT EXISTS vehicle_labels (
   name        TEXT,
   memo        TEXT,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 車両ごとの「直近の運行履歴」（管理画面「車両運用状況」・運行ダッシュボードの車両詳細）。
+-- car_id × 曜日区分（バケット）ごとに「最も新しく運行した1日ぶんの便」をすべて保持する
+-- （平日1日分・土休日1日分）。1便につき1行。
+-- completed_trips は COMPLETED_TRIP_RETENTION_DAYS（既定7日）で消えるため、たまにしか
+-- 走らない予備車・応援車の運用実績が追えない。この表は「直近1日分」だけを保持するため
+-- 保持期間の影響を受けず小さいまま保たれる。
+-- finishService.closeDailyTrip() が、便の実績として正とみなす割り当て（is_official=TRUE）
+-- について archiveAssignment() から追記し、そのバケットで最新運行日より古い行を掃除する
+-- （services/vehicleOperationHistory.js）。
+-- day_type は utils/time.js の getDayType() と同じ3区分。「土休日」バケットは参照・掃除時に
+-- saturday+holiday をまとめる（bucketOperationRows）。掃除は「そのバケットの最新 service_date
+-- より前の行を消す」冪等な条件で行うため、便のクローズ順が前後しても・運行日終了バッチで
+-- 前日以前の便が後からクローズされても、直近1日分だけが残る。
+CREATE TABLE IF NOT EXISTS vehicle_operation_history (
+  car_id            TEXT NOT NULL,
+  day_type          TEXT NOT NULL CHECK (day_type IN ('weekday', 'saturday', 'holiday')),
+  service_date      DATE NOT NULL,            -- 運行日（GTFSサービス日。表示用・バケット内の最新日判定用）
+  start_time        TEXT NOT NULL,            -- 始発時刻 "H:mm"（表示用）
+  start_at          TIMESTAMPTZ NOT NULL,     -- 便の実時刻。便内の並び順に使う
+  route_id          TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  headsign          TEXT,                     -- 行先
+  completed_trip_id BIGINT,                   -- 由来の completed_trips.id（参考。FKなし＝purgeで消えても可）
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (car_id, day_type, start_at)
 );
 
 -- 位置情報フィードから取得した直後の生ログ（未処理分の一時置き場）。

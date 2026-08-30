@@ -3,6 +3,8 @@ const { runPipeline } = require('./pipeline');
 const { finishTrips, purgeOldCompletedTrips } = require('../services/finishService');
 const { purgeOldDailyTrips } = require('../services/dailyTripBuilder');
 const { purgeOldGpsLogs } = require('../services/vehicleAssigner');
+const { purgeOldLinkClicks } = require('../services/touristSpots');
+const { purgeOldSpotSearchCounts } = require('../services/spotSearch');
 const { isNightTime } = require('../utils/time');
 const { getRuntimeSetting } = require('../services/runtimeSettings');
 const jobMonitor = require('../services/jobMonitor');
@@ -58,6 +60,8 @@ function start() {
         await purgeOldGpsLogs();
         await purgeOldDailyTrips();
         await purgeOldCompletedTrips();
+        await purgeOldLinkClicks();
+        await purgeOldSpotSearchCounts();
       });
     } catch (err) {
       console.error('[scheduler] クリーンアップ実行エラー:', err);

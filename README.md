@@ -113,13 +113,15 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 | `gtfsData.js` | route_id解決（`resolveRouteId`）の唯一の窓口 | |
 | `gtfsTimetable.js` | 時刻表検索のインメモリインデックス | [docs/timetable-search.md](docs/timetable-search.md) |
 | `gtfsRouteSearch.js` | 経路検索エンジン（RAPTOR型。出発時刻指定と到着時刻指定の両方、詳細設定による条件の絞り込み） | [docs/route-search.md](docs/route-search.md) |
+| `spotSearch.js` | スポット検索（簡易的な路線・バス停検索。地名・バス停・路線1つから、スポット情報＋付近のバス停＋周辺路線を返す）・検索回数集計 | [docs/spot-search.md](docs/spot-search.md) |
 | `gtfsFare.js` | 運賃データ（`fare_attributes.txt`/`fare_rules.txt`）の索引と照会 | |
 | `realtimeTripLookup.js` | GTFS識別子⇔当日の運行実績の橋渡し（経路検索・バス停検索が共通で使う） | |
 | `busStopApproaching.js` | バス停検索の「接近中のバス」 | |
 | `routeSearch.js` | `/api/stops/search`専用のDBバス停名検索のみ。**ここへ経路探索を戻さないこと** | |
 | `holidayCalendar.js` | 祝日カレンダー（`holidays`テーブル）のキャッシュ | |
 | `routeExternalIdMapping.js` | 外部ID⇔route_id対応（`route_external_ids`テーブル）のキャッシュ。管理画面編集時に即時破棄 | |
-| `touristSpots.js` | 観光スポット情報の管理・近接検索 | |
+| `touristSpots.js` | 観光スポット情報の管理・近接検索・公式サイトリンクのタップ数集計 | [docs/tourist-spots.md](docs/tourist-spots.md) |
+| `platformNotices.js` | 乗り場（のりば）ごとのお知らせ配信（画像/リンク）の管理・取得 | [docs/platform-notices.md](docs/platform-notices.md) |
 | `predictionAccuracy.js` / `apiMetrics.js` / `jobMonitor.js` / `visitorTracker.js` / `serviceStatusScraper.js` | 管理画面向けの監視・集計系（予測精度・API稼働・ジョブ実行状況・閲覧数・運行状況スクレイピング） | |
 
 `backend/src/utils/time.js`と`utils/geo.js`は、ほぼすべてのサービスで使われる共通ヘルパー（時刻文字列の変換、遅延計算、ハバーサイン距離）です。`utils/csv.js`はGTFSのCSV読み込み、`utils/kana.js`はかな⇔ローマ字変換・検索正規化を担います。
@@ -157,8 +159,10 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 素のHTML/CSS/JS、ビルドステップなし。
 
 - `frontend/index.html` + `frontend/app.js`: 利用者向け運行状況画面。`POLL_MS`（20秒）間隔で`/api/buses`等をポーリング、お気に入りはlocalStorage、SPAルーティングの入口。バスマップ（`#/busmap`、Leaflet + OpenStreetMap）も含む。
-- `frontend/timetable.js`（時刻表検索）・`frontend/busstop.js`（バス停検索）・`frontend/stopmap.js`（バス停マップ）・`frontend/routesearch.js`（経路検索）は、いずれもハッシュではなくパス（History API）でルーティングします。経路検索は「経路一覧（`/routesearch?…`）→ 経路詳細（`…&journey=N`）」の2階層で、乗り換え時刻や通過バス停は詳細側に表示します（[docs/route-search.md](docs/route-search.md) 6.3）。経路一覧の上下には「1本前 / 1本後」ボタンがあり、先頭の経路を基準に1本ぶんずらして検索し直します（「1本前」は到着時刻指定へ切り替え。同 6.3.1）。検索フォームには折りたたみの「詳細設定」があり、乗り換え回数（「乗り換えなし」など）・徒歩での乗り継ぎの有無・乗り換えの余裕時間を指定できます。**既定は絞り込みなしの条件**で、既定値の項目はURLにも載せません（同 5.8・6.2）。
-- `frontend/admin.html`: Basic認証で保護された管理画面（運行ダッシュボード・便の割当監視・予測精度の監視・当日の状況・異常アラート・GTFS/位置情報フィード監視・API稼働監視・ジョブ監視・お知らせ編集・祝日カレンダー・外部IDマッピング・観光スポット編集・車両名・メモ管理）。車両名・メモ管理（`vehicle_labels`テーブル、キーは`car_id`）で名前を付けた車両は、運行ダッシュボードの便詳細セクションで車両IDの代わりに名前で表示され、名前タップでメモが出ます。
+- `frontend/onboarding.js`: はじめての方向けチュートリアル。初回訪問時にホーム画面でだけ自動表示し、完了フラグ（localStorage `busTimeOnboardingSeen`）を立てる。`/howto` の「使い方ツアー」ボタン（`/?tutorial=1`）や `window.Onboarding.open()` からいつでも再表示できる。
+- `frontend/howto.html`: 使い方ページ（`/howto`。静的HTML、JSなし）。目的別の導線・機能別の手順・よくある質問（`<details>`）をまとめる。
+- `frontend/timetable.js`（時刻表検索）・`frontend/busstop.js`（バス停検索）・`frontend/stopmap.js`（バス停マップ）・`frontend/routesearch.js`（経路検索）・`frontend/spotsearch.js`（スポット検索）は、いずれもハッシュではなくパス（History API）でルーティングします。経路検索は「経路一覧（`/routesearch?…`）→ 経路詳細（`…&journey=N`）」の2階層で、乗り換え時刻や通過バス停は詳細側に表示します（[docs/route-search.md](docs/route-search.md) 6.3）。経路一覧の上下には「1本前 / 1本後」ボタンがあり、先頭の経路を基準に1本ぶんずらして検索し直します（「1本前」は到着時刻指定へ切り替え。同 6.3.1）。検索フォームには折りたたみの「詳細設定」があり、乗り換え回数（「乗り換えなし」など）・徒歩での乗り継ぎの有無・乗り換えの余裕時間を指定できます。**既定は絞り込みなしの条件**で、既定値の項目はURLにも載せません（同 5.8・6.2）。スポット検索（`/spotsearch`）は地名（観光スポット・その他のスポット）・バス停・路線を1つ入力すると、スポット情報＋付近のバス停＋周辺を通る路線を表示し、路線名クリックでリアルタイム時刻表（`#/realtime/{feedId}/{routeId}`）・バス停名タップでバス停ページへ遷移します（[docs/spot-search.md](docs/spot-search.md)）。
+- `frontend/admin.html`: Basic認証で保護された管理画面（運行ダッシュボード・便の割当監視・予測精度の監視・当日の状況・異常アラート・GTFS/位置情報フィード監視・API稼働監視・ジョブ監視・お知らせ編集・乗り場お知らせ・祝日カレンダー・外部IDマッピング・観光スポット管理・観光スポットの検索・アクセス数・車両名・メモ管理）。「乗り場お知らせ」は、バス停詳細ページの乗り場別表示にだけ出る画像/リンクのお知らせ（`platform_notices`テーブル、[docs/platform-notices.md](docs/platform-notices.md)）。車両名・メモ管理（`vehicle_labels`テーブル、キーは`car_id`）で名前を付けた車両は、運行ダッシュボードの便詳細セクションで車両IDの代わりに名前で表示され、名前タップでメモが出ます。「観光スポット管理」ではタブ区切りテキストの1列目に指定するID（`tourist_spots.id`）で各スポットを識別し（名称による名寄せはせず、IDが同じなら改称しても同一スポット）、写真を「,」区切りで複数枚登録できます。別メニュー「観光スポットの検索・アクセス数」でスポット検索の検索回数（`spot_search_counts`）と公式サイトリンクのタップ回数（`tourist_spot_link_clicks`）を指定期間（最大1年）でまとめて集計し、掲載の有用性を確認できます（[docs/spot-search.md](docs/spot-search.md) / [docs/tourist-spots.md](docs/tourist-spots.md)）。
 - `frontend/style.css`: 共通スタイル。
 
 > **`index.html`の静的ファイル参照は必ず絶対パス（`/app.js`など）にすること。** 時刻表検索は`/timetable/stops/{stop_id}`のような階層のあるURLを使うため、相対パスだと`/timetable/stops/app.js`を読みに行き、サーバーのSPAフォールバックがindex.htmlを返してスクリプトが一切動かなくなります。
@@ -262,8 +266,10 @@ npm test   # backend/test/ の回帰テスト（node --test。DB不要な純粋�
 | [docs/eta-prediction-algorithm.md](docs/eta-prediction-algorithm.md) | 到着予測アルゴリズムの詳細（プリコンピュートのタイミングを含む） |
 | [docs/timetable-search.md](docs/timetable-search.md) | 時刻表検索機能の詳細 |
 | [docs/route-search.md](docs/route-search.md) | 経路検索エンジンの設計・アルゴリズム詳細 |
+| [docs/spot-search.md](docs/spot-search.md) | スポット検索（簡易的な路線・バス停検索）の仕様 |
 | [docs/feed-config.md](docs/feed-config.md) | フィード構成・外部IDマッピングの管理方法 |
 | [docs/tourist-spots.md](docs/tourist-spots.md) | 観光スポット情報機能の仕様 |
+| [docs/platform-notices.md](docs/platform-notices.md) | 乗り場（のりば）ごとのお知らせ配信の仕様 |
 | [docs/database.md](docs/database.md) | DBスキーマのテーブル一覧・役割 |
 | [docs/api-reference.md](docs/api-reference.md) | APIエンドポイント一覧 |
 | [docs/known-issues.md](docs/known-issues.md) | 現行コードに残っている既知の課題（未対応） |

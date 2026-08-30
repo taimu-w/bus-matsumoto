@@ -30,7 +30,11 @@
   let delayFilterOnly = false;   // true の間は5分以上遅延の便のアイコンだけを地図に表示する
   let lastUnassignedTrips = [];  // サマリー欄「本日の未割当便数」タップ時のポップアップ用
   let openStopModal = null;      // 表示中のバス停詳細モーダル { assignmentId, stopId }（ポーリング再取得用）
-  let carMemoExpanded = false;   // 便詳細セクションで車両メモを開いているか（15秒ポーリング再描画で畳まれないよう保持）
+  let carDetailExpanded = false; // 便詳細セクションで車両詳細（直近の運行履歴＋メモ）を開いているか
+                                 // （15秒ポーリング再描画で畳まれないよう保持）
+  // carId -> /api/admin/vehicle-operation-history/:carId のレスポンス。
+  // 車両名/車両IDのタップで初回取得し、以降はポーリング再描画でもこのキャッシュから同期的に描く。
+  const carDetailCache = {};
 
   /* ---------- app.js と同じ路線カラー処理（別JSスコープのため移植） ---------- */
   function normalizeRouteColor(color, fallback) {
@@ -257,26 +261,64 @@
     return sched + `<div class="text-xs font-bold text-blue-700 whitespace-nowrap">予測 ${escapeHtml(pt)} ${delayChipHtml(stop.predictedDelayMinutes)}</div>`;
   }
 
-  // 便詳細セクションの車両表示。名前が付いている車両は car_id ではなく名前で表示し、
-  // 名前タップでメモ（別ブロック）をトグル表示する。名前が無ければ従来どおり car_id 表示。
-  function carLabelHtml(detail) {
-    if (detail.carName) {
-      return `車両 <button type="button" data-role="toggle-car-memo"
-                class="font-bold text-blue-700 hover:text-blue-900 underline decoration-dotted"
-                title="タップでメモを表示">${escapeHtml(detail.carName)}</button>`;
-    }
-    return `車両 ${escapeHtml(detail.carId)}`;
+  // 便詳細セクションの車両表示。名前が付いている車両は car_id ではなく名前で表示する
+  // （名前が無ければ car_id をそのままラベルにする）。ラベルのタップで「車両詳細」ブロック
+  // （直近の運行履歴＋メモ）をトグル表示する。
+  function carLabelHtml(carId, carName) {
+    const label = carName || carId;
+    const hint = carName ? 'タップで直近の運行履歴・メモを表示' : 'タップで直近の運行履歴を表示';
+    return `車両 <button type="button" data-role="toggle-car-detail" data-car-id="${escapeHtml(carId)}"
+              class="font-bold text-blue-700 hover:text-blue-900 underline decoration-dotted"
+              title="${hint}">${escapeHtml(label)}</button>`;
   }
 
-  function carMemoBlockHtml(detail) {
-    if (!detail.carName) return '';
-    const memo = detail.carMemo
-      ? `<div class="whitespace-pre-wrap">${escapeHtml(detail.carMemo)}</div>`
-      : '<span class="text-slate-400">メモは登録されていません。</span>';
-    return `<div data-role="car-memo" class="${carMemoExpanded ? '' : 'hidden'} mt-1.5 text-xs bg-slate-50 border rounded p-2 text-slate-600">
-        ${memo}
-        <div class="mt-1 text-[10px] text-slate-400">車両ID: ${escapeHtml(detail.carId)}</div>
+  // /api/admin/vehicle-operation-history/:carId のレスポンス（キャッシュ済み）を
+  // 「直近の平日1日分／土休日1日分の運行」＋メモの中身にする。未取得なら読み込み中プレースホルダ。
+  function carDetailInnerHtml(carId) {
+    const data = carDetailCache[carId];
+    if (!data) return '<span class="text-slate-400">読み込み中…</span>';
+
+    const section = (labelText, trips) => {
+      if (!trips || trips.length === 0) {
+        return `<div><span class="font-bold">${labelText}</span>：<span class="text-slate-400">運行履歴なし</span></div>`;
+      }
+      const items = trips.map((t) =>
+        `<li>${escapeHtml(t.startTime || '—')}発 ／ ${escapeHtml(t.routeName || '—')} ／ ${escapeHtml(t.headsign || '—')}行</li>`
+      ).join('');
+      return `<div>
+          <div><span class="font-bold">${labelText}</span>：${escapeHtml(fmtServiceDate(trips[0].serviceDate))}（${trips.length}便）</div>
+          <ul class="list-disc list-inside ml-1 text-slate-500">${items}</ul>
+        </div>`;
+    };
+    const history = data.history || {};
+    const historyHtml = `
+      <div class="font-bold text-slate-500 mb-0.5">直近の運行履歴</div>
+      ${section('平日', history.weekday)}
+      ${section('土休日', history.weekendHoliday)}`;
+
+    const memoHtml = data.carName
+      ? `<div class="mt-1.5 pt-1.5 border-t">
+           <span class="font-bold text-slate-500">メモ</span>
+           ${data.carMemo
+             ? `<div class="whitespace-pre-wrap">${escapeHtml(data.carMemo)}</div>`
+             : '<span class="text-slate-400"> 未登録</span>'}
+         </div>`
+      : '';
+
+    return `<div class="space-y-1">${historyHtml}${memoHtml}</div>`;
+  }
+
+  function carDetailBlockHtml(carId) {
+    return `<div data-role="car-detail" class="${carDetailExpanded ? '' : 'hidden'} mt-1.5 text-xs bg-slate-50 border rounded p-2 text-slate-600 max-h-72 overflow-y-auto">
+        <div data-role="car-detail-inner">${carDetailInnerHtml(carId)}</div>
+        <div class="mt-1 text-[10px] text-slate-400">車両ID: ${escapeHtml(carId)}</div>
       </div>`;
+  }
+
+  // 車両詳細（運行履歴・メモ）を初回取得してキャッシュする。取得済みなら何もしない。
+  async function ensureCarDetail(carId) {
+    if (!carId || carDetailCache[carId]) return;
+    carDetailCache[carId] = await api(`/api/admin/vehicle-operation-history/${encodeURIComponent(carId)}`);
   }
 
   function showDetailPanel() {
@@ -319,8 +361,8 @@
                     class="text-slate-400 hover:text-slate-700 px-1 py-1 font-bold">✕</button>
           </div>
         </div>
-        <p class="text-xs text-slate-500 mt-1">${escapeHtml(detail.headsign || '')}行き ・ ${carLabelHtml(detail)} ・ ${escapeHtml(detail.startTime || '')}発</p>
-        ${carMemoBlockHtml(detail)}
+        <p class="text-xs text-slate-500 mt-1">${escapeHtml(detail.headsign || '')}行き ・ ${carLabelHtml(detail.carId, detail.carName)} ・ ${escapeHtml(detail.startTime || '')}発</p>
+        ${carDetailBlockHtml(detail.carId)}
         <div class="mt-2">
           <button type="button" data-role="unlink-assignment" data-assignment-id="${detail.assignmentId}"
                   class="text-xs font-bold text-red-700 hover:text-red-900 border border-red-300 hover:border-red-500 rounded px-2 py-1">
@@ -358,14 +400,8 @@
       });
     });
 
-    // 車両名タップ → メモの表示/非表示トグル
-    const carMemoToggle = body.querySelector('[data-role="toggle-car-memo"]');
-    const carMemoBlock = body.querySelector('[data-role="car-memo"]');
-    if (carMemoToggle && carMemoBlock) {
-      carMemoToggle.addEventListener('click', () => {
-        carMemoExpanded = carMemoBlock.classList.toggle('hidden') === false;
-      });
-    }
+    // 車両名/車両IDタップ → 車両詳細（運行履歴・メモ）のトグルは
+    // #dashboard-detail-panel のイベント委譲で処理する（担当便パネル・簡易パネル共通）。
 
     body.querySelectorAll('[data-role="actual-time-save"]').forEach((btn) => {
       btn.addEventListener('click', async (e) => {
@@ -411,7 +447,8 @@
           <button type="button" data-role="clear-selection" title="選択解除"
                   class="shrink-0 text-slate-400 hover:text-slate-700 px-1 py-1 font-bold">✕</button>
         </div>
-        <p class="text-xs text-slate-500 mt-1">車両 ${escapeHtml(bus.id)} ・ GPS時刻 ${escapeHtml(bus.gpsTime || '—')}</p>
+        <p class="text-xs text-slate-500 mt-1">${carLabelHtml(bus.id, (carDetailCache[bus.id] || {}).carName)} ・ GPS時刻 ${escapeHtml(bus.gpsTime || '—')}</p>
+        ${carDetailBlockHtml(bus.id)}
       </div>
       <div class="p-4 text-xs text-amber-700 bg-amber-50 border-t">
         この車両は現在どの便にも割り当てられていない（候補にもなっていない）ため、リアルタイム時刻表は表示できません。
@@ -498,7 +535,7 @@
     }
 
     closeStopDetailModal(); // 別のバスへ切り替えたら、前のバスのバス停詳細モーダルは閉じる
-    carMemoExpanded = false; // 別の便に切り替えたら車両メモは畳んだ状態から始める
+    carDetailExpanded = false; // 別の便に切り替えたら車両詳細は畳んだ状態から始める
     selectedKey = key;
     selectedBus = bus;
     updateBusMarkers(lastBuses); // 選択中のバス以外を地図上から隠す
@@ -508,6 +545,8 @@
       await loadAssignmentDetail(bus.assignmentId);
     } else {
       clearOverlay();
+      // 簡易パネルは assignment 詳細を持たないため、車両詳細（運行履歴）は個別に取得しておく。
+      await ensureCarDetail(bus.id).catch(() => {});
       renderMinimalPanel(bus);
     }
   }
@@ -693,7 +732,149 @@
     return `<div class="mt-3">${head}${detail}</div>`;
   }
 
-  // ETA予測の推移（trip_arrival_prediction_log）。末尾が実績（source='actual'）なら強調。
+  /* ---------- ETA予測の推移グラフ（trip_arrival_prediction_log 由来の predictionHistory） ---------- */
+  // 横軸＝予測を出した時刻、縦軸＝そのとき予測していた到着時刻。定刻は水平の破線、到着後は
+  // 実績点（緑）を大きく描く。予測値は「次に変わるまで有効」なので階段状に結ぶ。
+  // 管理コンソールはPC向けのため、各点の詳細はSVGの <title>（ホバーで出るツールチップ）で見せ、
+  // JS側の選択・ホバー状態は持たない（自動更新のたびに作り直しても副作用が無いようにするため）。
+  function clockToMinutesLoose(str) {
+    if (!str) return NaN;
+    const parts = String(str).split(':');
+    if (parts.length < 2) return NaN;
+    const h = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) return NaN;
+    return h * 60 + m;
+  }
+
+  function minutesToClockLabel(mins) {
+    const t = ((Math.round(mins) % 1440) + 1440) % 1440;
+    return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+  }
+
+  // 予測遅延（分）の色分け。delayChipHtml と同じ閾値（±1以内=緑, 2〜4=amber, 5以上=赤）。
+  function delayHexColor(minutes) {
+    const n = Number(minutes);
+    if (!Number.isFinite(n) || n <= 1) return '#16a34a';
+    if (n < 5) return '#d97706';
+    return '#dc2626';
+  }
+
+  function renderPredictionChartHtml(history, scheduledTime) {
+    const raw = (history || [])
+      .map((h) => ({
+        ts: new Date(h.computedAt).getTime(),
+        mins: clockToMinutesLoose(h.predictedTime),
+        delay: h.predictedDelayMinutes,
+        sourceLabel: h.sourceLabel || h.source || '',
+        stopsBefore: h.stopsBefore,
+        isActual: h.source === 'actual',
+        computedAt: h.computedAt,
+        predictedTime: h.predictedTime
+      }))
+      .filter((p) => Number.isFinite(p.ts) && Number.isFinite(p.mins))
+      .sort((a, b) => a.ts - b.ts);
+
+    if (raw.length === 0) return '';
+
+    // --- 縦軸（分）: 予測到着時刻＋定刻。日跨ぎ（例: 定刻 23:55 と 予測 0:10）を展開してから範囲を取る ---
+    let schedM = clockToMinutesLoose(scheduledTime);
+    const rawSeries = raw.map((p) => p.mins).concat(Number.isFinite(schedM) ? [schedM] : []);
+    const maxRawMin = Math.max(...rawSeries);
+    const unwrap = (v) => (Number.isFinite(v) && v < maxRawMin - 720 ? v + 1440 : v);
+    const ys = raw.map((p) => unwrap(p.mins));
+    if (Number.isFinite(schedM)) schedM = unwrap(schedM);
+
+    const yValues = ys.concat(Number.isFinite(schedM) ? [schedM] : []);
+    let yLo = Math.min(...yValues);
+    let yHi = Math.max(...yValues);
+    if (yHi - yLo < 6) { const mid = (yHi + yLo) / 2; yLo = mid - 3; yHi = mid + 3; }
+    const yPad = (yHi - yLo) * 0.18;
+    yLo -= yPad;
+    yHi += yPad;
+
+    // --- 横軸（時刻）: 最古の予測〜最新の予測。未到着なら「現在」まで伸ばす ---
+    const tMin = raw[0].ts;
+    const lastPt = raw[raw.length - 1];
+    const tMax = lastPt.isActual ? lastPt.ts : Math.max(lastPt.ts, Date.now());
+    const tSpan = tMax - tMin || 1;
+
+    const W = 480;
+    const H = 210;
+    const padL = 46;
+    const padR = 16;
+    const padT = 12;
+    const padB = 30;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+    // 1点しかないときは左端に置き、そこから「現在」まで破線を伸ばす（＝この予測が今も有効）。
+    const xOf = (ts) => (raw.length === 1 ? padL : padL + ((ts - tMin) / tSpan) * plotW);
+    const yOf = (m) => padT + ((yHi - m) / (yHi - yLo)) * plotH;
+
+    // 横グリッド＋縦軸ラベル（きれいな分刻み）
+    const niceSteps = [1, 2, 3, 5, 10, 15, 20, 30, 60];
+    const step = niceSteps.find((s) => s >= (yHi - yLo) / 3.2) || 60;
+    let gridHtml = '';
+    for (let v = Math.ceil(yLo / step) * step; v <= yHi; v += step) {
+      const y = yOf(v).toFixed(1);
+      gridHtml += `<line x1="${padL}" y1="${y}" x2="${padL + plotW}" y2="${y}" stroke="#e2e8f0" stroke-width="1"/>`
+        + `<text x="${padL - 6}" y="${(Number(y) + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="#94a3b8">${minutesToClockLabel(v)}</text>`;
+    }
+
+    const axis = `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="#cbd5e1" stroke-width="1"/>`
+      + `<line x1="${padL}" y1="${padT + plotH}" x2="${padL + plotW}" y2="${padT + plotH}" stroke="#cbd5e1" stroke-width="1"/>`;
+
+    // 定刻の水平破線
+    let schedHtml = '';
+    if (Number.isFinite(schedM) && schedM >= yLo && schedM <= yHi) {
+      const y = yOf(schedM);
+      schedHtml = `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${padL + plotW}" y2="${y.toFixed(1)}" stroke="#64748b" stroke-width="1.5" stroke-dasharray="5 3"/>`
+        + `<rect x="${padL + 1}" y="${(y - 13).toFixed(1)}" width="62" height="12" fill="#ffffff" opacity="0.85"/>`
+        + `<text x="${padL + 3}" y="${(y - 3).toFixed(1)}" font-size="10" font-weight="700" fill="#475569">定刻 ${escapeHtml(minutesToClockLabel(schedM))}</text>`;
+    }
+
+    // 階段状の予測線（次に変わるまで有効）＋未到着なら「現在」まで破線で延長
+    let d = `M ${xOf(raw[0].ts).toFixed(1)} ${yOf(ys[0]).toFixed(1)}`;
+    for (let i = 1; i < raw.length; i += 1) {
+      const x = xOf(raw[i].ts).toFixed(1);
+      d += ` L ${x} ${yOf(ys[i - 1]).toFixed(1)} L ${x} ${yOf(ys[i]).toFixed(1)}`;
+    }
+    const stepLine = raw.length > 1
+      ? `<path d="${d}" fill="none" stroke="#2563eb" stroke-width="2" stroke-linejoin="round"/>`
+      : '';
+    const lastY = yOf(ys[ys.length - 1]).toFixed(1);
+    const ongoing = lastPt.isActual
+      ? ''
+      : `<line x1="${xOf(lastPt.ts).toFixed(1)}" y1="${lastY}" x2="${(padL + plotW).toFixed(1)}" y2="${lastY}" stroke="#2563eb" stroke-width="2" stroke-dasharray="4 3" opacity="0.55"/>`;
+
+    // 各予測点（色＝予測遅延）。実績点は緑で大きく。
+    const dots = raw.map((p, i) => {
+      const cx = xOf(p.ts).toFixed(1);
+      const cy = yOf(ys[i]).toFixed(1);
+      const tip = p.isActual
+        ? `実績 ${p.predictedTime}（${signedDelayLabel(p.delay) || '—'}） ／ ${fmtClock(p.computedAt)}時点`
+        : `${fmtClock(p.computedAt)}時点の予測 ${p.predictedTime}（${signedDelayLabel(p.delay) || '—'}） ／ 根拠 ${p.sourceLabel}${p.stopsBefore > 0 ? ` ／ ${p.stopsBefore}停留所前` : ''}`;
+      return p.isActual
+        ? `<circle cx="${cx}" cy="${cy}" r="5.5" fill="#16a34a" stroke="#ffffff" stroke-width="2"><title>${escapeHtml(tip)}</title></circle>`
+        : `<circle cx="${cx}" cy="${cy}" r="3.5" fill="${delayHexColor(p.delay)}" stroke="#ffffff" stroke-width="1.5"><title>${escapeHtml(tip)}</title></circle>`;
+    }).join('');
+
+    const xLabels = `
+      <text x="${padL}" y="${H - 10}" text-anchor="start" font-size="10" fill="#94a3b8">${escapeHtml(fmtClock(raw[0].computedAt))}</text>
+      <text x="${padL + plotW}" y="${H - 10}" text-anchor="end" font-size="10" fill="#94a3b8">${escapeHtml(lastPt.isActual ? fmtClock(lastPt.computedAt) : '現在')}</text>`;
+
+    return `
+      <div class="mt-2 rounded-lg border bg-white p-2">
+        <svg viewBox="0 0 ${W} ${H}" class="w-full" style="height:auto" role="img" aria-label="ETA予測の推移グラフ">
+          ${gridHtml}${axis}${schedHtml}${stepLine}${ongoing}${dots}${xLabels}
+        </svg>
+        <p class="mt-1 text-[10px] text-slate-400 leading-snug">
+          横軸＝予測を出した時刻／縦軸＝そのとき予測した到着時刻。破線＝定刻。点にカーソルを合わせると根拠と予測遅延が出ます。${lastPt.isActual ? '緑の点＝実績。' : '青の破線＝現在も有効な予測。'}
+        </p>
+      </div>`;
+  }
+
+  // ETA予測の推移（trip_arrival_prediction_log）の変化の記録。末尾が実績（source='actual'）なら強調。
   function renderPredictionHistoryHtml(history) {
     if (!history || history.length === 0) {
       return '<p class="text-xs text-slate-400 mt-2">まだ予測の記録がありません（次回のパイプライン実行で記録されます）。</p>';
@@ -763,13 +944,32 @@
         ${mainBlock}
         <div>
           <p class="text-xs font-bold text-slate-500">予想到着時刻（ETA）の推移</p>
+          ${renderPredictionChartHtml(data.predictionHistory, data.scheduledTime)}
+          ${data.predictionHistory && data.predictionHistory.length
+            ? '<p class="mt-3 text-[11px] font-bold text-slate-400">変化の記録</p>'
+            : ''}
           ${renderPredictionHistoryHtml(data.predictionHistory)}
         </div>
       </div>`;
   }
 
+  // モーダル本体を描画する。refresh=true（自動更新による差し替え）のときは、
+  // カード／オーバーレイのスクロール位置を保持する（毎回いちばん上に戻ってしまう問題への対策）。
+  function paintStopDetailModal(overlay, data, refresh) {
+    const prevCard = overlay.querySelector('[data-role="stop-modal-card"]');
+    const cardScroll = prevCard ? prevCard.scrollTop : 0;
+    const overlayScroll = overlay.scrollTop;
+    overlay.innerHTML =
+      `<div data-role="stop-modal-card" class="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-full overflow-y-auto">${renderStopDetailModalBody(data)}</div>`;
+    if (refresh) {
+      const card = overlay.querySelector('[data-role="stop-modal-card"]');
+      if (card) card.scrollTop = cardScroll;
+      overlay.scrollTop = overlayScroll;
+    }
+  }
+
   async function openStopDetailModal(assignmentId, stopId) {
-    openStopModal = { assignmentId, stopId };
+    openStopModal = { assignmentId, stopId, snapshot: null };
     let overlay = document.getElementById('dashboard-stop-modal');
     if (!overlay) {
       overlay = document.createElement('div');
@@ -786,7 +986,8 @@
       const data = await api(`/api/admin/assignments/${assignmentId}/stops/${stopId}`);
       // 読み込み中に別のバス停を開いた／閉じた場合は破棄する
       if (!openStopModal || openStopModal.assignmentId !== assignmentId || openStopModal.stopId !== stopId) return;
-      overlay.innerHTML = `<div class="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-full overflow-y-auto">${renderStopDetailModalBody(data)}</div>`;
+      openStopModal.snapshot = JSON.stringify(data);
+      paintStopDetailModal(overlay, data, false);
     } catch (err) {
       overlay.innerHTML = `<div class="bg-white rounded-xl shadow-xl max-w-lg w-full p-6">
         <p class="text-sm font-bold text-red-600">${escapeHtml(err.message)}</p>
@@ -796,6 +997,8 @@
   }
 
   // ポーリング時にモーダルが開いていれば内容を更新する（バックグラウンドで静かに差し替え）。
+  // 内容に変化が無ければ再描画しない（ホバー中のツールチップ・スクロール位置を無駄に崩さないため）。
+  // 変化があった場合もスクロール位置は維持する（paintStopDetailModal の refresh=true）。
   async function refreshOpenStopModal() {
     if (!openStopModal) return;
     const { assignmentId, stopId } = openStopModal;
@@ -803,9 +1006,11 @@
       const data = await api(`/api/admin/assignments/${assignmentId}/stops/${stopId}`);
       if (!openStopModal || openStopModal.assignmentId !== assignmentId || openStopModal.stopId !== stopId) return;
       const overlay = document.getElementById('dashboard-stop-modal');
-      if (overlay) {
-        overlay.innerHTML = `<div class="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-full overflow-y-auto">${renderStopDetailModalBody(data)}</div>`;
-      }
+      if (!overlay) return;
+      const snapshot = JSON.stringify(data);
+      if (openStopModal.snapshot === snapshot) return;
+      openStopModal.snapshot = snapshot;
+      paintStopDetailModal(overlay, data, true);
     } catch (err) {
       // 静かに無視（次のポーリングで再試行）
     }
@@ -859,6 +1064,7 @@
             if (!isEditingActualTime()) await loadAssignmentDetail(updated.assignmentId);
             refreshOpenStopModal();
           } else if (!isPickingLinkTrip()) {
+            await ensureCarDetail(updated.id).catch(() => {});
             renderMinimalPanel(updated);
           }
         }
@@ -876,6 +1082,32 @@
   });
   document.getElementById('dashboard-detail-panel').addEventListener('click', (e) => {
     if (e.target.closest('[data-role="clear-selection"]')) clearSelection();
+  });
+  // 車両名/車両IDタップ → 「車両詳細」（直近の運行履歴＋メモ）ブロックのトグル表示。
+  // 担当便パネル・簡易パネルのどちらでも同じ [data-role] を使うため委譲で処理する。
+  document.getElementById('dashboard-detail-panel').addEventListener('click', async (e) => {
+    const toggle = e.target.closest('[data-role="toggle-car-detail"]');
+    if (!toggle) return;
+    const carId = toggle.dataset.carId;
+    const block = document.querySelector('#dashboard-detail-body [data-role="car-detail"]');
+    if (!block) return;
+    carDetailExpanded = !carDetailExpanded;
+    block.classList.toggle('hidden', !carDetailExpanded);
+    if (carDetailExpanded && !carDetailCache[carId]) {
+      let errMsg = null;
+      try {
+        await ensureCarDetail(carId);
+      } catch (err) {
+        errMsg = err.message;
+      }
+      // await の間にポーリング再描画が入りうるので、ブロックは取り直す。
+      const inner = document.querySelector('#dashboard-detail-body [data-role="car-detail-inner"]');
+      if (inner) {
+        inner.innerHTML = errMsg
+          ? `<span class="text-red-600">${escapeHtml(errMsg)}</span>`
+          : carDetailInnerHtml(carId);
+      }
+    }
   });
   document.getElementById('dashboard-detail-panel').addEventListener('change', (e) => {
     if (e.target.matches('[data-role="link-trip-select"]')) {

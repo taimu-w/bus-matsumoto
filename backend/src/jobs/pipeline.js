@@ -13,13 +13,15 @@ const { delayCalc } = require('../services/delayCalc');
 const { updateAllGtfsFeeds } = require('../services/gtfsFeedManager');
 const { computeAndStoreAllArrivals } = require('../services/etaPredictor');
 const { refreshRuntimeSettingsCache, getRuntimeSetting } = require('../services/runtimeSettings');
+const { refreshDirectionRulesCache } = require('../services/directionRules');
 const jobMonitor = require('../services/jobMonitor');
 
 async function runPipeline() {
-  // 管理画面から編集可能な運用設定（判定半径・タイムアウト等）を最新化する。
-  // 以降のステップ（tripAssignment.js・passDetection.js等）はここで読み込んだ値を
-  // 同期的に参照するため、各ステップの実行前に一度だけ読み込めば良い。
+  // 管理画面から編集可能な運用設定（判定半径・タイムアウト等）と方向マッピングを最新化する。
+  // 以降のステップ（locationFetcher.js・tripAssignment.js・passDetection.js等）はここで
+  // 読み込んだ値を同期的に参照するため、各ステップの実行前に一度だけ読み込めば良い。
   await refreshRuntimeSettingsCache();
+  await refreshDirectionRulesCache();
 
   // 深夜帯はGPSの取り込みと運行処理を止めるが、当日便の生成と車両割り当ては止めない。
   // 最も早い便は5:40発で、深夜帯が明ける前に始発時刻が来るため

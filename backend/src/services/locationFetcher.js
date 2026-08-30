@@ -11,7 +11,7 @@
 const fetch = require('cross-fetch');
 const pool = require('../config/db');
 const { formatNowNoFormat, formatTimeNoFormat } = require('../utils/time');
-const { resolveDirectionId } = require('../config/directionMapping');
+const { resolveDirectionId } = require('./directionRules');
 const { getEnabledLocationFeeds, getGtfsFeedIdsFor } = require('../config/feeds');
 const { getExternalIdsForFeeds } = require('./routeExternalIdMapping');
 const { getRuntimeSetting } = require('./runtimeSettings');
@@ -153,9 +153,9 @@ async function fetchLocationFeed(client, feed, freshnessMin, now, timeLimit, now
       continue;
     }
 
-    // 方向列（5列目 / row[4]）を読み取り、路線別のコード設定で direction_id に変換する。
-    // 管理画面での対応設定は廃止した（仕様書 6.1）。
-    // 方向を使わない路線・値が空の場合は null（方向不明）になり、便判定では方向で絞り込まない。
+    // 方向列（5列目 / row[4]）を読み取り、路線別の方向マッピング（route_direction_rules。
+    // 管理画面「方向マッピング」で編集）で direction_id に変換する。
+    // 方向を使わない路線（既定）・値が空の場合は null（方向不明）になり、便判定では方向で絞り込まない。
     const directionCsvValue = row[4] ? row[4].trim() : '';
     const directionId = resolveDirectionId(matchedRouteId, directionCsvValue);
 

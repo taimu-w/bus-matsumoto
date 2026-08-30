@@ -235,7 +235,7 @@ async function migrate() {
     // ==========================================================
     await client.query(`
       CREATE TABLE IF NOT EXISTS tourist_spots (
-        id              SERIAL PRIMARY KEY,
+        id              TEXT PRIMARY KEY,
         name            TEXT NOT NULL,
         kana            TEXT,
         romaji          TEXT,
@@ -250,9 +250,6 @@ async function migrate() {
         created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
       )
-    `);
-    await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS tourist_spots_name_key ON tourist_spots (name)
     `);
 
     // ==========================================================
@@ -594,6 +591,197 @@ async function migrate() {
         DROP COLUMN IF EXISTS business_start_time,
         DROP COLUMN IF EXISTS departure_time
     `);
+
+    // ==========================================================
+    // 31. 車両ごとの「直近の運行履歴」（管理画面「車両運用状況」・運行ダッシュボードの
+    //     車両詳細）。car_id × 曜日区分（バケット）ごとに「直近1日ぶんの便」をすべて保持する
+    //     （1便=1行、PRIMARY KEY (car_id, day_type, start_at)）。
+    //     新規環境ではschema.sqlのCREATE TABLEに既に含まれているため実質no-op。
+    //     以降は finishService.closeDailyTrip() が随時追記・掃除する。
+    // ==========================================================
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS vehicle_operation_history (
+        car_id            TEXT NOT NULL,
+        day_type          TEXT NOT NULL CHECK (day_type IN ('weekday', 'saturday', 'holiday')),
+        service_date      DATE NOT NULL,
+        start_time        TEXT NOT NULL,
+        start_at          TIMESTAMPTZ NOT NULL,
+        route_id          TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+        headsign          TEXT,
+        completed_trip_id BIGINT,
+        updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (car_id, day_type, start_at)
+      )
+    `);
+    // 旧スキーマ（PRIMARY KEY (car_id, day_type)＝曜日区分ごとに1便だけ）で作られたテーブルを、
+    // 「1日分（1便=1行）」保持のPRIMARY KEY (car_id, day_type, start_at) へ作り替える。
+    // start_at がPKに含まれていなければ旧スキーマ。中身は次のバックフィルで作り直す。
+    const vohPkHasStartAt = await client.query(`
+      SELECT 1 FROM information_schema.key_column_usage
+      WHERE table_name = 'vehicle_operation_history'
+        AND constraint_name = 'vehicle_operation_history_pkey'
+        AND column_name = 'start_at'
+    `);
+    if (vohPkHasStartAt.rows.length === 0) {
+      await client.query(`DELETE FROM vehicle_operation_history`);
+      await client.query(`ALTER TABLE vehicle_operation_history DROP CONSTRAINT vehicle_operation_history_pkey`);
+      await client.query(`ALTER TABLE vehicle_operation_history ADD CONSTRAINT vehicle_operation_history_pkey PRIMARY KEY (car_id, day_type, start_at)`);
+      console.log('[migrate] ステップ31: vehicle_operation_history を「直近1日分」保持のスキーマへ作り替えました。');
+    }
+    // テーブルが空のとき（＝この移行の初回、または新規DB）だけ、保持期間内に残っている
+    // completed_trips × daily_trips から初期データを移行する。car_id × バケットごとに
+    // 「最新の運行日」を求め、その日のすべての便を投入する。
+    const vohEmpty = await client.query(
+      `SELECT NOT EXISTS (SELECT 1 FROM vehicle_operation_history) AS empty`
+    );
+    if (vohEmpty.rows[0].empty) {
+      const backfill = await client.query(`
+        WITH official AS (
+          SELECT ct.car_id, ct.day_type, dt.service_date, dt.start_at, ct.route_id,
+                 COALESCE(ct.start_time, dt.start_time) AS start_time, dt.headsign, ct.id AS completed_trip_id,
+                 CASE WHEN ct.day_type = 'weekday' THEN 'weekday' ELSE 'weekend_holiday' END AS bucket
+          FROM completed_trips ct
+          JOIN daily_trips dt ON dt.id = ct.daily_trip_id
+          WHERE ct.is_official = TRUE AND ct.day_type IN ('weekday', 'saturday', 'holiday')
+        ),
+        latest AS (
+          SELECT car_id, bucket, max(service_date) AS max_date FROM official GROUP BY car_id, bucket
+        )
+        INSERT INTO vehicle_operation_history
+          (car_id, day_type, service_date, start_time, start_at, route_id, headsign, completed_trip_id, updated_at)
+        SELECT DISTINCT ON (o.car_id, o.day_type, o.start_at)
+               o.car_id, o.day_type, o.service_date, o.start_time, o.start_at, o.route_id, o.headsign, o.completed_trip_id, now()
+        FROM official o
+        JOIN latest l ON l.car_id = o.car_id AND l.bucket = o.bucket AND l.max_date = o.service_date
+        ORDER BY o.car_id, o.day_type, o.start_at, o.completed_trip_id DESC
+        ON CONFLICT (car_id, day_type, start_at) DO NOTHING
+      `);
+      if (backfill.rowCount > 0) {
+        console.log(`[migrate] ステップ31: vehicle_operation_history に completed_trips から ${backfill.rowCount} 件を初期移行しました。`);
+      }
+    }
+
+    // ==========================================================
+    // 32. 乗り場（のりば）ごとのお知らせ配信（管理画面「乗り場お知らせ」）。
+    //     バス停詳細ページの「このバス停でできること」の下に、乗り場別表示のときだけ出す。
+    //     新規環境ではschema.sqlのCREATE TABLEに既に含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS platform_notices (
+        id             SERIAL PRIMARY KEY,
+        feed_id        TEXT NOT NULL,
+        stop_id        TEXT NOT NULL,
+        stop_key       TEXT NOT NULL,
+        stop_name      TEXT NOT NULL,
+        platform_code  TEXT,
+        kind           TEXT NOT NULL CHECK (kind IN ('image', 'link')),
+        title          TEXT,
+        image_url      TEXT,
+        link_body      TEXT,
+        enabled        BOOLEAN NOT NULL DEFAULT TRUE,
+        sort_order     INTEGER NOT NULL DEFAULT 0,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_platform_notices_stop ON platform_notices (feed_id, stop_id)
+    `);
+
+    // ==========================================================
+    // 33. tourist_spots.photo_url を photo_urls にリネーム（観光スポット情報_仕様書）。
+    //     写真を "," 区切りで複数枚保持できるようにしたことに伴う、内容に正直な列名への変更。
+    //     既存DBのデータを保つためリネームで行う（step19/31と同じ「条件付き一度きり移行」）。
+    //     新規環境ではschema.sqlのCREATE TABLEが既に photo_urls なので IF EXISTS で no-op。
+    // ==========================================================
+    await client.query(`
+      DO $$ BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'tourist_spots' AND column_name = 'photo_url') THEN
+          ALTER TABLE tourist_spots RENAME COLUMN photo_url TO photo_urls;
+        END IF;
+      END $$;
+    `);
+
+    // ==========================================================
+    // 34. 観光スポットの公式サイトリンクのタップ回数（tourist_spot_link_clicks、観光スポット情報_仕様書）。
+    //     掲載の有用性を管理者が判断するための日別集計。全件洗い替えでスポット行が消えても
+    //     集計を残せるよう外部キーは張らず、記録時点の名称スナップショットを持つ。
+    //     新規環境ではschema.sqlのCREATE TABLEに既に含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS tourist_spot_link_clicks (
+        spot_id      TEXT NOT NULL,
+        spot_name    TEXT NOT NULL,
+        click_date   DATE NOT NULL,
+        click_count  INTEGER NOT NULL DEFAULT 0,
+        updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (spot_id, click_date)
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_tourist_spot_link_clicks_date ON tourist_spot_link_clicks (click_date)
+    `);
+
+    // ==========================================================
+    // 35. スポット検索（frontend/spotsearch.js・services/spotSearch.js、docs/spot-search.md）の
+    //     検索回数。観光スポット／その他のスポットが検索されて結果が表示された回数を
+    //     Asia/Tokyo基準で日別集計する。tourist_spot_link_clicks と同じく外部キーは張らず
+    //     名称スナップショットを持つ。spot_id='' は「観光スポット以外（バス停・地名）に解決した検索」。
+    //     新規環境ではschema.sqlのCREATE TABLEに既に含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS spot_search_counts (
+        spot_id       TEXT NOT NULL,
+        spot_name     TEXT NOT NULL,
+        search_date   DATE NOT NULL,
+        search_count  INTEGER NOT NULL DEFAULT 0,
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (spot_id, search_date)
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_spot_search_counts_date ON spot_search_counts (search_date)
+    `);
+
+    // ==========================================================
+    // 36. 観光スポットの識別子を「管理画面で入力するID」へ変更する。
+    //     id は serial ではなく管理者がテキスト入力の1列目で指定する TEXT 主キー。
+    //     名称による名寄せ（同名＝同一スポット）は廃止し、id の一致だけで同一スポットを判定する。
+    //     既存の serial id は次回の全件洗い替え（IDを付けて貼り直し）で置き換わる。集計テーブル
+    //     （tourist_spot_link_clicks / spot_search_counts）の spot_id も TEXT にそろえる
+    //     （外部キーは無いため既存の数値 id は文字列として履歴に残る）。
+    //     新規環境では schema.sql が既に TEXT 主キーのため各 ALTER は実質 no-op。
+    // ==========================================================
+    await client.query(`ALTER TABLE tourist_spots ALTER COLUMN id DROP DEFAULT`);
+    await client.query(`
+      DO $$ BEGIN
+        IF (SELECT data_type FROM information_schema.columns
+             WHERE table_name = 'tourist_spots' AND column_name = 'id') <> 'text' THEN
+          ALTER TABLE tourist_spots ALTER COLUMN id TYPE TEXT USING id::text;
+        END IF;
+      END $$;
+    `);
+    await client.query(`DROP SEQUENCE IF EXISTS tourist_spots_id_seq`);
+    await client.query(`DROP INDEX IF EXISTS tourist_spots_name_key`);
+    await client.query(`
+      DO $$ BEGIN
+        IF (SELECT data_type FROM information_schema.columns
+             WHERE table_name = 'tourist_spot_link_clicks' AND column_name = 'spot_id') <> 'text' THEN
+          ALTER TABLE tourist_spot_link_clicks ALTER COLUMN spot_id TYPE TEXT USING spot_id::text;
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      DO $$ BEGIN
+        IF (SELECT data_type FROM information_schema.columns
+             WHERE table_name = 'spot_search_counts' AND column_name = 'spot_id') <> 'text' THEN
+          ALTER TABLE spot_search_counts ALTER COLUMN spot_id TYPE TEXT USING spot_id::text;
+        END IF;
+      END $$;
+    `);
+    // スポット未確定（バス停・地名に解決）の検索回数センチネルを 0 → '' へ。
+    await client.query(`UPDATE spot_search_counts SET spot_id = '' WHERE spot_id = '0'`);
 
     await client.query('COMMIT');
     console.log('[migrate] マイグレーション完了');

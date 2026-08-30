@@ -14,6 +14,7 @@ const { haversineDistanceMeters } = require('../utils/geo');
 const { getDayOfWeek, getDayType, timeStrToMinutes } = require('../utils/time');
 const { updateSegmentStats } = require('./etaPredictor');
 const { loadHolidaySet } = require('./holidayCalendar');
+const { recordVehicleOperation } = require('./vehicleOperationHistory');
 const { refreshRuntimeSettingsCache, getRuntimeSetting } = require('./runtimeSettings');
 
 // 「終点まで到達して正常に終了した」とみなす end_reason。
@@ -124,6 +125,7 @@ async function archiveAssignment(client, assignment, reason, isOfficial) {
 
   const serviceDateRef = new Date(`${assignment.service_date_str}T12:00:00+09:00`);
   const holidaySet = await loadHolidaySet(client);
+  const dayType = getDayType(serviceDateRef, holidaySet);
 
   const tripRes = await client.query(
     `INSERT INTO completed_trips
@@ -140,7 +142,7 @@ async function archiveAssignment(client, assignment, reason, isOfficial) {
       assignment.start_time,
       isOfficial,
       getDayOfWeek(serviceDateRef),
-      getDayType(serviceDateRef, holidaySet),
+      dayType,
       reason
     ]
   );
@@ -163,6 +165,22 @@ async function archiveAssignment(client, assignment, reason, isOfficial) {
         r.delay_minutes
       ]
     );
+  }
+
+  // 便の実績として正とみなす割り当て（＝最後に担当車両だった割り当て）についてだけ、
+  // 車両ごとの「直近の運行履歴」（管理画面「車両運用状況」・運行ダッシュボードの車両詳細）を
+  // car_id × 曜日区分で1件だけ上書き更新する。候補止まりの記録は運用実績として扱わない。
+  if (isOfficial) {
+    await recordVehicleOperation(client, {
+      carId: assignment.car_id,
+      dayType,
+      serviceDate: assignment.service_date_str,
+      startTime: assignment.start_time,
+      startAt: assignment.start_at,
+      routeId: assignment.route_id,
+      headsign: assignment.headsign,
+      completedTripId
+    });
   }
 
   return completedTripId;
@@ -199,7 +217,7 @@ async function closeDailyTrip(client, dailyTripId, reason) {
     const assignments = await client.query(
       `SELECT a.id AS assignment_id, a.vehicle_id, a.role, a.state, a.became_assigned_at,
               a.end_reason, d.id AS daily_trip_id, d.route_id, d.schedule_trip_id,
-              d.start_time, d.service_date::text AS service_date_str, v.car_id
+              d.start_time, d.start_at, d.headsign, d.service_date::text AS service_date_str, v.car_id
        FROM trip_vehicle_assignments a
        JOIN daily_trips d ON d.id = a.daily_trip_id
        JOIN vehicles v ON v.id = a.vehicle_id

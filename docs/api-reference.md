@@ -23,6 +23,15 @@
 | GET | `/api/route-search/stops` | 出発地・目的地の候補（漢字/ひらがな/カタカナ/ローマ字。返す`stopKey`は時刻表検索・バス停検索と共通） |
 | GET | `/api/route-search` | 経路検索：乗換2回まで・徒歩接続あり・任意日付・運賃つき。`fromStopKey`/`from`・`toStopKey`/`to`・`date=YYYY-MM-DD`・`time=HH:MM`・`limit`（`departureTime`は`time`の別名として受付）。詳細設定（すべて任意。未指定なら既定の条件）：`maxTransfers=0..3`（`0`＝乗り換えなし）・`allowWalkTransfer=false`（徒歩での乗り継ぎを使わない）・`minTransferMinutes=1..15`（乗り換えの余裕時間）。詳細は[route-search.md](route-search.md) |
 
+## スポット検索
+
+「簡易的な路線・バス停検索」。地名（観光スポット・その他のスポット）・バス停・路線を1つ入力すると、スポット情報＋付近のバス停＋周辺を通る路線を返す。詳細は[spot-search.md](spot-search.md)。
+
+| メソッド | パス | 概要 |
+|---|---|---|
+| GET | `/api/spot-search/suggest` | 入力候補（`q`・`limit`）。`{ stops, spots, routes }` をまとめて返す（バス停・観光スポットは時刻表検索／経路検索と同じ検索、路線は`routes`テーブルの名称一致） |
+| GET | `/api/spot-search` | スポット検索の実行（`spotId`／`stopKey`／`q` のいずれか、`radius=100..3000`（既定500）、`limit=1..20`（既定8））。対象が観光スポット／その他のスポット／バス停に解決したら検索回数を+1する（`spot_search_counts`）。路線に解決した場合は`{ found:true, resolvedFrom:'route', route }`を返し、フロントがリアルタイム時刻表へ遷移する |
+
 ## 時刻表検索・バス停検索
 
 詳細は[timetable-search.md](timetable-search.md)を参照。
@@ -37,7 +46,10 @@
 | GET | `/api/busstop/search` | `/api/timetable/stops/search`と同一データ |
 | GET | `/api/busstop/nearby` | 現在地から近い順のバス停（既定5件） |
 | GET | `/api/busstop/:stopKey/approaching` | 現在時刻±30分以内に到着予定の便一覧 |
-| GET | `/api/busstop/:stopKey/nearby-spots` | 周辺の観光スポット |
+| GET | `/api/busstop/:stopKey/nearby-spots` | 周辺の観光スポット（`photoUrls`は配列） |
+| GET | `/api/busstop/:stopKey/platform-notice` | その乗り場（`?platform=`）に登録された`enabled`のお知らせ（画像/リンク）。乗り場が複数あって`platform`未指定なら`notices: []`（[platform-notices.md](platform-notices.md)） |
+| GET | `/api/tourist-spots/:id` | 観光スポット1件の詳細（`enabled = true`のみ）。`:id`は管理画面で指定する識別子。経路検索結果のスポット詳細ポップアップ用 |
+| POST | `/api/tourist-spots/:id/link-click` | 公式サイトリンクのタップを記録（`sendBeacon`。URL未登録スポットは無視。結果に関わらず`{ok:true}`。[tourist-spots.md](tourist-spots.md)） |
 
 ## 管理API（要Basic認証）
 
@@ -47,14 +59,20 @@
 | GET / PUT / DELETE | `/api/admin/runtime-settings`（`/:key`） | 運用パラメータ（判定半径・タイムアウト・しきい値等）の取得・上書き保存・上書き解除（既定値へ戻す）。定義一覧は[backend/src/config/runtimeSettingsCatalog.js](../backend/src/config/runtimeSettingsCatalog.js) |
 | GET / POST / DELETE | `/api/admin/holidays`（`/:date`） | 祝日カレンダーの取得・追加・削除（ETA統計の曜日区分に使用） |
 | GET / POST / DELETE | `/api/admin/route-mappings`（`/:externalId`） | 外部ID⇔GTFS route_id対応の取得・追加更新（UPSERT）・削除。`route_id`は`routes`テーブルへの実在チェックあり（路線名による解決はしない） |
-| GET / PUT / DELETE | `/api/admin/tourist-spots`（`/:id`） | 観光スポット情報の一覧・テキスト一括登録（全件洗い替え）・1件削除 |
-| GET / PUT / DELETE | `/api/admin/vehicle-labels`（`/:carId`） | 車両ID（`car_id`）ごとの名前・メモの取得・追加更新（UPSERT）・削除。GETは登録済み一覧に加えて最近観測された車両ID一覧（`knownVehicles`）も返す。PUTで名前・メモがどちらも空の場合は行を削除する。運行ダッシュボードの便詳細セクションで名前表示・名前タップでメモ表示に使う |
+| GET / POST / DELETE | `/api/admin/direction-rules`（`/:routeId`） | 方向マッピング（位置情報CSVの方向値⇔GTFS `direction_id`）の取得・追加更新（UPSERT）・削除。`mode`は`ignore`/`map`、`map`時は`valueMap`（`{CSV値: 0|1}`）と`fallback`（`0`/`1`/`null`）。`routeId`は`routes`テーブルへの実在チェックあり。行が無い路線は既定`ignore`。定義は[backend/src/config/directionMapping.js](../backend/src/config/directionMapping.js) |
+| GET / PUT / PATCH / DELETE | `/api/admin/tourist-spots`（`/:id`） | 観光スポット情報の一覧・テキスト一括登録（1列目のIDをキーにした全件洗い替え）・有効無効切替・1件削除。`:id`は管理画面で指定する識別子（TEXT） |
+| GET | `/api/admin/tourist-spots/link-clicks` | 管理画面「観光スポットの検索・アクセス数」。スポット検索の検索回数（`spot_search_counts`）と公式サイトリンクのタップ回数（`tourist_spot_link_clicks`）をスポットごとに期間集計してマージ（`?from=&to=`、最大1年／未指定は直近30日）。[spot-search.md](spot-search.md) / [tourist-spots.md](tourist-spots.md) |
+| GET / POST / PUT / PATCH / DELETE | `/api/admin/platform-notices`（`/:id`） | 乗り場（のりば）お知らせの一覧（無効含む）・新規作成・内容更新・有効無効切替・削除。POSTは`{stopKey, platform}`をサーバー側で`resolvePlatformRef()`に通し正規の`feed_id`+`stop_id`へ落として保存（乗り場が特定できなければ400）。PUTで対象の乗り場は変更不可（[platform-notices.md](platform-notices.md)） |
+| GET / PUT / DELETE | `/api/admin/vehicle-labels`（`/:carId`） | 車両ID（`car_id`）ごとの名前・メモの取得・追加更新（UPSERT）・削除。GETは登録済み一覧に加えて最近観測された車両ID一覧（`knownVehicles`）も返す。PUTで名前・メモがどちらも空の場合は行を削除する。運行ダッシュボードの便詳細セクションで名前表示・名前タップで車両詳細表示に使う |
+| GET | `/api/admin/vehicle-operation-history/:carId` | 1台ぶんの「直近の運行履歴」（`history: { weekday: [便...], weekendHoliday: [便...] }`。各バケットは直近1日分の全便を始発時刻昇順で、履歴が無ければ空配列。各便は`serviceDate`/`routeName`/`headsign`/`startTime`ほか）＋車両名・メモ（`carName`/`carMemo`）。運行ダッシュボードで車両名/車両IDをタップしたときの詳細展開用（`vehicle_operation_history`） |
+| GET | `/api/admin/vehicle-operation-status` | 管理画面「車両運用状況」。運行履歴のある車両・名前を登録済みの車両ごとに`{ carId, name, history: { weekday: [便...], weekendHoliday: [便...] } }`。`name ASC NULLS LAST, car_id ASC`順 |
 | GET | `/api/admin/vehicle-positions-map` | 運行ダッシュボード（地図）の「全車両（直近3分）」モード用。便に割り当てられていない・候補にすらなっていない車両も含め、直近3分以内にGPSを受信した全車両を1台につき最新の1件だけ返す |
 | GET | `/api/admin/assignments/:assignmentId` | 運行ダッシュボード（地図）の詳細パネル用。便のリアルタイム時刻表（停車バス停・定刻・実績・予測）と、その車両がこの便を担当してから記録した位置履歴。車両に名前が登録されていれば`carName`/`carMemo`も含む |
 | GET | `/api/admin/assignments/:assignmentId/stops/:stopId` | バス停別詳細モーダル用。到着済なら判定方法（`付近経由`/`ベクトル判定`/`手動` 等）と根拠（内積・線分距離・前後GPS点／最接近距離・GPS時刻）＋遅れ、未到着ならETA予測根拠（`source`＋ペース補正の内訳）。いずれもETA予測の推移（`trip_arrival_prediction_log`。実績確定時は`actual`行）を返す |
 | PUT | `/api/admin/assignments/:assignmentId/stops/:stopId` | 到着判定時刻（`trip_stop_progress.actual_time`）の手動編集。`actualTime`が`H:mm`なら`到着済`へ手動確定（未到着のバス停も可）、**空なら未到着へ差し戻し**（到着判定・実績・遅れ・判定根拠を消去。`trip_gps_matches`は消さない） |
 | GET | `/api/admin/assignment-monitor` | 便ごとの担当・候補・割当時刻・距離・未割当理由（`?date=YYYY-MM-DD`） |
-| GET | `/api/admin/alerts` | 異常アラート（GPS途絶・未割当便・大幅遅延・予測計算失敗・GTFS取得失敗） |
+| GET | `/api/admin/gps-outage/:assignmentId` | 異常アラート「GPS途絶で便打ち切り」(`gpsLostTrip`)の「地図で検証」用。`/api/admin/assignments/:assignmentId`の詳細（停車バス停・位置履歴・リアルタイム時刻表）に、途絶の一覧（`outages[]`：途絶/復旧の時刻・座標・継続分数・`ongoing`）と`primaryOutage`（便を打ち切った途絶）、`progressAtLoss`（途絶時点の直近到着済バス停・次のバス停）を添えて返す。走行経路は`GPS_LOG_RETENTION_HOURS`（既定48時間）を過ぎると空になり`historyRetentionExpired: true`で返る |
+| GET | `/api/admin/alerts` | 異常アラート（`staleGps`＝車両単位のGPS途絶／`gpsLostTrip`＝GPS途絶で打ち切られた便・未割当便・大幅遅延・予測計算失敗・GTFS取得失敗）。`staleGps`は6分の途絶タイムアウトで`vehicles.status='inactive'`になると消えるが、`gpsLostTrip`は`trip_vehicle_assignments.end_reason='GPS更新停止'`をアンカーにするため復旧後も当日中は残る |
 | GET | `/api/admin/gtfs-feeds` | GTFSフィード監視（最終取得時刻・ファイル件数・エラー内容） |
 | POST | `/api/admin/gtfs-feeds/:feedId/refetch` | GTFSフィードの手動再取得 |
 | GET | `/api/admin/location-feeds` | 位置情報フィード監視（最終受信時刻・受信件数・形式異常） |

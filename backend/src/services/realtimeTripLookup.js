@@ -11,6 +11,7 @@ const { qualifyRouteId } = require('./gtfsFeedManager');
 const { timeStrToMinutes, getServiceDateString } = require('../utils/time');
 const { getArrivalsForAssignment, describeSource } = require('./etaPredictor');
 const { describeArrivalMethod } = require('./passDetection');
+const { getRuntimeSetting } = require('./runtimeSettings');
 
 /**
  * daily_trips.start_time（"H:mm"）を便詳細URLの departure_time 表記（"0805"）に変換する。
@@ -352,11 +353,152 @@ async function getStopArrivalDetailForAdmin(assignmentId, stopId) {
   };
 }
 
+/**
+ * 位置履歴（gps_time_ts 昇順）から「GPS途絶（＝連続する2点の時間差が thresholdMinutes 以上）」を
+ * 抽出する純関数。管理画面「異常アラート」のGPS途絶を地図で検証する機能から使う。
+ *
+ * - 途中の途絶（トンネル等で一時的に測位不良になり、その後復旧したもの）は
+ *   { lost: 途絶直前の点, recovered: 復旧後の最初の点, ongoing:false } で返す。
+ * - 末尾の途絶（最後の点以降ずっとGPSが来ておらず、割り当てがGPS途絶で打ち切られているもの）は
+ *   endedForGpsLoss=true のときだけ { lost: 最後の点, recovered: null, ongoing:true } で返す。
+ * - どの outage が「便を打ち切った途絶」か（primary）は、配列の並びが時系列昇順なので常に末尾。
+ *
+ * @param {Array<{lat:number,lng:number,gpsTime:string,gpsTimeTs:string}>} history
+ * @param {number} thresholdMinutes 途絶とみなす連続点間の分数
+ * @param {number} nowMs 現在時刻（ミリ秒。テスト用に注入可能）
+ * @param {boolean} endedForGpsLoss 割り当てが end_reason='GPS更新停止' で終了しているか
+ */
+function detectGpsOutages(history, thresholdMinutes, nowMs, endedForGpsLoss) {
+  const outages = [];
+  const thresholdMs = thresholdMinutes * 60000;
+  const ts = (p) => new Date(p.gpsTimeTs).getTime();
+
+  for (let i = 0; i + 1 < history.length; i++) {
+    const gapMs = ts(history[i + 1]) - ts(history[i]);
+    if (gapMs >= thresholdMs) {
+      outages.push({
+        lost: history[i],
+        recovered: history[i + 1],
+        durationMinutes: Math.round(gapMs / 60000),
+        ongoing: false
+      });
+    }
+  }
+
+  const last = history[history.length - 1];
+  if (last && endedForGpsLoss) {
+    const sinceMs = nowMs - ts(last);
+    if (sinceMs >= thresholdMs) {
+      outages.push({
+        lost: last,
+        recovered: null,
+        durationMinutes: Math.round(sinceMs / 60000),
+        ongoing: true
+      });
+    }
+  }
+  return outages;
+}
+
+/**
+ * 管理画面「異常アラート」のGPS途絶（type='gpsLostTrip'）を地図で検証するための詳細。
+ * getAssignmentDetailForAdmin() の結果（停車バス停・位置履歴・リアルタイム時刻表）に加えて、
+ *   - 途絶の一覧（途絶時刻・地点、復旧時刻・地点、継続分数、途絶中かどうか）
+ *   - 「便を打ち切った途絶」の時点で時刻表のどこまで進んでいたか（直近到着済バス停・次のバス停）
+ * を返す。位置履歴は became_assigned_at 以降のこの車両の全GPSログなので、便打ち切り後に
+ * 復旧して走り続けた場合の復旧地点もそのまま含まれる（GPS_LOG_RETENTION_HOURS＝既定48時間で
+ * 消えるため、それを過ぎると走行経路は空になる）。見つからなければ null。
+ */
+async function getGpsOutageDetailForAdmin(assignmentId) {
+  const base = await getAssignmentDetailForAdmin(assignmentId);
+  if (!base) return null;
+
+  const metaRes = await pool.query(
+    `SELECT end_reason, ended_at, state FROM trip_vehicle_assignments WHERE id = $1`,
+    [assignmentId]
+  );
+  const meta = metaRes.rows[0] || {};
+  // 末尾（最後のGPS点以降ずっと途絶）を「継続中の途絶」として扱う条件：
+  //   - まだ稼働中の割り当て（staleGpsアラートから開いたケース。打ち切り前）、または
+  //   - GPS途絶で打ち切られた割り当て（gpsLostTripアラートから開いたケース）
+  // 終点到着で正常終了した割り当てはGPSが自然に止まるだけなので対象外。
+  const treatTrailingGapAsOutage = meta.state === 'active'
+    || (meta.state === 'ended' && meta.end_reason === 'GPS更新停止');
+
+  const thresholdMinutes = getRuntimeSetting('GPS_STALE_TIMEOUT_MIN');
+  const retentionHours = getRuntimeSetting('GPS_LOG_RETENTION_HOURS');
+  const outages = detectGpsOutages(base.positionHistory, thresholdMinutes, Date.now(), treatTrailingGapAsOutage);
+  const primary = outages.length > 0 ? outages[outages.length - 1] : null;
+
+  // 「便を打ち切った途絶」の時点でどこまで進んでいたか。
+  // 途絶時刻（primary.lost.gpsTime, "H:mm"）以前に到着済になっているバス停のうち最も先のものを
+  // 直近到着済とみなす。位置履歴が保持期間切れで空のときは、時刻での絞り込みをせず
+  // 「最後に到着済になっているバス停」を使う（途絶後は新たな到着判定が起きないため近似が成り立つ）。
+  const lostMinuteOfDay = primary ? timeStrToMinutes(primary.lost.gpsTime) : NaN;
+  const arrived = base.stops.filter((s) => s.status === '到着済' && s.actualTime);
+  const lastArrived = arrived
+    .filter((s) => Number.isNaN(lostMinuteOfDay) || timeStrToMinutes(s.actualTime) <= lostMinuteOfDay)
+    .reduce((acc, s) => (!acc || s.seqOrder > acc.seqOrder ? s : acc), null);
+  const afterSeq = lastArrived ? lastArrived.seqOrder : -1;
+  const nextStop = base.stops.find((s) => s.seqOrder > afterSeq && s.status !== '通過') || null;
+
+  const toOutage = (o) => ({
+    lostAt: o.lost.gpsTimeTs,
+    lostGpsTime: o.lost.gpsTime,
+    lostLat: o.lost.lat,
+    lostLng: o.lost.lng,
+    recoveredAt: o.recovered ? o.recovered.gpsTimeTs : null,
+    recoveredGpsTime: o.recovered ? o.recovered.gpsTime : null,
+    recoveredLat: o.recovered ? o.recovered.lat : null,
+    recoveredLng: o.recovered ? o.recovered.lng : null,
+    durationMinutes: o.durationMinutes,
+    ongoing: o.ongoing
+  });
+
+  return {
+    ...base,
+    endReason: meta.end_reason || null,
+    endedAt: meta.ended_at || null,
+    assignmentState: meta.state || null,
+    thresholdMinutes,
+    retentionHours,
+    historyRetentionExpired: base.positionHistory.length === 0,
+    outages: outages.map(toOutage),
+    primaryOutage: primary ? toOutage(primary) : null,
+    progressAtLoss: {
+      totalStops: base.stops.length,
+      arrivedCount: base.stops.filter((s) => s.status === '到着済').length,
+      lastArrivedStop: lastArrived
+        ? {
+            stopId: lastArrived.stopId,
+            seqOrder: lastArrived.seqOrder,
+            name: lastArrived.name,
+            scheduledTime: lastArrived.scheduledTime,
+            actualTime: lastArrived.actualTime,
+            delayMinutes: lastArrived.delayMinutes
+          }
+        : null,
+      nextStop: nextStop
+        ? {
+            stopId: nextStop.stopId,
+            seqOrder: nextStop.seqOrder,
+            name: nextStop.name,
+            scheduledTime: nextStop.scheduledTime,
+            predictedTime: nextStop.predictedTime,
+            predictedDelayMinutes: nextStop.predictedDelayMinutes
+          }
+        : null
+    }
+  };
+}
+
 module.exports = {
   findLiveAssignment,
   buildBusEntry,
   getAssignmentDetailForAdmin,
   getStopArrivalDetailForAdmin,
+  getGpsOutageDetailForAdmin,
+  detectGpsOutages,
   urlDepartureTimeToMinutes,
   startTimeToUrlHhmm
 };

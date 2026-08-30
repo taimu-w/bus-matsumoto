@@ -2,6 +2,7 @@
 (function () {
   const ALERT_LABEL = {
     staleGps: 'GPS途絶',
+    gpsLostTrip: 'GPS途絶で便打ち切り',
     unassignedTrip: '未割当便',
     severeDelay: '大幅遅延',
     etaComputeFailure: '予測計算失敗',
@@ -12,6 +13,8 @@
     switch (a.type) {
       case 'staleGps':
         return `車両${escapeHtml(a.carId)}（路線: ${escapeHtml(a.routeId || '')}） 最終GPS: ${fmtDateTime(a.lastGpsAt)}`;
+      case 'gpsLostTrip':
+        return `${escapeHtml(a.startTime || '')}発 ${escapeHtml(a.headsign || '')}（車両${escapeHtml(a.carId)}） 打ち切り: ${fmtDateTime(a.endedAt)}`;
       case 'unassignedTrip':
         return `${escapeHtml(a.startTime || '')}発 ${escapeHtml(a.headsign || '')}（${a.minutesOverdue}分経過）`;
       case 'severeDelay':
@@ -49,11 +52,17 @@
             <p class="font-bold ${a.severity === 'critical' ? 'text-red-800' : 'text-amber-800'}">${ALERT_LABEL[a.type] || a.type}</p>
             <p class="text-sm text-slate-600">${alertDetail(a)}</p>
           </div>
+          ${(a.type === 'gpsLostTrip' || a.type === 'staleGps') && a.assignmentId
+            ? `<button type="button" data-verify-assignment="${a.assignmentId}" class="verify-gps-btn shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-700">地図で検証</button>`
+            : ''}
           <button type="button" data-alert-key="${escapeHtml(a.key)}" class="ack-alert-btn shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold bg-white border-2 border-slate-300 text-slate-600 hover:bg-slate-100">確認済みにする</button>
         </div>
       `).join('');
       container.querySelectorAll('.ack-alert-btn').forEach((btn) => {
         btn.addEventListener('click', () => ackAlert(btn.dataset.alertKey, btn));
+      });
+      container.querySelectorAll('.verify-gps-btn').forEach((btn) => {
+        btn.addEventListener('click', () => window.AdminGpsOutage.open(Number(btn.dataset.verifyAssignment)));
       });
     }
     refreshAlertsBadge();

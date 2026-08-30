@@ -133,6 +133,26 @@
     return minutes <= 1 ? '定刻通り' : `${minutes}分遅れ`;
   }
 
+  /* ---------- お知らせ本文のリンク記法（トップ画面 app.js / 運行状況 servicestatus.js と同じ） ----------
+   * - 裸のURL（https://…）はそのまま表示
+   * - [表示文字列](https://…) は表示文字列に置き換えて表示
+   * 先に全体をエスケープしてから置換するのでXSSの心配はない。 */
+  const NOTICE_LINK_PATTERN = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<]+)/g;
+  const NOTICE_TRAILING_PUNCT = /[、。，,．.）」』)\]]+$/;
+
+  function linkifyNotice(text) {
+    return esc(text).replace(NOTICE_LINK_PATTERN, (match, label, bracketUrl, bareUrl) => {
+      const cls = 'text-blue-700 underline font-bold break-all';
+      if (bracketUrl) {
+        return `<a href="${bracketUrl}" target="_blank" rel="noopener noreferrer" class="${cls}">${label}</a>`;
+      }
+      const trailingMatch = bareUrl.match(NOTICE_TRAILING_PUNCT);
+      const trailing = trailingMatch ? trailingMatch[0] : '';
+      const url = trailing ? bareUrl.slice(0, bareUrl.length - trailing.length) : bareUrl;
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="${cls}">${url}</a>${trailing}`;
+    });
+  }
+
   /* ---------- ルーティング ---------- */
   function isBusStopPath() {
     return window.location.pathname === '/busstop' || window.location.pathname.startsWith('/busstop/');
@@ -444,6 +464,9 @@
         </div>
       </div>
 
+      <!-- 乗り場別お知らせ（このバス停でできることの下。乗り場が確定していて、かつお知らせがあるときだけ中身を入れる） -->
+      <div id="bs-platform-notice"></div>
+
       <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-200 p-4">
         <div class="flex items-center justify-between mb-2">
           <p class="text-xs font-bold text-gray-500">接近中のバス情報</p>
@@ -465,6 +488,77 @@
     loadApproaching(data, seq, platform);
     manageApproachingPolling(data, seq, platform);
     loadNearbySpots(data, seq);
+    loadPlatformNotice(data, seq, platform_);
+  }
+
+  /* ---------- 乗り場別お知らせ（docs/platform-notices.md） ----------
+   * 「このバス停でできること」の下に、管理画面「乗り場お知らせ」で登録された画像/リンクを出す。
+   * - 乗り場が確定しているとき（乗り場別表示、または乗り場が1か所だけのバス停）だけ取得する。
+   *   すべての乗り場を統合表示しているときは出さない。
+   * - お知らせが無ければセクションごと出さない（soft-fail：取得失敗時も何も出さない）。 */
+  async function loadPlatformNotice(data, seq, platformObj) {
+    const container = document.getElementById('bs-platform-notice');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!platformObj) return; // 全乗り場統合表示 -> お知らせは出さない
+
+    try {
+      const query = new URLSearchParams({ platform: platformObj.stopId });
+      const res = await fetchJson(`${API_BASE}/busstop/${encodeURIComponent(data.stop.stopKey)}/platform-notice?${query.toString()}`);
+      if (seq !== renderSeq) return;
+      renderPlatformNotice(container, res.notices || [], platformObj, data);
+    } catch (err) {
+      if (seq !== renderSeq) return;
+      // 取得失敗はバス停情報自体の表示を妨げない（soft-fail）
+      container.innerHTML = '';
+    }
+  }
+
+  function renderPlatformNotice(container, notices, platformObj, data) {
+    if (!notices.length) {
+      container.innerHTML = '';
+      return;
+    }
+
+    const heading = data.hasMultiplePlatforms
+      ? `${esc(platformLabel(platformObj))}のお知らせ`
+      : 'この乗り場のお知らせ';
+
+    const items = notices.map((notice) => {
+      const title = notice.title
+        ? `<p class="font-bold text-gray-900 text-sm mb-1.5">${esc(notice.title)}</p>`
+        : '';
+      if (notice.kind === 'image' && notice.imageUrl) {
+        return `
+          <div>
+            ${title}
+            <img src="${esc(notice.imageUrl)}" alt="${esc(notice.title || 'お知らせ')}"
+                 class="w-full rounded-xl border border-amber-200 object-contain bg-white" loading="lazy">
+          </div>`;
+      }
+      if (notice.kind === 'link' && notice.linkBody) {
+        return `
+          <div>
+            ${title}
+            <p class="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">${linkifyNotice(notice.linkBody)}</p>
+          </div>`;
+      }
+      return '';
+    }).join('');
+
+    if (!items.trim()) {
+      container.innerHTML = '';
+      return;
+    }
+
+    container.innerHTML = `
+      <div class="bg-amber-50 rounded-2xl shadow-sm border-2 border-amber-200 p-4 mb-4">
+        <div class="flex items-center gap-2 mb-3">
+          <span class="shrink-0 text-base">📢</span>
+          <p class="text-xs font-bold text-amber-800">${esc(heading)}</p>
+        </div>
+        <div class="space-y-4">${items}</div>
+      </div>`;
   }
 
   /** 表示モード切替（標柱が複数ある場合のみ表示する。仕様書 3.4 A） */
@@ -889,6 +983,25 @@
     }
   }
 
+  /** 観光スポットの写真（1枚以上）を横スクロールの帯で並べる。1枚だけなら全幅。 */
+  function spotPhotoStrip(spot) {
+    const photos = Array.isArray(spot.photoUrls) ? spot.photoUrls : [];
+    if (photos.length === 0) return '';
+    return `<div class="flex gap-1 overflow-x-auto bg-gray-100">${photos
+      .map((u) => `<img src="${esc(u)}" alt="${esc(spot.name)}" class="h-32 object-contain shrink-0${photos.length === 1 ? ' w-full' : ''}">`)
+      .join('')}</div>`;
+  }
+
+  /** 公式サイトリンクのタップを記録する（掲載の有用性計測用、観光スポット情報_仕様書）。soft-fail。 */
+  function sendSpotLinkBeacon(spotId) {
+    if (spotId == null) return;
+    const url = `${API_BASE}/tourist-spots/${encodeURIComponent(spotId)}/link-click`;
+    try {
+      if (navigator.sendBeacon && navigator.sendBeacon(url)) return;
+    } catch (_) { /* 続けて fetch でフォールバック */ }
+    try { fetch(url, { method: 'POST', keepalive: true }).catch(() => {}); } catch (_) {}
+  }
+
   function renderNearbySpots(container, spots) {
     if (spots.length === 0) {
       container.innerHTML = '<p class="text-sm font-bold text-gray-400 py-3 text-center">周辺に観光スポットはありません。</p>';
@@ -897,7 +1010,7 @@
     container.innerHTML = spots
       .map((spot) => `
         <div class="border-2 border-gray-200 rounded-xl overflow-hidden mb-2 last:mb-0">
-          ${spot.photoUrl ? `<img src="${esc(spot.photoUrl)}" alt="${esc(spot.name)}" class="w-full h-32 object-contain bg-gray-100">` : ''}
+          ${spotPhotoStrip(spot)}
           <div class="p-3">
             <div class="flex items-start justify-between gap-2">
               <p class="font-bold text-gray-900">${esc(spot.name)}</p>
@@ -907,7 +1020,7 @@
             ${spot.stayDuration ? `<p class="text-xs text-gray-500">滞在目安：${esc(spot.stayDuration)}</p>` : ''}
             ${spot.description ? `<p class="text-xs text-gray-600 mt-1 line-clamp-3">${esc(spot.description)}</p>` : ''}
             ${spot.url ? `
-              <a href="${esc(spot.url)}" target="_blank" rel="noopener noreferrer"
+              <a href="${esc(spot.url)}" target="_blank" rel="noopener noreferrer" data-spot-link="${esc(spot.spotId)}"
                  class="inline-flex items-center gap-1 mt-2 text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-full px-3 py-1 hover:bg-indigo-100">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
@@ -918,6 +1031,10 @@
         </div>
       `)
       .join('');
+
+    container.querySelectorAll('a[data-spot-link]').forEach((a) => {
+      a.addEventListener('click', () => sendSpotLinkBeacon(a.dataset.spotLink));
+    });
   }
 
   /* ---------- エントリポイント ---------- */

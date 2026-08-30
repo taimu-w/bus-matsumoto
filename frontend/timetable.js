@@ -1089,6 +1089,9 @@
     if (seq !== renderSeq) return;
 
     let mode = initialMode === 'realtime' && realtime.available ? 'realtime' : 'schedule';
+    // リアルタイム表示で「直近到着済み」バス停へ自動スクロールするのは初回描画時の1回だけ。
+    // 20秒ごとのポーリング更新（refreshRealtime→paint）でスクロール位置が飛ぶのを防ぐ。
+    let didRealtimeAutoScroll = false;
 
     setTitle(data.headsign || data.routeName, 'Trip Detail');
 
@@ -1246,7 +1249,7 @@
           ].filter(Boolean).join(' ');
 
           return `
-            <div class="flex items-center gap-3 border rounded-xl px-3 py-2.5 cursor-pointer active:opacity-70 ${base}"
+            <div class="flex items-center gap-3 border rounded-xl px-3 py-2.5 cursor-pointer active:opacity-70 ${base}${index === lastIdx ? ' tt-rt-arrived-stop' : ''}"
                  data-role="tt-rt-stop" data-stop-key="${esc(staticStop ? staticStop.stopKey : '')}" data-platform-key="${esc(staticStop ? staticStop.platformKey : '')}">
               <span class="w-7 h-7 shrink-0 rounded-full bg-gray-100 text-gray-600 text-xs font-bold flex items-center justify-center">${index + 1}</span>
               <div class="min-w-0 flex-1">
@@ -1319,6 +1322,14 @@
       if (mode === 'schedule' && currentIndex >= 0) {
         const currentEl = root().querySelectorAll('.tt-current-stop')[0];
         if (currentEl) setTimeout(() => currentEl.scrollIntoView({ behavior: 'smooth', block: 'center' }), 200);
+      }
+
+      // リアルタイム時刻表から遷移してきた直後、現在「到着済」の最後のバス停まで自動スクロールする。
+      // 初回のみ（didRealtimeAutoScroll）。到着済バス停がまだ無い便では要素が無く、そのまま何もしない。
+      if (mode === 'realtime' && !didRealtimeAutoScroll) {
+        didRealtimeAutoScroll = true;
+        const arrivedEl = root().querySelector('.tt-rt-arrived-stop');
+        if (arrivedEl) setTimeout(() => arrivedEl.scrollIntoView({ behavior: 'smooth', block: 'center' }), 200);
       }
 
       // 便詳細は時刻表・バス停ページ・経路検索・リアルタイム表示など様々な画面から来るため、

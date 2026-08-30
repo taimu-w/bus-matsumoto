@@ -160,3 +160,19 @@ input:focus, select:focus, textarea:focus {
 .dashboard-stop-row { cursor: pointer; }
 .dashboard-stop-row:hover { background: #f8fafc; }
 .dashboard-stop-row [data-role="actual-time-cell"] { cursor: auto; }
+
+/* GPS途絶の検証モーダル：途絶地点（赤）・復旧地点（緑）のマーカー */
+.gps-outage-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 9999px;
+  font-size: 13px;
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 5px rgba(15, 23, 42, 0.55);
+}
+.gps-outage-marker.lost { background: #dc2626; }
+.gps-outage-marker.recovered { background: #16a34a; }
+#gps-outage-map { height: 100%; }

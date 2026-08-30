@@ -39,7 +39,7 @@ daily_trips（当日の便。例：8:00発）
 | 同じ路線 | `vehicles.route_id`（qualified route id なのでGTFS側と直接比較できる） |
 | 始発時刻直前の最新GPS | **始発時刻の3分前〜始発時刻（閉区間）** に存在する最新の1点。始発時刻を1秒でも過ぎたGPSは無効 |
 | 始発バス停から100m以内 | `ASSIGN_RADIUS_METERS`（既定100m）。通過判定の120mとは別の設定値 |
-| direction条件 | `config/directionMapping.js`。`mode:'ignore'`の路線、および車両側の方向が不明（NULL）の場合は方向で絞り込まない |
+| direction条件 | `route_direction_rules`（管理画面「方向マッピング」で編集、`services/directionRules.js`が参照）。**既定（行が無い路線）・`mode:'ignore'`の路線、および車両側の方向が不明（NULL）の場合は方向で絞り込まない** |
 | 同時刻帯の別便の担当でない | `hasSamePeriodConflict()`（下記） |
 
 距離が最も近い車両を担当車両（`role = 'assigned'`）にし、残りも候補車両（`role = 'candidate'`）として記録します。候補がゼロなら`assignment_state = 'unassigned'`とし、その便は時刻表上のデータとしては存続しつつリアルタイム情報を持たない扱いになります。

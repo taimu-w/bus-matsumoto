@@ -1,0 +1,2 @@
+feed_publisher_name,feed_publisher_url,feed_lang,feed_start_date,feed_end_date,feed_version
+松本市,https://www.city.matsumoto.nagano.jp/,ja,20260801,20280331,2026/08/01改正-見える化ver2.6d

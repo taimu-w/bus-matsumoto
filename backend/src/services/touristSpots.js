@@ -3,6 +3,9 @@
 // GTFS由来データ（stops/schedule_*等）とは完全独立の tourist_spots テーブルを扱う。
 // バス停との関連付けは保存時ではなく参照時に緯度経度の近接検索（ハバーサイン距離）で
 // 都度解決するため、このファイルはバス停側のテーブル・インデックスを一切参照しない。
+//
+// 観光スポットの識別子（tourist_spots.id）は、管理画面のテキスト一括入力の1列目で管理者が
+// 指定する文字列。名称による名寄せはせず、IDが同じなら名称が変わっても同一スポットとして扱う。
 
 const pool = require('../config/db');
 const { haversineDistanceMeters } = require('../utils/geo');
@@ -11,6 +14,20 @@ const { kanaToRomaji, capitalizeRomaji, normalizeSearchText } = require('../util
 const DEFAULT_NEARBY_RADIUS_METERS = 500; // バス停統合しきい値400mを参考にした初期値
 const DEFAULT_NEARBY_LIMIT = 5;
 const WALK_SPEED_METERS_PER_MIN = 80; // gtfsTimetable.js / gtfsRouteSearch.js と同値
+
+// 公式サイトリンクのタップ数集計（tourist_spot_link_clicks）の保持日数。
+// 「最大1年間」のルックバックが常に成立するよう13か月弱を確保する（visitorTracker.js と
+// 同じくモジュール定数で管理。1時間掃除タイマー scheduler.js から purgeOldLinkClicks が呼ぶ）。
+const LINK_CLICK_RETENTION_DAYS = 400;
+const LINK_CLICK_MAX_RANGE_DAYS = 366; // 集計期間の上限（うるう年を含む1年）
+
+/** 写真URL列（"," 区切りで複数可）を配列へ分解する。空要素・前後空白は落とす。 */
+function splitPhotoUrls(value) {
+  return String(value || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
 
 function serializeRow(row) {
   return {
@@ -27,7 +44,7 @@ function serializeRow(row) {
     hoursEn: row.hours_en,
     stayDurationEn: row.stay_duration_en,
     descriptionEn: row.description_en,
-    photoUrl: row.photo_url,
+    photoUrls: splitPhotoUrls(row.photo_urls),
     category: row.category,
     displayTag: row.display_tag,
     enabled: row.enabled
@@ -93,18 +110,38 @@ async function searchTouristSpots(query, limit = 10) {
   return scored.slice(0, limit).map(({ row }) => serializeRow(row));
 }
 
+/** 観光スポットのID（識別子）を正規化する（前後空白を落とすだけ）。 */
+function normalizeSpotId(value) {
+  return String(value == null ? '' : value).trim();
+}
+
+/**
+ * 観光スポットのIDとして使える文字列かどうか。空欄不可、64文字以内、
+ * URLパスの区切り（"/"）・タブ・改行などの制御文字は使えない。
+ */
+function isValidSpotId(id) {
+  if (id.length === 0 || id.length > 64) return false;
+  for (let i = 0; i < id.length; i += 1) {
+    const code = id.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f || id[i] === '/') return false;
+  }
+  return true;
+}
+
 /** 経路検索：観光スポットIDから確定した1件を取得する（enabled=trueのみ）。 */
 async function getEnabledSpotById(id) {
-  const result = await pool.query('SELECT * FROM tourist_spots WHERE id = $1 AND enabled = TRUE', [id]);
+  const key = normalizeSpotId(id);
+  if (!key) return null;
+  const result = await pool.query('SELECT * FROM tourist_spots WHERE id = $1 AND enabled = TRUE', [key]);
   if (result.rows.length === 0) return null;
   return serializeRow(result.rows[0]);
 }
 
-/** 管理画面一覧用。includeDisabled=falseならenabled=trueのみ、trueなら全件。name昇順。 */
+/** 管理画面一覧用。includeDisabled=falseならenabled=trueのみ、trueなら全件。name昇順（同名はID昇順）。 */
 async function listTouristSpots({ includeDisabled = false } = {}) {
   const query = includeDisabled
-    ? 'SELECT * FROM tourist_spots ORDER BY name'
-    : 'SELECT * FROM tourist_spots WHERE enabled = TRUE ORDER BY name';
+    ? 'SELECT * FROM tourist_spots ORDER BY name, id'
+    : 'SELECT * FROM tourist_spots WHERE enabled = TRUE ORDER BY name, id';
   const result = await pool.query(query);
   return result.rows.map(serializeRow);
 }
@@ -112,11 +149,12 @@ async function listTouristSpots({ includeDisabled = false } = {}) {
 function splitLine(line) {
   const cols = line.split('\t');
   const [
-    name, kana, romaji, latStr, lngStr, url, hours, stayDuration, description,
-    hoursEn, stayDurationEn, descriptionEn, photoUrl, category, displayTag
+    id, name, kana, romaji, latStr, lngStr, url, hours, stayDuration, description,
+    hoursEn, stayDurationEn, descriptionEn, photoUrls, category, displayTag
   ] = cols;
   return {
     colCount: cols.length,
+    id: (id || '').trim(),
     name: (name || '').trim(),
     kana: (kana || '').trim(),
     romaji: (romaji || '').trim(),
@@ -129,7 +167,8 @@ function splitLine(line) {
     hoursEn: (hoursEn || '').trim(),
     stayDurationEn: (stayDurationEn || '').trim(),
     descriptionEn: (descriptionEn || '').trim(),
-    photoUrl: (photoUrl || '').trim(),
+    // 写真URLは "," 区切りで複数可。ここでは生文字列のまま受け、parseTouristSpotsText で分解・検証する。
+    photoUrlsRaw: (photoUrls || '').trim(),
     category: (category || '').trim(),
     displayTag: (displayTag || '').trim()
   };
@@ -140,8 +179,12 @@ function isHttpsUrl(value) {
 }
 
 /**
- * タブ区切りテキスト（1行1件、15列）をパース・バリデーションする純粋関数（DBアクセスなし）。
+ * タブ区切りテキスト（1行1件、16列）をパース・バリデーションする純粋関数（DBアクセスなし）。
+ * 1列目のIDが観光スポットの識別子（空欄不可・重複不可）。名称による名寄せはしない
+ * （同名の別スポットを登録できる。同一スポットの判定はIDの一致だけで行う）。
  * ローマ字が空欄でkanaが入力されていれば自動生成する。
+ * 写真URL（14列目）は "," 区切りで複数枚指定でき、各要素が https:// 始まりかを検証する。
+ * 正規化後（前後空白・空要素を除去し "," で連結した文字列）を photoUrls として持つ。
  * 英語版の営業時間・滞在時間目安・説明（hoursEn/stayDurationEn/descriptionEn）は
  * 利用者画面の英語表示には未使用（項目の登録のみに対応。将来対応時のための先行追加）。
  * category（カテゴリ）は情報のみで検索/表示のフィルタには未使用。
@@ -153,7 +196,7 @@ function parseTouristSpotsText(text) {
   const lines = String(text || '').split(/\r\n|\r|\n/);
   const errors = [];
   const spots = [];
-  const seenNames = new Map(); // name -> 最初に出現した行番号
+  const seenIds = new Map(); // id -> 最初に出現した行番号
 
   lines.forEach((rawLine, index) => {
     const lineNo = index + 1;
@@ -162,19 +205,27 @@ function parseTouristSpotsText(text) {
 
     const parsed = splitLine(rawLine);
 
-    if (parsed.colCount > 15) {
-      errors.push({ line: lineNo, reason: '列数が多すぎます（15列を超えています）。' });
+    if (parsed.colCount > 16) {
+      errors.push({ line: lineNo, reason: '列数が多すぎます（16列を超えています）。' });
       return;
     }
+    if (!parsed.id) {
+      errors.push({ line: lineNo, reason: 'IDは必須です（1列目にIDを入力してください）。' });
+      return;
+    }
+    if (!isValidSpotId(parsed.id)) {
+      errors.push({ line: lineNo, reason: 'IDは64文字以内で、「/」・タブ・改行などの制御文字を含めないでください。' });
+      return;
+    }
+    if (seenIds.has(parsed.id)) {
+      errors.push({ line: lineNo, reason: `IDが重複しています（${seenIds.get(parsed.id)}行目と同じID）。` });
+      return;
+    }
+    seenIds.set(parsed.id, lineNo);
     if (!parsed.name) {
       errors.push({ line: lineNo, reason: '名称は必須です。' });
       return;
     }
-    if (seenNames.has(parsed.name)) {
-      errors.push({ line: lineNo, reason: `名称が重複しています（${seenNames.get(parsed.name)}行目と同名）。` });
-      return;
-    }
-    seenNames.set(parsed.name, lineNo);
 
     const lat = Number.parseFloat(parsed.latStr);
     if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
@@ -190,8 +241,9 @@ function parseTouristSpotsText(text) {
       errors.push({ line: lineNo, reason: 'URLはhttps://で始めてください。' });
       return;
     }
-    if (parsed.photoUrl && !isHttpsUrl(parsed.photoUrl)) {
-      errors.push({ line: lineNo, reason: '写真URLはhttps://で始めてください。' });
+    const photoUrlList = splitPhotoUrls(parsed.photoUrlsRaw);
+    if (photoUrlList.some((u) => !isHttpsUrl(u))) {
+      errors.push({ line: lineNo, reason: '写真URLはhttps://で始めてください（複数の場合は「,」で区切ってください）。' });
       return;
     }
 
@@ -201,6 +253,7 @@ function parseTouristSpotsText(text) {
     }
 
     spots.push({
+      id: parsed.id,
       name: parsed.name,
       kana: parsed.kana || null,
       romaji: romaji || null,
@@ -213,7 +266,7 @@ function parseTouristSpotsText(text) {
       hoursEn: parsed.hoursEn || null,
       stayDurationEn: parsed.stayDurationEn || null,
       descriptionEn: parsed.descriptionEn || null,
-      photoUrl: parsed.photoUrl || null,
+      photoUrls: photoUrlList.join(',') || null,
       category: parsed.category || null,
       displayTag: parsed.displayTag || null
     });
@@ -230,7 +283,8 @@ function parseTouristSpotsText(text) {
 
 /**
  * 全件洗い替え本体。parseTouristSpotsText→バリデーション→単一トランザクションでUPSERT+削除。
- * 名称キーでON CONFLICT UPDATEするため、変更のない行はidが変わらない。
+ * 1列目のIDをキーに ON CONFLICT UPDATE する（IDが同じなら名称の変更も同一スポットの改称として反映）。
+ * テキストに無いIDの既存行は削除する。
  * enabledはUPDATE時に更新しない（INSERT時のみdefault true。簡易UIでの一時非表示を、
  * 無関係な再貼り付けで巻き戻さないため）。
  */
@@ -244,11 +298,12 @@ async function replaceAllTouristSpots(text) {
     for (const spot of parsed.spots) {
       await client.query(
         `INSERT INTO tourist_spots (
-           name, kana, romaji, lat, lng, url, hours, stay_duration, description,
-           hours_en, stay_duration_en, description_en, photo_url, category, display_tag, updated_at
+           id, name, kana, romaji, lat, lng, url, hours, stay_duration, description,
+           hours_en, stay_duration_en, description_en, photo_urls, category, display_tag, updated_at
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
-         ON CONFLICT (name) DO UPDATE SET
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
+         ON CONFLICT (id) DO UPDATE SET
+           name = EXCLUDED.name,
            kana = EXCLUDED.kana,
            romaji = EXCLUDED.romaji,
            lat = EXCLUDED.lat,
@@ -260,18 +315,18 @@ async function replaceAllTouristSpots(text) {
            hours_en = EXCLUDED.hours_en,
            stay_duration_en = EXCLUDED.stay_duration_en,
            description_en = EXCLUDED.description_en,
-           photo_url = EXCLUDED.photo_url,
+           photo_urls = EXCLUDED.photo_urls,
            category = EXCLUDED.category,
            display_tag = EXCLUDED.display_tag,
            updated_at = now()`,
         [
-          spot.name, spot.kana, spot.romaji, spot.lat, spot.lng, spot.url, spot.hours, spot.stayDuration, spot.description,
-          spot.hoursEn, spot.stayDurationEn, spot.descriptionEn, spot.photoUrl, spot.category, spot.displayTag
+          spot.id, spot.name, spot.kana, spot.romaji, spot.lat, spot.lng, spot.url, spot.hours, spot.stayDuration, spot.description,
+          spot.hoursEn, spot.stayDurationEn, spot.descriptionEn, spot.photoUrls, spot.category, spot.displayTag
         ]
       );
     }
-    const names = parsed.spots.map((s) => s.name);
-    await client.query('DELETE FROM tourist_spots WHERE NOT (name = ANY($1::text[]))', [names]);
+    const ids = parsed.spots.map((s) => s.id);
+    await client.query('DELETE FROM tourist_spots WHERE NOT (id = ANY($1::text[]))', [ids]);
     await client.query('COMMIT');
     return { ok: true, count: parsed.spots.length };
   } catch (err) {
@@ -284,13 +339,104 @@ async function replaceAllTouristSpots(text) {
 
 /** 簡易UI：有効/無効切り替え。該当行が無ければfalseを返す。 */
 async function setSpotEnabled(id, enabled) {
-  const result = await pool.query('UPDATE tourist_spots SET enabled = $2, updated_at = now() WHERE id = $1', [id, enabled]);
+  const key = normalizeSpotId(id);
+  if (!key) return false;
+  const result = await pool.query('UPDATE tourist_spots SET enabled = $2, updated_at = now() WHERE id = $1', [key, enabled]);
   return result.rowCount > 0;
 }
 
 /** 簡易UI：1件削除。 */
 async function deleteSpot(id) {
-  await pool.query('DELETE FROM tourist_spots WHERE id = $1', [id]);
+  const key = normalizeSpotId(id);
+  if (!key) return;
+  await pool.query('DELETE FROM tourist_spots WHERE id = $1', [key]);
+}
+
+// ==========================================================
+// 公式サイトリンクのタップ数計測（tourist_spot_link_clicks、docs/tourist-spots.md）
+// 「その観光スポットの掲載が有用かどうか」を管理者が判断するための集計。
+// スポットの id（管理画面で指定する識別子）を軸に Asia/Tokyo 基準で日別カウントする。
+// 全件洗い替え（IDキーUPSERT＋テキストに無いIDはDELETE）でスポットが消えても集計を
+// 残せるよう外部キーは張らず、記録時点の名称スナップショット（spot_name）を持つ。
+// 名称を変えてもIDが同じなら集計は継続し、IDを消す／変えたときだけ履歴が分かれる。
+// ==========================================================
+
+/**
+ * 利用者が観光スポットの公式サイトリンクをタップしたことを記録する（当日行を +1）。
+ * URLが登録されているスポットだけを対象にし、該当が無ければ静かに 0 件で終わる
+ * （存在しないID・URL未登録・sendBeaconの重複などを弾く）。enabled では絞らない
+ * （表示直後に無効化された場合の取りこぼしを避ける）。
+ */
+async function recordLinkClick(spotId) {
+  const key = normalizeSpotId(spotId);
+  if (!key) return false;
+  const result = await pool.query(
+    `INSERT INTO tourist_spot_link_clicks (spot_id, spot_name, click_date, click_count)
+     SELECT id, name, (now() AT TIME ZONE 'Asia/Tokyo')::date, 1
+       FROM tourist_spots
+      WHERE id = $1 AND url IS NOT NULL AND btrim(url) <> ''
+     ON CONFLICT (spot_id, click_date) DO UPDATE
+       SET click_count = tourist_spot_link_clicks.click_count + 1,
+           spot_name   = EXCLUDED.spot_name,
+           updated_at  = now()`,
+    [key]
+  );
+  return result.rowCount > 0;
+}
+
+/**
+ * 管理画面「観光スポット管理」の集計表示用。指定期間（from〜to、両端含む・"YYYY-MM-DD"）の
+ * タップ回数をスポットごとに合計する。現在掲載中のスポットは 0 回でも行に含め、集計にしか
+ * 残っていない（＝掲載終了した）スポットは記録時の名称スナップショットで listed:false として返す。
+ * clicks 降順→名称昇順。
+ */
+async function getLinkClickStats({ from, to }) {
+  const [aggResult, spots] = await Promise.all([
+    pool.query(
+      `SELECT c.spot_id,
+              SUM(c.click_count)::int AS clicks,
+              (ARRAY_AGG(c.spot_name ORDER BY c.click_date DESC))[1] AS snapshot_name
+         FROM tourist_spot_link_clicks c
+        WHERE c.click_date BETWEEN $1::date AND $2::date
+        GROUP BY c.spot_id`,
+      [from, to]
+    ),
+    listTouristSpots({ includeDisabled: true })
+  ]);
+
+  const clicksBySpotId = new Map();
+  for (const row of aggResult.rows) {
+    clicksBySpotId.set(row.spot_id, { clicks: row.clicks, snapshotName: row.snapshot_name });
+  }
+
+  const rows = spots.map((spot) => ({
+    spotId: spot.spotId,
+    name: spot.name,
+    url: spot.url,
+    enabled: spot.enabled,
+    listed: true,
+    clicks: clicksBySpotId.get(spot.spotId)?.clicks || 0
+  }));
+
+  const listedIds = new Set(spots.map((s) => s.spotId));
+  for (const [spotId, agg] of clicksBySpotId) {
+    if (listedIds.has(spotId)) continue;
+    rows.push({ spotId, name: agg.snapshotName, url: null, enabled: false, listed: false, clicks: agg.clicks });
+  }
+
+  rows.sort((a, b) => b.clicks - a.clicks || String(a.name).localeCompare(String(b.name), 'ja'));
+  const totalClicks = rows.reduce((sum, r) => sum + r.clicks, 0);
+  return { from, to, totalClicks, rows };
+}
+
+/** 保持期間（既定 LINK_CLICK_RETENTION_DAYS 日）を過ぎたタップ集計を掃除する（scheduler.js の1時間掃除から）。 */
+async function purgeOldLinkClicks(retentionDays = LINK_CLICK_RETENTION_DAYS) {
+  const result = await pool.query(
+    `DELETE FROM tourist_spot_link_clicks
+      WHERE click_date < ((now() AT TIME ZONE 'Asia/Tokyo')::date - $1::int)`,
+    [retentionDays]
+  );
+  return result.rowCount;
 }
 
 module.exports = {
@@ -301,5 +447,9 @@ module.exports = {
   replaceAllTouristSpots,
   setSpotEnabled,
   deleteSpot,
-  parseTouristSpotsText
+  parseTouristSpotsText,
+  recordLinkClick,
+  getLinkClickStats,
+  purgeOldLinkClicks,
+  LINK_CLICK_MAX_RANGE_DAYS
 };
