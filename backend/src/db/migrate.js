@@ -662,31 +662,10 @@ async function migrate() {
     }
 
     // ==========================================================
-    // 32. 乗り場（のりば）ごとのお知らせ配信（管理画面「乗り場お知らせ」）。
-    //     バス停詳細ページの「このバス停でできること」の下に、乗り場別表示のときだけ出す。
-    //     新規環境ではschema.sqlのCREATE TABLEに既に含まれているため実質no-op。
+    // 32. バス停お知らせ配信（管理画面「バス停お知らせ」、旧「乗り場お知らせ」）。
+    //     テーブルの作成は schema.sql（busstop_notices）が行う。旧 platform_notices
+    //     からの移行はステップ38。ここは番号の欠番を避けるためのプレースホルダ。
     // ==========================================================
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS platform_notices (
-        id             SERIAL PRIMARY KEY,
-        feed_id        TEXT NOT NULL,
-        stop_id        TEXT NOT NULL,
-        stop_key       TEXT NOT NULL,
-        stop_name      TEXT NOT NULL,
-        platform_code  TEXT,
-        kind           TEXT NOT NULL CHECK (kind IN ('image', 'link')),
-        title          TEXT,
-        image_url      TEXT,
-        link_body      TEXT,
-        enabled        BOOLEAN NOT NULL DEFAULT TRUE,
-        sort_order     INTEGER NOT NULL DEFAULT 0,
-        created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-      )
-    `);
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_platform_notices_stop ON platform_notices (feed_id, stop_id)
-    `);
 
     // ==========================================================
     // 33. tourist_spots.photo_url を photo_urls にリネーム（観光スポット情報_仕様書）。
@@ -782,6 +761,53 @@ async function migrate() {
     `);
     // スポット未確定（バス停・地名に解決）の検索回数センチネルを 0 → '' へ。
     await client.query(`UPDATE spot_search_counts SET spot_id = '' WHERE spot_id = '0'`);
+
+    // ==========================================================
+    // 37. 観光スポットの一時非表示フラグ（tourist_spots.enabled）を廃止する。
+    //     管理画面の「表示する」チェックボックスによる一時非表示機能を撤去したため、列ごと削除する。
+    //     掲載をやめるときはテキスト一括入力（全件洗い替え）から行を外す運用に一本化する。
+    //     新規環境では schema.sql に既に存在しないため実質 no-op。
+    // ==========================================================
+    await client.query(`ALTER TABLE tourist_spots DROP COLUMN IF EXISTS enabled`);
+
+    // ==========================================================
+    // 38. 旧 platform_notices（乗り場単位のみ・kind='image'|'link' の排他）を
+    //     busstop_notices（バス停単位／乗り場単位、見出し＋画像＋本文を同時に持てる）へ移行する。
+    //     kind='image' の行は image_url を、kind='link' の行は body（旧 link_body）を引き継ぐ。
+    //     すべて scope='platform' として移す（バス停単位のお知らせは移行後に管理画面で追加）。
+    //     移行後に旧テーブルを落とすので IF EXISTS で二度目以降は no-op。
+    // ==========================================================
+    await client.query(`
+      DO $$ BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'platform_notices') THEN
+          INSERT INTO busstop_notices
+            (scope, stop_key, feed_id, stop_id, stop_name, platform_code,
+             title, image_url, body, enabled, sort_order, created_at, updated_at)
+          SELECT
+            'platform', stop_key, feed_id, stop_id, stop_name, platform_code,
+            title,
+            CASE WHEN kind = 'image' THEN image_url ELSE NULL END,
+            CASE WHEN kind = 'link'  THEN link_body ELSE NULL END,
+            enabled, sort_order, created_at, updated_at
+          FROM platform_notices;
+          DROP TABLE platform_notices;
+        END IF;
+      END $$;
+    `);
+
+    // ==========================================================
+    // 39. 重要なお知らせ（system_settings key='important_notice'）を、旧形式のプレーンテキストから
+    //     JSONオブジェクト {body, imageUrl, startDate, endDate} へ変換する（画像・リンク・本文の
+    //     同時配信と配信期間の設定に対応するため）。既にJSON（"{" 始まり）なら触らない＝冪等。
+    // ==========================================================
+    await client.query(`
+      UPDATE system_settings
+      SET value = json_build_object('body', value, 'imageUrl', '', 'startDate', '', 'endDate', '')::text
+      WHERE key = 'important_notice'
+        AND value IS NOT NULL
+        AND btrim(value) <> ''
+        AND left(btrim(value), 1) <> '{'
+    `);
 
     await client.query('COMMIT');
     console.log('[migrate] マイグレーション完了');

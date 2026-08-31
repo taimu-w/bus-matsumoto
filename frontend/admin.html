@@ -83,9 +83,9 @@
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3" y="5" width="15" height="10" rx="2.5"></rect><path d="M7 15l-1 4 4.5-4"></path></svg>
               <span>お知らせ編集</span>
             </button>
-            <button data-section="platform-notices" data-label="乗り場お知らせ" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+            <button data-section="busstop-notices" data-label="バス停お知らせ" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 21s-6-4.686-6-10a6 6 0 1112 0c0 5.314-6 10-6 10z"></path><circle cx="12" cy="11" r="2.2"></circle></svg>
-              <span>乗り場お知らせ</span>
+              <span>バス停お知らせ</span>
             </button>
             <button data-section="tourist-spots" data-label="観光スポット管理" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M6 3v18"></path><path d="M6 4.5h12l-3 4 3 4H6z"></path></svg>
@@ -139,6 +139,10 @@
             <button data-section="direction-rules" data-label="方向マッピング" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M8 3L4 7l4 4"></path><path d="M4 7h13a3 3 0 013 3v1"></path><path d="M16 21l4-4-4-4"></path><path d="M20 17H7a3 3 0 01-3-3v-1"></path></svg>
               <span>方向マッピング</span>
+            </button>
+            <button data-section="realtime-suspension" data-label="リアルタイム休止" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M10 9.5v5M14 9.5v5"></path></svg>
+              <span>リアルタイム休止</span>
             </button>
             <button data-section="runtime-settings" data-label="運用パラメータ設定" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.6"></circle><path d="M19.4 13.5a1.65 1.65 0 000-3l1.1-1.9-2.1-2.1-1.9 1.1a1.65 1.65 0 00-3 0L12.6 3.5h-2.9L8.7 5.6a1.65 1.65 0 00-3 0l-1.9-1.1-2.1 2.1 1.1 1.9a1.65 1.65 0 000 3l-1.1 1.9 2.1 2.1 1.9-1.1a1.65 1.65 0 003 0l1 2.1h2.9l1-2.1a1.65 1.65 0 003 0l1.9 1.1 2.1-2.1z"></path></svg>
@@ -607,8 +611,10 @@
             <div>
               <h3 class="text-lg font-bold">通常のお知らせ（最大3件）</h3>
               <p class="text-sm text-slate-500">
-                トップ画面では題名のみが一覧表示され、タップすると内容がポップアップで開きます。<br>
+                トップ画面では題名のみが一覧表示され、タップすると内容（画像・本文）がポップアップで開きます。<br>
+                1件のお知らせに <b>題名・画像・本文</b> を自由に組み合わせられます。<br>
                 配信期間を指定すると、その期間中だけトップ画面に表示されます（未指定なら無期限）。<br>
+                画像は Cloudinary などにアップロードした <code>https://</code> の画像URLを貼り付けます。<br>
                 本文中のリンク: <code>https://example.com</code> のように書くとURLがそのまま表示されます。
                 <code>[時刻表はこちら](https://example.com)</code> のように書くとテキストに置き換えて表示されます。
               </p>
@@ -616,82 +622,109 @@
             <div id="notices-editor" class="space-y-4"></div>
           </div>
 
-          <label class="block text-sm font-bold border-t pt-5">重要なお知らせ
-            <p class="text-xs font-normal text-slate-500 mt-0.5">入力があるとトップ画面を開いた際に赤いポップアップで一度だけ表示されます（内容が変わるまで再表示されません）。</p>
-            <textarea id="importantNotice" rows="4" class="mt-1 w-full border rounded-lg px-3 py-2"></textarea>
-          </label>
+          <div class="border-t pt-5 space-y-3">
+            <div>
+              <h3 class="text-lg font-bold">重要なお知らせ</h3>
+              <p class="text-xs text-slate-500 mt-0.5">
+                入力があるとトップ画面を開いた際に赤いポップアップで一度だけ表示されます（内容が変わるまで再表示されません）。<br>
+                通常のお知らせと同じく、画像・本文（リンク記法可）を組み合わせられ、配信期間も指定できます。
+              </p>
+            </div>
+            <label class="block text-sm font-bold">本文
+              <textarea id="importantNotice" rows="4" class="mt-1 w-full border rounded-lg px-3 py-2 font-normal"
+                        placeholder="お知らせの本文。リンクは https://… または [表示文字列](https://…)"></textarea>
+            </label>
+            <label class="block text-sm font-bold">画像URL（https://・任意）
+              <input id="important-image-url" type="url"
+                     class="mt-1 w-full border rounded-lg px-3 py-2 font-normal font-mono text-xs"
+                     placeholder="https://res.cloudinary.com/.../notice.jpg">
+            </label>
+            <div class="grid grid-cols-2 gap-3">
+              <label class="block text-sm font-bold">配信開始日
+                <input id="important-start-date" type="date" class="mt-1 w-full border rounded-lg px-3 py-2 font-normal">
+              </label>
+              <label class="block text-sm font-bold">配信終了日
+                <input id="important-end-date" type="date" class="mt-1 w-full border rounded-lg px-3 py-2 font-normal">
+              </label>
+            </div>
+            <p class="text-xs text-slate-400">本文・画像がどちらも空なら、重要なお知らせは表示されません。</p>
+          </div>
           <button id="save-btn" class="bg-green-700 hover:bg-green-800 text-white font-bold rounded-lg px-4 py-3">保存</button>
         </section>
 
-        <!-- 乗り場お知らせ -->
-        <section id="section-platform-notices" class="section hidden space-y-6">
+        <!-- バス停お知らせ -->
+        <section id="section-busstop-notices" class="section hidden space-y-6">
           <div>
-            <h2 class="text-xl font-bold">乗り場お知らせ</h2>
+            <h2 class="text-xl font-bold">バス停お知らせ</h2>
             <p class="text-sm text-slate-500">
-              バス停詳細ページの「このバス停でできること」の下に、<b>乗り場（のりば）を選んで表示しているとき</b>だけ出るお知らせです。
-              すべての乗り場を統合して表示しているときや、お知らせが無い乗り場では表示されません。<br>
+              バス停詳細ページの「このバス停でできること」の下に出るお知らせです。1件のお知らせに
+              <b>見出し・画像・本文</b>を自由に組み合わせられます（画像と本文の少なくとも一方）。<br>
+              配信範囲は2種類あります：<br>
+              ・<b>バス停単位</b>… そのバス停を開けば、どの乗り場を見ていても表示されます。<br>
+              ・<b>乗り場単位</b>… <b>乗り場（のりば）を選んで表示しているとき</b>だけ表示されます（すべての乗り場を統合表示中は出ません）。<br>
               画像は Cloudinary などにアップロードした <code>https://</code> の画像URLを貼り付けます（アプリからはアップロードしません）。<br>
-              リンクはトップ画面のお知らせと同じ記法です：<code>https://example.com</code> と書くとURLがそのまま、
-              <code>[時刻表はこちら](https://example.com)</code> と書くとテキストに置き換えて表示されます。
+              本文はトップ画面のお知らせと同じ記法です：<code>https://example.com</code> と書くとURLがそのまま、
+              <code>[時刻表はこちら](https://example.com)</code> と書くとテキストに置き換えて表示されます。リンクを含まないただの文章も入力できます。
             </p>
           </div>
 
           <div class="bg-white rounded-xl border p-4 space-y-4">
-            <h3 class="text-sm font-bold text-slate-600" id="pn-form-title">お知らせを追加</h3>
+            <h3 class="text-sm font-bold text-slate-600" id="bn-form-title">お知らせを追加</h3>
+
+            <div class="text-sm font-bold">配信範囲
+              <div class="mt-1 flex gap-4 font-normal">
+                <label class="flex items-center gap-1"><input type="radio" name="bn-scope" value="stop" checked> バス停単位</label>
+                <label class="flex items-center gap-1"><input type="radio" name="bn-scope" value="platform"> 乗り場単位</label>
+              </div>
+            </div>
 
             <div>
               <label class="block text-sm font-bold">バス停
-                <input id="pn-stop-search" type="search" autocomplete="off"
+                <input id="bn-stop-search" type="search" autocomplete="off"
                        placeholder="バス停名で検索（漢字・ひらがな・カタカナ・ローマ字）"
                        class="mt-1 w-full border rounded-lg px-3 py-2 font-normal">
               </label>
-              <div id="pn-stop-results" class="mt-1 border rounded-lg divide-y hidden max-h-56 overflow-y-auto bg-white"></div>
-              <p id="pn-stop-selected" class="mt-2 text-sm font-bold text-green-700 hidden"></p>
+              <div id="bn-stop-results" class="mt-1 border rounded-lg divide-y hidden max-h-56 overflow-y-auto bg-white"></div>
+              <p id="bn-stop-selected" class="mt-2 text-sm font-bold text-green-700 hidden"></p>
             </div>
 
-            <label class="block text-sm font-bold">乗り場
-              <select id="pn-platform" class="mt-1 w-full border rounded-lg px-3 py-2 font-normal" disabled>
+            <label id="bn-platform-field" class="block text-sm font-bold hidden">乗り場
+              <select id="bn-platform" class="mt-1 w-full border rounded-lg px-3 py-2 font-normal" disabled>
                 <option value="">先にバス停を選択してください</option>
               </select>
             </label>
 
-            <div class="text-sm font-bold">種別
-              <div class="mt-1 flex gap-4 font-normal">
-                <label class="flex items-center gap-1"><input type="radio" name="pn-kind" value="image" checked> 画像</label>
-                <label class="flex items-center gap-1"><input type="radio" name="pn-kind" value="link"> リンク</label>
-              </div>
-            </div>
-
             <label class="block text-sm font-bold">見出し（任意・最大60文字）
-              <input id="pn-title" type="text" maxlength="60"
+              <input id="bn-title" type="text" maxlength="60"
                      class="mt-1 w-full border rounded-lg px-3 py-2 font-normal" placeholder="例: エレベーター工事のお知らせ">
             </label>
 
-            <label id="pn-image-field" class="block text-sm font-bold">画像URL（https://）
-              <input id="pn-image-url" type="url"
+            <label class="block text-sm font-bold">画像URL（https://・任意）
+              <input id="bn-image-url" type="url"
                      class="mt-1 w-full border rounded-lg px-3 py-2 font-normal font-mono text-xs"
                      placeholder="https://res.cloudinary.com/.../notice.jpg">
             </label>
 
-            <label id="pn-link-field" class="block text-sm font-bold hidden">本文（リンクを含む）
-              <textarea id="pn-link-body" rows="3" class="mt-1 w-full border rounded-lg px-3 py-2 font-normal"
+            <label class="block text-sm font-bold">本文（リンク記法可・任意）
+              <textarea id="bn-body" rows="3" class="mt-1 w-full border rounded-lg px-3 py-2 font-normal"
                         placeholder="例: 迂回運行中です。詳細は [お知らせ](https://example.com) をご覧ください。"></textarea>
             </label>
+            <p class="text-xs text-slate-400 -mt-2">画像と本文の少なくとも一方を入力してください。</p>
 
             <label class="flex items-center gap-2 text-sm font-bold">
-              <input type="checkbox" id="pn-enabled" checked> 表示する
+              <input type="checkbox" id="bn-enabled" checked> 表示する
             </label>
 
             <div class="flex items-center gap-3">
-              <button id="pn-save-btn" class="bg-green-700 hover:bg-green-800 text-white font-bold rounded-lg px-4 py-2">追加</button>
-              <button id="pn-cancel-edit-btn" class="text-sm font-bold text-slate-500 hover:underline hidden">編集をやめる</button>
-              <span id="pn-save-status" class="text-sm font-bold"></span>
+              <button id="bn-save-btn" class="bg-green-700 hover:bg-green-800 text-white font-bold rounded-lg px-4 py-2">追加</button>
+              <button id="bn-cancel-edit-btn" class="text-sm font-bold text-slate-500 hover:underline hidden">編集をやめる</button>
+              <span id="bn-save-status" class="text-sm font-bold"></span>
             </div>
           </div>
 
           <div>
-            <h3 class="text-sm font-bold text-slate-600 mb-2">登録済みの乗り場お知らせ</h3>
-            <div id="pn-list" class="space-y-2"></div>
+            <h3 class="text-sm font-bold text-slate-600 mb-2">登録済みのバス停お知らせ</h3>
+            <div id="bn-list" class="space-y-2"></div>
           </div>
         </section>
 
@@ -810,6 +843,49 @@
                 </tr>
               </thead>
               <tbody id="direction-rules-list"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- リアルタイム休止 -->
+        <section id="section-realtime-suspension" class="section hidden space-y-4">
+          <div>
+            <h2 class="text-xl font-bold">リアルタイム休止</h2>
+            <p class="text-sm text-slate-500">
+              突発的な運休・輸送障害などで、GPS由来のリアルタイム運行情報（現在地・遅延・到着予測）が実態と食い違うとき、
+              その路線の<span class="font-bold">リアルタイム表示だけ</span>を利用者向け画面から一時的に取りやめます。<br>
+              休止中も<span class="font-bold">時刻表（定刻）ベースの表示・経路検索は通常どおり</span>動きます。対象は、リアルタイム運行状況画面・バスマップ・
+              経路検索のリアルタイム重ね合わせ・便詳細の「リアルタイムに切替」・バス停の「接近中のバス」です。<br>
+              管理画面の運行監視（運行ダッシュボードの地図・便の割当監視・異常アラート）は対象外で、休止中の路線も従来どおり監視できます。<br>
+              復旧したら「再開」を押してください（自動解除はありません）。反映は保存/再開の直後です。
+            </p>
+          </div>
+          <div class="bg-white rounded-xl border p-4 space-y-3">
+            <div class="flex gap-2 flex-wrap items-end">
+              <label class="text-sm font-bold">路線
+                <select id="suspension-route-id" class="mt-1 border rounded-lg px-3 py-2 min-w-[18rem]"></select>
+              </label>
+              <label class="text-sm font-bold">休止理由（任意・利用者に表示）
+                <input id="suspension-reason" type="text" maxlength="200" class="mt-1 border rounded-lg px-3 py-2 min-w-[16rem]" placeholder="車両点検のため など" />
+              </label>
+              <label class="text-sm font-bold">メモ（任意・管理用）
+                <input id="suspension-note" type="text" maxlength="2000" class="mt-1 border rounded-lg px-3 py-2" placeholder="連絡経緯など" />
+              </label>
+              <button id="suspension-save-btn" class="bg-red-700 hover:bg-red-800 text-white font-bold rounded-lg px-4 py-2">休止する</button>
+            </div>
+          </div>
+          <div class="bg-white rounded-xl border overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500">
+                <tr>
+                  <th class="text-left px-3 py-2 font-bold">路線</th>
+                  <th class="text-left px-3 py-2 font-bold">休止理由</th>
+                  <th class="text-left px-3 py-2 font-bold">メモ</th>
+                  <th class="text-left px-3 py-2 font-bold">休止開始</th>
+                  <th class="text-left px-3 py-2 font-bold"></th>
+                </tr>
+              </thead>
+              <tbody id="suspension-list"></tbody>
             </table>
           </div>
         </section>
@@ -994,10 +1070,11 @@
   <script src="/admin-api-stats.js"></script>
   <script src="/admin-job-monitor.js"></script>
   <script src="/admin-notices.js"></script>
-  <script src="/admin-platform-notices.js"></script>
+  <script src="/admin-busstop-notices.js"></script>
   <script src="/admin-holidays.js"></script>
   <script src="/admin-route-mappings.js"></script>
   <script src="/admin-direction-rules.js"></script>
+  <script src="/admin-runtime-suspension.js"></script>
   <script src="/admin-runtime-settings.js"></script>
   <script src="/admin-tourist-spots.js"></script>
   <script src="/admin-tourist-spot-clicks.js"></script>

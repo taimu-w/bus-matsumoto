@@ -446,12 +446,9 @@
   }
 
   /* ---------- スポット情報カード（busstop.js の周辺観光スポット表示と同じ考え方） ---------- */
+  /** 写真を1枚ずつ表示するカルーセル（spot-photos.js）。複数枚なら5秒間隔の自動送り＋手動操作。1枚なら全幅の静止画。 */
   function spotPhotoStrip(spot) {
-    const photos = Array.isArray(spot.photoUrls) ? spot.photoUrls : [];
-    if (photos.length === 0) return '';
-    return `<div class="flex gap-1 overflow-x-auto bg-gray-100">${photos
-      .map((u) => `<img src="${esc(u)}" alt="${esc(spot.name)}" class="h-40 object-contain shrink-0${photos.length === 1 ? ' w-full' : ''}">`)
-      .join('')}</div>`;
+    return window.SpotPhotos ? window.SpotPhotos.markup(spot, { height: '10rem' }) : '';
   }
 
   function spotInfoCardHtml(spot) {
@@ -588,6 +585,7 @@
     container.querySelectorAll('[data-role="ss-use-spot"]').forEach((button) => {
       button.addEventListener('click', () => navigate(buildUrl({ spotId: button.dataset.id })));
     });
+    if (window.SpotPhotos) window.SpotPhotos.hydrate(container);
   }
 
   window.SpotSearchView = { render, isSpotSearchPath, navigate };

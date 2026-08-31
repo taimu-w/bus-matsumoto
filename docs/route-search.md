@@ -299,6 +299,11 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
   **バス停名の一致**で乗車停・降車停・各通過停に予測時刻／通過実績を割り当てる（`busStopApproaching.js` と同じ方針。DBの `stops` は標柱を持たないため名前一致が唯一の接点）。
 - 予測が引けた区間だけ `realtime.hasRealtime = true` とし、引けなくても**定刻で成立させる**（区間ごと落とさない）。
 - 同一割り当ての取得はリクエスト内でキャッシュし、同じ便を何度も引かない。
+- **管理画面「リアルタイム休止」中の路線を含む区間は重ね合わせをスキップし、定刻のまま返す**
+  （`findLiveAssignment()` が休止路線に `null` を返すため。加えて `attachRealtime()` が
+  `leg.realtimeSuspended` / `journey.realtimeSuspended` を立て、画面が「定刻表示」の注記を出す）。
+  **探索・運賃・おすすめ判定・並び順は影響を受けない**（通常どおりの検索は認める）。詳細は
+  [realtime-suspension.md](realtime-suspension.md)。
 
 ### 5.8 詳細設定（「乗り換えなし」で探す、など）
 

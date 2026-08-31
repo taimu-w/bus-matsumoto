@@ -25,6 +25,7 @@ const { expandFrequencies } = require('./gtfsFrequencies');
 const { getFareIndex, lookupFare } = require('./gtfsFare');
 const { haversineDistanceMeters } = require('../utils/geo');
 const { findLiveAssignment, buildBusEntry } = require('./realtimeTripLookup');
+const { getSuspendedRouteIdSet } = require('./realtimeSuspension');
 const { qualifyRouteId } = require('./gtfsFeedManager');
 const { nowInTokyo } = require('../utils/time');
 const touristSpots = require('./touristSpots');
@@ -1110,10 +1111,22 @@ async function attachRealtime(journeys, minTransferSeconds = MIN_TRANSFER_SECOND
   // 同じ便を何度も引かないためのリクエスト内キャッシュ
   const busEntryCache = new Map();
 
+  // 管理画面「リアルタイム休止」で表示を止めている路線の集合（docs/realtime-suspension.md）。
+  // findLiveAssignment() 自体も休止路線には null を返すが、ここで先に判定して
+  // 「定刻を表示している理由」を経路・区間に添えられるようにする（画面の注記用）。
+  const suspendedRouteIds = await getSuspendedRouteIdSet();
+
   for (const journey of journeys) {
     for (let legIndex = 0; legIndex < journey.legs.length; legIndex += 1) {
       const leg = journey.legs[legIndex];
       if (leg.type !== 'bus') continue;
+
+      if (suspendedRouteIds.has(qualifyRouteId(leg.routeId, leg.feedId))) {
+        leg.realtimeSuspended = true;
+        journey.realtimeSuspended = true;
+        continue; // リアルタイムは重ねず定刻のまま成立させる
+      }
+
       // 翌日・前日ぶんにずらして拾った便は「今日のリアルタイム」ではない
       // （当日の daily_trips を引く realtimeTripLookup とは別の日の便になってしまう）
       if (leg.departureDayOffset !== 0) continue;
@@ -1492,7 +1505,7 @@ function findNearbyStopGroupsWithinRadius(index, lat, lon, radiusMeters, limit) 
  */
 async function resolveEndpoint(index, { stopKey, text, spotId }) {
   if (spotId) {
-    const spot = await touristSpots.getEnabledSpotById(spotId);
+    const spot = await touristSpots.getSpotById(spotId);
     if (!spot) {
       return { groups: [], fuzzy: false, query: '', spotNotFound: true };
     }

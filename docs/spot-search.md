@@ -25,7 +25,7 @@ GTFSインメモリインデックス（`gtfsTimetable.js`）と `tourist_spots`
 | 種別 | 取得元 | サジェスト | 自由文字列での解決 |
 |---|---|---|---|
 | バス停 | `gtfsTimetable.searchStops()` | ○ | ○（結果ページ） |
-| 観光スポット／その他のスポット | `touristSpots.searchTouristSpots()`（`enabled = true` のみ、`display_tag` は問わない） | ○ | ○（結果ページ） |
+| 観光スポット／その他のスポット | `touristSpots.searchTouristSpots()`（`display_tag` は問わない） | ○ | ○（結果ページ） |
 | 路線 | `spotSearch.searchRoutes()`（`routes` テーブルの `name` / `short_name` の正規化テキスト一致） | ○ | ○（リアルタイム時刻表へリダイレクト） |
 
 - バス停・観光スポットの候補検索は **時刻表検索・経路検索とまったく同じ検索体験**（漢字・ひらがな・
@@ -43,7 +43,7 @@ GTFSインメモリインデックス（`gtfsTimetable.js`）と `tourist_spots`
 
 | 入力 | 解決 | `resolvedFrom` |
 |---|---|---|
-| `spotId` | `touristSpots.getEnabledSpotById()` | `spot` |
+| `spotId` | `touristSpots.getSpotById()` | `spot` |
 | `stopKey` | `gtfsTimetable.getStopSummariesByKeys()` | `stop` |
 | `q` → 観光スポットが最有力 | 上記スポット解決 | `fuzzy-spot` |
 | `q` → バス停が最有力 | 上記バス停解決 | `fuzzy-stop` |
@@ -122,7 +122,9 @@ GTFSインメモリインデックス（`gtfsTimetable.js`）と `tourist_spots`
 ### 6.3 結果の表示
 
 1. ヘッダー（対象名＋「観光スポット／バス停を中心に付近のバス停と路線を表示」）
-2. スポット情報カード（`spot` があるとき。写真は横スクロール、複数枚は帯・1枚は全幅。
+2. スポット情報カード（`spot` があるとき。写真は `SpotPhotos`（`frontend/spot-photos.js`）の
+   カルーセル＝1枚ずつ表示、複数枚は5秒間隔の自動送り＋スワイプ／矢印／インジケーター。
+   詳細は [docs/tourist-spots.md](tourist-spots.md) の「写真表示（カルーセル）」。
    公式サイトリンクのタップは `POST /api/tourist-spots/:id/link-click` へ `sendBeacon`。
    `busstop.js` の周辺観光スポット表示と同じ考え方）
 3. 「この周辺を通る路線」— 重複排除済みの路線チップ（タップでリアルタイム時刻表）

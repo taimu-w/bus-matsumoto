@@ -80,6 +80,33 @@ CREATE TABLE IF NOT EXISTS route_direction_rules (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 路線ごとの「リアルタイム運行情報の表示」一時休止スイッチ。
+-- 管理画面「リアルタイム休止」（GET/POST/DELETE /api/admin/realtime-suspensions）から編集する。
+--
+-- 突発的な運休・輸送障害でGPS由来のリアルタイム情報（現在地・遅延・到着予測）が実態と
+-- 食い違うとき、その路線のリアルタイム表示だけを利用者向け画面から一時的に取りやめる。
+-- 行が1件でもあれば、その route_id は次の公開機能でリアルタイムを出さない：
+--   ・リアルタイム運行状況画面（/api/buses）    ・バスマップ（/api/buses-for-map）
+--   ・経路検索のリアルタイム重ね合わせ           ・便詳細の「リアルタイムに切替」
+--   ・バス停詳細の「接近中のバス」のリアルタイム突合
+-- いずれも時刻表（定刻）ベースの表示・探索は通常どおり動く。管理画面の運行監視
+-- （運行ダッシュボード地図・便の割当監視・異常アラート）は対象外＝従来どおり全路線見える。
+-- 解除は行の削除（管理画面の「再開」）のみ。復旧見込みが立たない突発運休を想定し自動解除は持たない。
+--
+-- ⚠️ route_external_ids / route_direction_rules とは目的が別。あの2つは「位置情報CSVとGTFSを
+-- 結びつける設定」。こちらは「公開画面のリアルタイム表示のキルスイッチ」。混同しないこと。
+--
+-- route_id は routes.id と同じ「feedId:routeId」形式の qualified route id。
+-- サービス層は backend/src/services/realtimeSuspension.js（TTL付きメモリキャッシュ。
+-- 管理画面からの変更時に invalidateRealtimeSuspensionCache() で破棄）。詳細は docs/realtime-suspension.md。
+CREATE TABLE IF NOT EXISTS route_realtime_suspensions (
+  route_id      TEXT PRIMARY KEY,
+  reason        TEXT,               -- 利用者向け画面に表示する休止理由（任意）
+  note          TEXT,               -- 管理者向けメモ（任意）
+  suspended_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- バス停マスタ。物理バス停（GTFSのstop_id）+ occurrence（同一route_id・direction_id内で
 -- その物理バス停を何回目の通過として登録したか。循環路線で1便が同じ停留所を複数回通る
 -- ケースの識別に使う。0始まり）で一意化する。この2列が実体キーであり、
@@ -149,9 +176,11 @@ CREATE TABLE IF NOT EXISTS schedule_stop_times (
 );
 
 -- システム全体設定・お知らせ（key/value）。
---   notices          … 通常のお知らせのJSON配列（最大3件。各要素 {title, body, startDate, endDate}。
+--   notices          … 通常のお知らせのJSON配列（最大3件。各要素 {title, body, imageUrl, startDate, endDate}。
+--                       imageUrl は https:// の画像URLまたは ""。body はリンク記法対応の本文。
 --                       startDate/endDate は "YYYY-MM-DD" または ""（無期限）。配信期間内のものだけ公開APIが返す）
---   important_notice … 重要なお知らせ（トップ画面で赤いポップアップ表示）
+--   important_notice … 重要なお知らせのJSONオブジェクト {body, imageUrl, startDate, endDate}（トップ画面で赤いポップアップ表示）。
+--                      未設定なら ""。旧形式（プレーンテキスト）は migrate.js が {body:<旧値>,...} へ変換する
 --   route_name / operator_name … 表示用の既定値
 --   （運用パラメータ設定の上書き値もこのテーブルに入る。services/runtimeSettings.js 参照）
 CREATE TABLE IF NOT EXISTS system_settings (
@@ -202,7 +231,6 @@ CREATE TABLE IF NOT EXISTS tourist_spots (
   -- （findNearbySpots）からのみ除外する（学校・病院等、経路検索の地点としては使うが観光スポット
   -- ではない登録への対策）。地点名検索・詳細ポップアップ取得は本フラグの影響を受けない。
   display_tag     TEXT,
-  enabled         BOOLEAN NOT NULL DEFAULT TRUE,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -240,30 +268,32 @@ CREATE TABLE IF NOT EXISTS spot_search_counts (
 );
 CREATE INDEX IF NOT EXISTS idx_spot_search_counts_date ON spot_search_counts (search_date);
 
--- 乗り場（のりば）ごとのお知らせ配信（docs/platform-notices.md）。管理画面「乗り場お知らせ」で編集する。
--- GTFS由来のバス停インデックス（gtfsTimetable.js）とは (feed_id, stop_id) だけで結びつく。
--- GTFS再取込で stop_id が消えれば参照時に一致しなくなるだけ（実害なし）。
--- stop_key / stop_name / platform_code は管理画面一覧の可読性のためのスナップショットで、
--- 表示側の突合には使わない（正は feed_id + stop_id）。
---   kind='image' … image_url（Cloudinary等の https:// 画像URL）
---   kind='link'  … link_body（トップ画面のお知らせ本文と同じリンク記法）
-CREATE TABLE IF NOT EXISTS platform_notices (
+-- バス停お知らせ配信（docs/busstop-notices.md）。管理画面「バス停お知らせ」で編集する。
+-- 1件のお知らせは 見出し・画像・本文（リンク記法対応）を任意に組み合わせて持てる（画像と本文の少なくとも一方）。
+-- scope で配信範囲を決める：
+--   scope='platform' … 乗り場（のりば）単位。突合キーは (feed_id, stop_id)。乗り場別表示のときだけ出す。
+--   scope='stop'     … バス停単位。突合キーは stop_key（統合バス停キー＋その別名）。表示モードによらず常に出す。
+-- GTFS再取込で stop_id / stop_key が変わっても行は更新しない。参照時に一致しなくなるだけ（実害なし）。
+-- stop_name / platform_code は管理画面一覧の可読性のためのスナップショット。
+CREATE TABLE IF NOT EXISTS busstop_notices (
   id             SERIAL PRIMARY KEY,
-  feed_id        TEXT NOT NULL,
-  stop_id        TEXT NOT NULL,
+  scope          TEXT NOT NULL CHECK (scope IN ('stop', 'platform')),
   stop_key       TEXT NOT NULL,
+  feed_id        TEXT,
+  stop_id        TEXT,
   stop_name      TEXT NOT NULL,
   platform_code  TEXT,
-  kind           TEXT NOT NULL CHECK (kind IN ('image', 'link')),
   title          TEXT,
   image_url      TEXT,
-  link_body      TEXT,
+  body           TEXT,
   enabled        BOOLEAN NOT NULL DEFAULT TRUE,
   sort_order     INTEGER NOT NULL DEFAULT 0,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT busstop_notices_platform_ref CHECK (scope <> 'platform' OR (feed_id IS NOT NULL AND stop_id IS NOT NULL))
 );
-CREATE INDEX IF NOT EXISTS idx_platform_notices_stop ON platform_notices (feed_id, stop_id);
+CREATE INDEX IF NOT EXISTS idx_busstop_notices_platform ON busstop_notices (feed_id, stop_id);
+CREATE INDEX IF NOT EXISTS idx_busstop_notices_stop_key ON busstop_notices (stop_key);
 
 -- 観測されている物理車両。便との紐付けは trip_vehicle_assignments が持つ。
 -- 運行終了しても行は削除せず status='inactive' にする（1台が複数便に関与するため）。

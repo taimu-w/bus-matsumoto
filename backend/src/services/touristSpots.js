@@ -46,8 +46,7 @@ function serializeRow(row) {
     descriptionEn: row.description_en,
     photoUrls: splitPhotoUrls(row.photo_urls),
     category: row.category,
-    displayTag: row.display_tag,
-    enabled: row.enabled
+    displayTag: row.display_tag
   };
 }
 
@@ -63,11 +62,11 @@ function isVisibleOnBusStopPage(row) {
 }
 
 /**
- * バス停ページ用の近接検索。enabled=trueかつisVisibleOnBusStopPageのみ対象、半径内・距離昇順で最大limit件。
+ * バス停ページ用の近接検索。isVisibleOnBusStopPageのみ対象、半径内・距離昇順で最大limit件。
  * 各要素に最寄りバス停までの徒歩距離の概算（distanceMeters・walkMinutes）を付与する。
  */
 async function findNearbySpots(lat, lon, { radiusMeters = DEFAULT_NEARBY_RADIUS_METERS, limit = DEFAULT_NEARBY_LIMIT } = {}) {
-  const result = await pool.query('SELECT * FROM tourist_spots WHERE enabled = TRUE');
+  const result = await pool.query('SELECT * FROM tourist_spots');
   const candidates = [];
   for (const row of result.rows) {
     if (!isVisibleOnBusStopPage(row)) continue;
@@ -85,13 +84,13 @@ async function findNearbySpots(lat, lon, { radiusMeters = DEFAULT_NEARBY_RADIUS_
 
 /**
  * 経路検索・地点名検索の候補用。name/kana/romajiの部分一致（normalizeSearchTextで正規化）。
- * 前方一致を優先し、次に部分一致（gtfsTimetable.searchStops()と同じ考え方）。enabled=trueのみ。
+ * 前方一致を優先し、次に部分一致（gtfsTimetable.searchStops()と同じ考え方）。
  */
 async function searchTouristSpots(query, limit = 10) {
   const normalizedQuery = normalizeSearchText(query);
   if (!normalizedQuery) return [];
 
-  const result = await pool.query('SELECT * FROM tourist_spots WHERE enabled = TRUE');
+  const result = await pool.query('SELECT * FROM tourist_spots');
   const scored = [];
   for (const row of result.rows) {
     const fields = [row.name, row.kana, row.romaji].filter(Boolean).map(normalizeSearchText);
@@ -128,21 +127,18 @@ function isValidSpotId(id) {
   return true;
 }
 
-/** 経路検索：観光スポットIDから確定した1件を取得する（enabled=trueのみ）。 */
-async function getEnabledSpotById(id) {
+/** 経路検索：観光スポットIDから確定した1件を取得する。 */
+async function getSpotById(id) {
   const key = normalizeSpotId(id);
   if (!key) return null;
-  const result = await pool.query('SELECT * FROM tourist_spots WHERE id = $1 AND enabled = TRUE', [key]);
+  const result = await pool.query('SELECT * FROM tourist_spots WHERE id = $1', [key]);
   if (result.rows.length === 0) return null;
   return serializeRow(result.rows[0]);
 }
 
-/** 管理画面一覧用。includeDisabled=falseならenabled=trueのみ、trueなら全件。name昇順（同名はID昇順）。 */
-async function listTouristSpots({ includeDisabled = false } = {}) {
-  const query = includeDisabled
-    ? 'SELECT * FROM tourist_spots ORDER BY name, id'
-    : 'SELECT * FROM tourist_spots WHERE enabled = TRUE ORDER BY name, id';
-  const result = await pool.query(query);
+/** 管理画面一覧用。全件をname昇順（同名はID昇順）で返す。 */
+async function listTouristSpots() {
+  const result = await pool.query('SELECT * FROM tourist_spots ORDER BY name, id');
   return result.rows.map(serializeRow);
 }
 
@@ -285,8 +281,6 @@ function parseTouristSpotsText(text) {
  * 全件洗い替え本体。parseTouristSpotsText→バリデーション→単一トランザクションでUPSERT+削除。
  * 1列目のIDをキーに ON CONFLICT UPDATE する（IDが同じなら名称の変更も同一スポットの改称として反映）。
  * テキストに無いIDの既存行は削除する。
- * enabledはUPDATE時に更新しない（INSERT時のみdefault true。簡易UIでの一時非表示を、
- * 無関係な再貼り付けで巻き戻さないため）。
  */
 async function replaceAllTouristSpots(text) {
   const parsed = parseTouristSpotsText(text);
@@ -337,14 +331,6 @@ async function replaceAllTouristSpots(text) {
   }
 }
 
-/** 簡易UI：有効/無効切り替え。該当行が無ければfalseを返す。 */
-async function setSpotEnabled(id, enabled) {
-  const key = normalizeSpotId(id);
-  if (!key) return false;
-  const result = await pool.query('UPDATE tourist_spots SET enabled = $2, updated_at = now() WHERE id = $1', [key, enabled]);
-  return result.rowCount > 0;
-}
-
 /** 簡易UI：1件削除。 */
 async function deleteSpot(id) {
   const key = normalizeSpotId(id);
@@ -364,8 +350,7 @@ async function deleteSpot(id) {
 /**
  * 利用者が観光スポットの公式サイトリンクをタップしたことを記録する（当日行を +1）。
  * URLが登録されているスポットだけを対象にし、該当が無ければ静かに 0 件で終わる
- * （存在しないID・URL未登録・sendBeaconの重複などを弾く）。enabled では絞らない
- * （表示直後に無効化された場合の取りこぼしを避ける）。
+ * （存在しないID・URL未登録・sendBeaconの重複などを弾く）。
  */
 async function recordLinkClick(spotId) {
   const key = normalizeSpotId(spotId);
@@ -386,9 +371,9 @@ async function recordLinkClick(spotId) {
 
 /**
  * 管理画面「観光スポット管理」の集計表示用。指定期間（from〜to、両端含む・"YYYY-MM-DD"）の
- * タップ回数をスポットごとに合計する。現在掲載中のスポットは 0 回でも行に含め、集計にしか
- * 残っていない（＝掲載終了した）スポットは記録時の名称スナップショットで listed:false として返す。
- * clicks 降順→名称昇順。
+ * タップ回数をスポットごとに合計する。現在掲載中のスポットは 0 回でも行に含め（listed:true）、
+ * 集計にしか残っていない（＝掲載終了した）スポットは記録時の名称スナップショットで
+ * listed:false として返す。clicks 降順→名称昇順。
  */
 async function getLinkClickStats({ from, to }) {
   const [aggResult, spots] = await Promise.all([
@@ -401,7 +386,7 @@ async function getLinkClickStats({ from, to }) {
         GROUP BY c.spot_id`,
       [from, to]
     ),
-    listTouristSpots({ includeDisabled: true })
+    listTouristSpots()
   ]);
 
   const clicksBySpotId = new Map();
@@ -413,7 +398,6 @@ async function getLinkClickStats({ from, to }) {
     spotId: spot.spotId,
     name: spot.name,
     url: spot.url,
-    enabled: spot.enabled,
     listed: true,
     clicks: clicksBySpotId.get(spot.spotId)?.clicks || 0
   }));
@@ -421,7 +405,7 @@ async function getLinkClickStats({ from, to }) {
   const listedIds = new Set(spots.map((s) => s.spotId));
   for (const [spotId, agg] of clicksBySpotId) {
     if (listedIds.has(spotId)) continue;
-    rows.push({ spotId, name: agg.snapshotName, url: null, enabled: false, listed: false, clicks: agg.clicks });
+    rows.push({ spotId, name: agg.snapshotName, url: null, listed: false, clicks: agg.clicks });
   }
 
   rows.sort((a, b) => b.clicks - a.clicks || String(a.name).localeCompare(String(b.name), 'ja'));
@@ -442,10 +426,9 @@ async function purgeOldLinkClicks(retentionDays = LINK_CLICK_RETENTION_DAYS) {
 module.exports = {
   findNearbySpots,
   searchTouristSpots,
-  getEnabledSpotById,
+  getSpotById,
   listTouristSpots,
   replaceAllTouristSpots,
-  setSpotEnabled,
   deleteSpot,
   parseTouristSpotsText,
   recordLinkClick,

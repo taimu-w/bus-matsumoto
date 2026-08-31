@@ -76,10 +76,27 @@ function paceBreakdownBadges(pb) {
   return `<div class="mt-1 flex flex-wrap gap-1 text-[10px]">${parts.filter(Boolean).join('')}</div>`;
 }
 
+// 上部の通知バーは、セクションを切り替えても消えずに残ると混乱の元になるため、
+// 表示から5秒で自動的に隠す（読むには十分な時間）。次のメッセージが来たら前のタイマーは破棄する。
+let statusHideTimer = null;
+
+function hideStatus() {
+  if (statusHideTimer) {
+    clearTimeout(statusHideTimer);
+    statusHideTimer = null;
+  }
+  statusBox.classList.add('hidden');
+}
+
 function showStatus(message, tone = 'info') {
+  if (statusHideTimer) clearTimeout(statusHideTimer);
   statusBox.textContent = message;
   statusBox.className = `rounded-lg px-4 py-3 text-sm font-bold ${tone === 'error' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`;
   statusBox.classList.remove('hidden');
+  statusHideTimer = setTimeout(() => {
+    statusBox.classList.add('hidden');
+    statusHideTimer = null;
+  }, 5000);
 }
 
 function showLoginStatus(message, tone = 'info') {

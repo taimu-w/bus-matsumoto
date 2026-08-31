@@ -21,8 +21,7 @@
 
   function statusLabel(row) {
     if (!row.listed) return '<span class="text-slate-400">掲載終了</span>';
-    if (!row.enabled) return '<span class="text-amber-600">非表示</span>';
-    return '<span class="text-green-700">表示中</span>';
+    return '<span class="text-green-700">掲載中</span>';
   }
 
   async function loadStats() {

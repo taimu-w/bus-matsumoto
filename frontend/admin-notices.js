@@ -25,6 +25,10 @@
           <textarea data-field="body" rows="4"
                     class="mt-1 w-full border rounded-lg px-3 py-2 font-normal" placeholder="お知らせの本文。リンクは https://… または [表示文字列](https://…)">${escapeAttr(n.body || '')}</textarea>
         </label>
+        <label class="block text-sm font-bold">画像URL（https://・任意）
+          <input type="url" data-field="imageUrl" value="${escapeAttr(n.imageUrl || '')}"
+                 class="mt-1 w-full border rounded-lg px-3 py-2 font-normal font-mono text-xs" placeholder="https://res.cloudinary.com/.../notice.jpg">
+        </label>
         <div class="grid grid-cols-2 gap-3">
           <label class="block text-sm font-bold">配信開始日
             <input type="date" data-field="startDate" value="${escapeAttr(n.startDate || '')}"
@@ -52,18 +56,34 @@
       const get = (f) => (card.querySelector(`[data-field="${f}"]`).value || '').trim();
       const title = get('title');
       const body = card.querySelector('[data-field="body"]').value || '';
+      const imageUrl = get('imageUrl');
       const startDate = get('startDate');
       const endDate = get('endDate');
-      if (!title && !body.trim()) return; // 完全に空の枠は送らない
-      notices.push({ title, body, startDate, endDate });
+      if (!title && !body.trim() && !imageUrl) return; // 完全に空の枠は送らない
+      notices.push({ title, body, imageUrl, startDate, endDate });
     });
     return notices;
+  }
+
+  function collectImportantNotice() {
+    return {
+      body: document.getElementById('importantNotice').value,
+      imageUrl: (document.getElementById('important-image-url').value || '').trim(),
+      startDate: document.getElementById('important-start-date').value || '',
+      endDate: document.getElementById('important-end-date').value || ''
+    };
   }
 
   async function loadSettings() {
     const settings = await api('/api/admin/settings');
     renderNoticeEditors(Array.isArray(settings.notices) ? settings.notices : []);
-    document.getElementById('importantNotice').value = settings.importantNotice || '';
+    const important = settings.importantNotice && typeof settings.importantNotice === 'object'
+      ? settings.importantNotice
+      : { body: settings.importantNotice || '', imageUrl: '', startDate: '', endDate: '' };
+    document.getElementById('importantNotice').value = important.body || '';
+    document.getElementById('important-image-url').value = important.imageUrl || '';
+    document.getElementById('important-start-date').value = important.startDate || '';
+    document.getElementById('important-end-date').value = important.endDate || '';
   }
 
   document.getElementById('save-btn').addEventListener('click', async () => {
@@ -75,14 +95,26 @@
           return;
         }
       }
+      const importantNotice = collectImportantNotice();
+      if (importantNotice.startDate && importantNotice.endDate && importantNotice.startDate > importantNotice.endDate) {
+        showStatus('重要なお知らせの配信期間の開始日が終了日より後になっています。', 'error');
+        return;
+      }
       const payload = {
         notices,
-        importantNotice: document.getElementById('importantNotice').value,
+        importantNotice,
         routeName: '横田信大循環線',
         operatorName: 'ぐるっと松本バス（アルピコ交通）'
       };
       const updated = await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(payload) });
       renderNoticeEditors(Array.isArray(updated.notices) ? updated.notices : []);
+      const savedImportant = updated.importantNotice && typeof updated.importantNotice === 'object'
+        ? updated.importantNotice
+        : { body: updated.importantNotice || '', imageUrl: '', startDate: '', endDate: '' };
+      document.getElementById('importantNotice').value = savedImportant.body || '';
+      document.getElementById('important-image-url').value = savedImportant.imageUrl || '';
+      document.getElementById('important-start-date').value = savedImportant.startDate || '';
+      document.getElementById('important-end-date').value = savedImportant.endDate || '';
       showStatus('保存しました。公開画面に反映されます。');
     } catch (err) {
       showStatus(err.message, 'error');

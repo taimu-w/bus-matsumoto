@@ -210,7 +210,7 @@ async function search({ spotId, stopKey, q, radiusMeters, limit } = {}) {
   let countSpotName = UNRESOLVED_SPOT_NAME;
 
   if (spotId) {
-    spot = await touristSpots.getEnabledSpotById(spotId);
+    spot = await touristSpots.getSpotById(spotId);
     if (!spot) return notFound('spot-not-found', query);
     origin = { lat: spot.lat, lon: spot.lng, name: spot.name };
     resolvedFrom = 'spot';
@@ -236,7 +236,7 @@ async function search({ spotId, stopKey, q, radiusMeters, limit } = {}) {
       return { found: true, resolvedFrom: 'route', query, route: chosen.route };
     }
     if (chosen.kind === 'spot') {
-      spot = await touristSpots.getEnabledSpotById(chosen.spotId);
+      spot = await touristSpots.getSpotById(chosen.spotId);
       if (!spot) return notFound('spot-not-found', query);
       origin = { lat: spot.lat, lon: spot.lng, name: spot.name };
       resolvedFrom = 'fuzzy-spot';
@@ -361,7 +361,6 @@ async function getSpotEngagementStats({ from, to }) {
         spotId,
         name: agg.snapshotName,
         url: null,
-        enabled: false,
         listed: false,
         clicks: 0,
         searches: agg.searches

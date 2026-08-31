@@ -275,3 +275,101 @@ summary.list-none::-webkit-details-marker {
   min-height: 22rem;
   max-height: 46rem;
 }
+
+/* ==========================================================
+   観光スポットの写真カルーセル（1枚表示・自動送り・手動操作）
+   spot-photos.js が描画する。バス停ページ・経路検索のスポット詳細ポップアップ・
+   スポット検索で共用する。高さはルート要素の --spot-carousel-h で受け取る。
+   ========================================================== */
+.spot-carousel {
+  position: relative;
+  background: #f3f4f6;
+  overflow: hidden;
+}
+.spot-carousel-viewport {
+  overflow: hidden;
+}
+.spot-carousel-track {
+  display: flex;
+  transition: transform 0.4s ease;
+  /* 横スワイプはJS側で拾い、縦スクロールはブラウザに任せる */
+  touch-action: pan-y;
+}
+.spot-carousel-slide {
+  flex: 0 0 100%;
+  width: 100%;
+  height: var(--spot-carousel-h, 10rem);
+  object-fit: contain;
+  background: #f3f4f6;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.spot-carousel--single .spot-carousel-slide {
+  display: block;
+}
+
+/* 左右の送りボタン */
+.spot-carousel-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.28);
+  color: #1e293b;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.spot-carousel-nav:hover {
+  background: #ffffff;
+}
+.spot-carousel-nav:active {
+  transform: translateY(-50%) scale(0.9);
+}
+.spot-carousel-nav svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+.spot-carousel-prev {
+  left: 0.4rem;
+}
+.spot-carousel-next {
+  right: 0.4rem;
+}
+
+/* 下部インジケーター */
+.spot-carousel-dots {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0.45rem;
+  display: flex;
+  justify-content: center;
+  gap: 0.3rem;
+  pointer-events: none;
+}
+.spot-carousel-dot {
+  width: 0.44rem;
+  height: 0.44rem;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.55);
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.3);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+.spot-carousel-dot.is-active {
+  background: #ffffff;
+  transform: scale(1.3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spot-carousel-track {
+    transition: none;
+  }
+}

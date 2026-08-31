@@ -229,13 +229,11 @@
     }
   }
 
-  /** 観光スポットの写真（1枚以上）を横スクロールの帯で並べる。1枚だけなら全幅（busstop.jsと同じ考え方）。 */
+  /** 観光スポットの写真を1枚ずつ表示するカルーセル（spot-photos.js）。複数枚なら5秒間隔の自動送り＋手動操作。1枚なら全幅の静止画（busstop.jsと同じ考え方）。 */
   function spotPhotoStrip(spot) {
-    const photos = Array.isArray(spot.photoUrls) ? spot.photoUrls : [];
-    if (photos.length === 0) return '';
-    return `<div class="flex gap-1 overflow-x-auto bg-gray-100 rounded-xl mb-3">${photos
-      .map((u) => `<img src="${esc(u)}" alt="${esc(spot.name)}" class="h-40 object-contain shrink-0${photos.length === 1 ? ' w-full' : ''}">`)
-      .join('')}</div>`;
+    return window.SpotPhotos
+      ? window.SpotPhotos.markup(spot, { height: '10rem', wrapClass: 'rounded-xl mb-3' })
+      : '';
   }
 
   /** 公式サイトリンクのタップを記録する（掲載の有用性計測用、観光スポット情報_仕様書）。soft-fail。 */
@@ -275,6 +273,7 @@
     try {
       const res = await fetchJson(`${API_BASE}/tourist-spots/${encodeURIComponent(spotId)}`);
       body.innerHTML = renderSpotModalBody(res.spot);
+      if (window.SpotPhotos) window.SpotPhotos.hydrate(body);
       const link = body.querySelector('a[data-spot-link]');
       if (link) link.addEventListener('click', () => sendSpotLinkBeacon(link.dataset.spotLink));
     } catch (err) {
@@ -1370,6 +1369,10 @@
     }
     if (journey.realtime) {
       badges.push('<span class="text-[11px] font-bold text-green-800 bg-green-100 border border-green-300 px-2 py-1 rounded">● リアルタイム反映</span>');
+    }
+    // 管理画面「リアルタイム休止」中の路線を含む経路。定刻で成立しており探索結果は通常どおり。
+    if (journey.realtimeSuspended && !journey.realtime) {
+      badges.push('<span class="text-[11px] font-bold text-amber-800 bg-amber-100 border border-amber-300 px-2 py-1 rounded">運行情報を一時休止中（定刻表示）</span>');
     }
     if (journey.arrivalDayOffset > 0) {
       badges.push('<span class="text-[11px] font-bold text-indigo-800 bg-indigo-100 border border-indigo-300 px-2 py-1 rounded">翌日着</span>');

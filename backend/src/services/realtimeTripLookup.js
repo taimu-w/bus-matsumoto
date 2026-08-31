@@ -12,6 +12,7 @@ const { timeStrToMinutes, getServiceDateString } = require('../utils/time');
 const { getArrivalsForAssignment, describeSource } = require('./etaPredictor');
 const { describeArrivalMethod } = require('./passDetection');
 const { getRuntimeSetting } = require('./runtimeSettings');
+const { isRealtimeSuspended } = require('./realtimeSuspension');
 
 /**
  * daily_trips.start_time（"H:mm"）を便詳細URLの departure_time 表記（"0805"）に変換する。
@@ -47,6 +48,16 @@ function urlDepartureTimeToMinutes(value) {
  */
 async function findLiveAssignment(feedId, routeId, tripId, departureTime) {
   const qualifiedRouteId = qualifyRouteId(routeId, feedId);
+
+  // 管理画面「リアルタイム休止」でこの路線のリアルタイム表示が止められている場合は、
+  // 実際には担当車両が居ても「現在リアルタイム運行なし（null）」として返す。
+  // この関数の外部呼び出し元（経路検索の重ね合わせ・便詳細のリアルタイム切替・
+  // バス停の接近中バス）はいずれも null を soft-fail して定刻表示へ落ちるため、
+  // ここ1か所のガードで公開面のリアルタイム表示をまとめて止められる。
+  // 管理画面の運行監視は assignment_id 直引きの別経路（getAssignmentDetailForAdmin 等）で
+  // このガードを通らないため、従来どおり全路線を監視できる（docs/realtime-suspension.md）。
+  if (await isRealtimeSuspended(qualifiedRouteId)) return null;
+
   const targetMinutes = urlDepartureTimeToMinutes(departureTime);
   if (Number.isNaN(targetMinutes)) return null;
 

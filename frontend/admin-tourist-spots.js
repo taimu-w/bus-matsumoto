@@ -29,7 +29,7 @@
     container.innerHTML = spots.map((s) => {
       const photos = Array.isArray(s.photoUrls) ? s.photoUrls : [];
       return `
-      <div class="border rounded-xl overflow-hidden bg-white ${s.enabled ? '' : 'opacity-50'}">
+      <div class="border rounded-xl overflow-hidden bg-white">
         <div class="relative h-28 bg-slate-100 flex items-center justify-center overflow-hidden">
           ${photos.length
             ? `<img src="${escapeHtml(photos[0])}" alt="" class="w-full h-full object-cover">`
@@ -41,11 +41,7 @@
         <div class="p-3 space-y-2">
           <p class="font-mono text-[11px] text-slate-400 truncate">ID: ${escapeHtml(s.spotId)}</p>
           <p class="font-bold text-sm truncate">${escapeHtml(s.name)}</p>
-          <div class="flex items-center justify-between gap-2">
-            <label class="flex items-center gap-1 text-xs font-bold">
-              <input type="checkbox" data-id="${escapeHtml(s.spotId)}" class="spot-enabled-toggle" ${s.enabled ? 'checked' : ''}>
-              表示する
-            </label>
+          <div class="flex items-center justify-end gap-2">
             <button data-id="${escapeHtml(s.spotId)}" class="spot-delete-btn text-red-600 hover:text-red-800 hover:underline font-bold text-xs">削除</button>
           </div>
         </div>
@@ -53,19 +49,6 @@
     `;
     }).join('');
 
-    container.querySelectorAll('.spot-enabled-toggle').forEach((el) => {
-      el.addEventListener('change', async () => {
-        try {
-          await api(`/api/admin/tourist-spots/${encodeURIComponent(el.dataset.id)}`, {
-            method: 'PATCH',
-            body: JSON.stringify({ enabled: el.checked })
-          });
-          await loadTouristSpots();
-        } catch (err) {
-          showStatus(err.message, 'error');
-        }
-      });
-    });
     container.querySelectorAll('.spot-delete-btn').forEach((btn) => {
       btn.addEventListener('click', async () => {
         if (!window.confirm('この観光スポットを削除しますか？')) return;

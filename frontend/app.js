@@ -6,6 +6,8 @@ const openTripKeys = new Set();
 // 取得した最新データを保持しておく（再描画用）
 let currentBuses = [];
 let currentTimetable = [];
+// 管理画面「リアルタイム休止」でこの路線のリアルタイム表示が止められているか（/api/buses のレスポンス由来）
+let currentRealtimeSuspension = null; // null | { reason: string }
 let selectedRouteId = '11';
 let routeOptions = [];
 // smartBack()が「アプリ内で実際に画面遷移したか」を判定するためのカウンタ（renderCurrentRouteで加算）
@@ -314,6 +316,9 @@ async function loadAll() {
     // お気に入り描画用にデータをグローバル保持
     currentBuses = busData.buses || [];
     currentTimetable = timetable || [];
+    currentRealtimeSuspension = busData.realtimeSuspended
+      ? { reason: busData.suspensionReason || '' }
+      : null;
 
     const isFirstLoad = $('loading').style.display !== 'none';
     $('loading').style.display = 'none';
@@ -383,9 +388,21 @@ function linkifyNotice(text) {
   });
 }
 
+// お知らせ1件の中身（画像＋本文）をHTMLに組み立てる。トップ画面のお知らせ詳細・重要なお知らせで共用。
+function noticeContentHtml(notice) {
+  const parts = [];
+  if (notice.imageUrl) {
+    parts.push(`<img src="${escapeHtml(notice.imageUrl)}" alt="" class="w-full rounded-xl border border-gray-200 mb-3" loading="lazy">`);
+  }
+  if (notice.body) {
+    parts.push(`<div class="whitespace-pre-wrap leading-relaxed">${linkifyNotice(notice.body)}</div>`);
+  }
+  return parts.join('');
+}
+
 function openNoticeModal(notice) {
   $('notice-modal-title').textContent = notice.title || 'お知らせ';
-  $('notice-modal-body').innerHTML = notice.body ? linkifyNotice(notice.body) : '';
+  $('notice-modal-body').innerHTML = noticeContentHtml(notice);
   openModal('notice-modal');
 }
 
@@ -397,13 +414,13 @@ function renderNotices(settings) {
   // 配信期間によるフィルタはサーバー側（GET /api/settings）で済んでいる。
   const notices = Array.isArray(settings.notices) ? settings.notices : [];
   for (const notice of notices) {
-    if (!notice || !notice.title) continue;
+    if (!notice || (!notice.title && !notice.body && !notice.imageUrl)) continue;
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'w-full text-left bg-white p-4 rounded-xl border border-gray-300 flex items-center gap-3 active:scale-[0.99] transition-transform';
     btn.innerHTML = `
       <span class="shrink-0 text-lg">📢</span>
-      <span class="flex-1 font-bold text-gray-900 leading-snug">${escapeHtml(notice.title)}</span>
+      <span class="flex-1 font-bold text-gray-900 leading-snug">${escapeHtml(notice.title || 'お知らせ')}</span>
       <svg class="shrink-0 w-4 h-4 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
     `;
     btn.addEventListener('click', () => openNoticeModal(notice));
@@ -412,11 +429,14 @@ function renderNotices(settings) {
 
   // 重要なお知らせのポップアップは、同じ内容を毎回の更新のたびに出し直さないよう、
   // 内容ごとに一度表示したら localStorage に記録し、次回以降は内容が変わるまで出さない。
-  if (settings.importantNotice) {
-    if (localStorage.getItem(IMPORTANT_NOTICE_SHOWN_KEY) !== settings.importantNotice) {
-      $('important-body').textContent = settings.importantNotice;
+  // 配信期間のフィルタはサーバー側（GET /api/settings）で済んでいる。
+  const important = settings.importantNotice;
+  if (important && (important.body || important.imageUrl)) {
+    const signature = `${important.body} ${important.imageUrl}`;
+    if (localStorage.getItem(IMPORTANT_NOTICE_SHOWN_KEY) !== signature) {
+      $('important-body').innerHTML = noticeContentHtml(important);
       openModal('important-modal');
-      localStorage.setItem(IMPORTANT_NOTICE_SHOWN_KEY, settings.importantNotice);
+      localStorage.setItem(IMPORTANT_NOTICE_SHOWN_KEY, signature);
     }
   }
 }
@@ -440,7 +460,25 @@ function findLastArrivedIndex(stops) {
 function renderBuses(buses) {
   const container = $('realtime-buses');
   const emptyNote = $('realtime-empty');
+  const suspendedNote = $('realtime-suspended');
   container.innerHTML = '';
+
+  // 管理画面でこの路線のリアルタイム表示が休止されている場合は、
+  // バスカードの代わりに休止メッセージを出す（下の「時刻表（参考）」は通常どおり）。
+  if (currentRealtimeSuspension) {
+    emptyNote.style.display = 'none';
+    if (suspendedNote) {
+      suspendedNote.classList.remove('hidden');
+      const reasonEl = $('realtime-suspended-reason');
+      if (reasonEl) {
+        const reason = (currentRealtimeSuspension.reason || '').trim();
+        reasonEl.textContent = reason ? `理由：${reason}` : '';
+        reasonEl.classList.toggle('hidden', !reason);
+      }
+    }
+    return;
+  }
+  if (suspendedNote) suspendedNote.classList.add('hidden');
 
   if (buses.length === 0) {
     emptyNote.style.display = 'block';
@@ -651,6 +689,18 @@ function routeHref(routeId) {
     : `#/realtime/default/${encodeURIComponent(routeId)}`;
 }
 
+/**
+ * バスマップの路線フィルタをハッシュURLに変換する（routeHref と同じ組み立て）。
+ * 'all'（既定）は素の #/busmap。それ以外は #/busmap/<feedId>/<routeId>。
+ */
+function busMapHref(routeFilter) {
+  if (!routeFilter || routeFilter === 'all') return '#/busmap';
+  const [feedId, originalRouteId] = String(routeFilter).split(':');
+  return originalRouteId
+    ? `#/busmap/${encodeURIComponent(feedId)}/${encodeURIComponent(originalRouteId)}`
+    : `#/busmap/default/${encodeURIComponent(routeFilter)}`;
+}
+
 async function ensureRouteOptions() {
   if (routeOptions.length) return;
   const routeData = await fetchJson(`${API_BASE}/routes`);
@@ -696,7 +746,16 @@ function renderRouteList() {
 function parseHashRoute() {
   const parts = (window.location.hash.replace(/^#/, '') || '/').split('/').filter(Boolean);
   if (parts[0] === 'search') return { page: 'search' };
-  if (parts[0] === 'busmap') return { page: 'busmap' };
+  if (parts[0] === 'busmap') {
+    // #/busmap/<feedId>/<routeId> は路線フィルタ（realtime-detail と同じ組み立て）。
+    // 省略時（素の #/busmap）は routeId:null ＝ 全路線。
+    if (parts.length >= 3) {
+      const feedId = decodeURIComponent(parts[1]);
+      const routeId = decodeURIComponent(parts.slice(2).join('/'));
+      return { page: 'busmap', routeId: feedId === 'default' ? routeId : `${feedId}:${routeId}` };
+    }
+    return { page: 'busmap', routeId: null };
+  }
   if (parts[0] === 'map') return { page: 'map' };
   if (parts[0] === 'favorites') return { page: 'favorites' };
   if (parts[0] !== 'realtime') return { page: 'home' };
@@ -740,6 +799,10 @@ let busMarkers = {};
 let userMarker = null;
 let busMapTimer = null;
 let busMapFitted = false;
+// バスマップの路線フィルタ。'all'＝全路線、それ以外は qualified route id（feedId:routeId）。
+// 既定は必ず 'all'。1路線に決め打ちすると、その路線が運行していない時間帯に0台になる
+// （既知の注意点。利用者が明示的に選んだときだけ絞り込む）。
+let busMapRouteFilter = 'all';
 
 function initializeMap() {
   const mapEl = $('map');
@@ -878,18 +941,62 @@ function setBusMapStatus(text) {
   if (el) el.textContent = text;
 }
 
+/** 現在の路線フィルタの表示名（絞り込みなしなら空文字）。ステータス表示に添える。 */
+function busMapFilterRouteName() {
+  if (busMapRouteFilter === 'all') return '';
+  const route = routeOptions.find((r) => r.id === busMapRouteFilter);
+  return route ? (route.name || route.short_name || '') : '';
+}
+
+/** バスマップの路線フィルタ用セレクトに選択肢を流し込み、現在値へ同期する。 */
+function syncBusMapRouteSelector() {
+  const selector = $('busmap-route-select');
+  if (!selector) return;
+
+  // 保存済みフィルタが現在の路線一覧に無ければ全路線へ戻す（路線が消えた場合の保険）。
+  if (busMapRouteFilter !== 'all' && !routeOptions.some((r) => r.id === busMapRouteFilter)) {
+    busMapRouteFilter = 'all';
+  }
+
+  selector.innerHTML = '<option value="all">すべての路線</option>';
+  routeOptions.forEach((route) => {
+    const option = document.createElement('option');
+    option.value = route.id;
+    // 表示名は必ずGTFSのroute名/略称から。内部IDは利用者に見せない。
+    option.textContent = route.name || route.short_name || route.id;
+    selector.appendChild(option);
+  });
+  selector.value = busMapRouteFilter;
+}
+
 async function loadBusMapBuses() {
   if (!mapInstance) return;
   try {
-    // routeIdを付けない＝全路線。1路線に決め打ちすると、その路線が運行していない
-    // 時間帯にバスが1台も出ない（これが「バスが表示されない」原因だった）。
-    const data = await fetchJson(`${API_BASE}/buses-for-map`);
+    // 既定（busMapRouteFilter==='all'）は routeId を付けない＝全路線。
+    // 1路線に決め打ちすると、その路線が運行していない時間帯にバスが1台も出ない
+    // （これが「バスが表示されない」原因だった）。絞り込みは利用者が明示的に
+    // 路線を選んだときだけ。
+    const query = busMapRouteFilter !== 'all'
+      ? `?routeId=${encodeURIComponent(busMapRouteFilter)}`
+      : '';
+    const data = await fetchJson(`${API_BASE}/buses-for-map${query}`);
     const buses = data.buses || [];
     updateBusMarkers(buses);
     const time = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
-    setBusMapStatus(buses.length > 0
-      ? `運行中 ${buses.length}台（${time} 更新）`
-      : `現在運行中のバスはありません（${time} 更新）`);
+    const routeName = busMapFilterRouteName();
+    const prefix = routeName ? `${routeName}：` : '';
+
+    // 管理画面「リアルタイム休止」中の路線はバスがそもそも返ってこない。
+    // 選択中の路線が休止対象なら理由を明示し、全路線表示なら一部休止中である旨を小さく添える。
+    const suspendedRouteIds = data.suspendedRouteIds || [];
+    if (busMapRouteFilter !== 'all' && suspendedRouteIds.includes(busMapRouteFilter)) {
+      setBusMapStatus(`${prefix}リアルタイム運行情報を一時休止しています（${time} 更新）`);
+    } else {
+      const suffix = suspendedRouteIds.length > 0 ? '／一部路線は運行情報を休止中' : '';
+      setBusMapStatus(buses.length > 0
+        ? `${prefix}運行中 ${buses.length}台（${time} 更新）${suffix}`
+        : `${prefix}現在運行中のバスはありません（${time} 更新）${suffix}`);
+    }
   } catch (err) {
     console.error('バス情報取得エラー:', err);
     setBusMapStatus('バス情報の取得に失敗しました。');
@@ -947,6 +1054,24 @@ async function renderBusMap() {
   setPageTitle('バスマップ', 'Bus Map');
   $('section-busmap').style.display = 'block';
   setBusMapStatus('バス位置を読み込み中...');
+
+  // 路線フィルタ（#/busmap/<feedId>/<routeId>）をURLから復元する。
+  // 選択肢の表示に路線一覧が要るので先に取得するが、取得失敗は致命ではない
+  // （フィルタUIが「すべての路線」だけになるだけで、地図は従来どおり動く）。
+  try {
+    await ensureRouteOptions();
+  } catch (err) {
+    console.error('路線一覧の取得に失敗（バスマップのフィルタは全路線のまま）:', err);
+  }
+  const hashRouteId = parseHashRoute().routeId;
+  busMapRouteFilter = (hashRouteId && routeOptions.some((r) => r.id === hashRouteId))
+    ? hashRouteId
+    : 'all';
+  // ハッシュに無効な路線IDが載っていたら素の #/busmap へ整える（履歴は積まない）。
+  if (hashRouteId && busMapRouteFilter === 'all') {
+    history.replaceState(null, '', busMapHref('all'));
+  }
+  syncBusMapRouteSelector();
 
   if (!initializeMap()) return;
 
@@ -1126,6 +1251,7 @@ async function checkServerLoad() {
 /* ---------- 初期化 ---------- */
 const refreshBtn = $('refresh-btn');
 const routeSelect = $('route-select');
+const busMapRouteSelect = $('busmap-route-select');
 const autoRefreshToggle = $('auto-refresh-toggle');
 
 if (refreshBtn) refreshBtn.addEventListener('click', () => {
@@ -1135,6 +1261,19 @@ if (routeSelect) {
   routeSelect.addEventListener('change', (e) => {
     selectedRouteId = e.target.value;
     loadAll();
+  });
+}
+if (busMapRouteSelect) {
+  busMapRouteSelect.addEventListener('change', (e) => {
+    busMapRouteFilter = e.target.value || 'all';
+    // URLを同期する。ハッシュ代入だと hashchange → renderCurrentRoute で地図が
+    // 作り直され、利用者の表示位置が戻ってしまう。replaceState はイベントを
+    // 発火させないので、地図はそのままにフィルタだけ切り替えられる。
+    history.replaceState(null, '', busMapHref(busMapRouteFilter));
+    // 絞り込んだ結果に表示範囲を合わせ直すため、フィット済みフラグだけ戻す
+    // （地図インスタンス・マーカーは作り直さない）。
+    busMapFitted = false;
+    loadBusMapBuses();
   });
 }
 if (autoRefreshToggle) {

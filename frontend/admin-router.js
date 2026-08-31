@@ -23,10 +23,11 @@ const SECTION_LOADERS = {
   'api-stats': () => window.AdminApiStats.load(),
   'job-monitor': () => window.AdminJobMonitor.load(),
   notices: () => window.AdminNotices.load(),
-  'platform-notices': () => window.AdminPlatformNotices.load(),
+  'busstop-notices': () => window.AdminBusstopNotices.load(),
   holidays: () => window.AdminHolidays.load(),
   'route-mappings': () => window.AdminRouteMappings.load(),
   'direction-rules': () => window.AdminDirectionRules.load(),
+  'realtime-suspension': () => window.AdminRuntimeSuspension.load(),
   'runtime-settings': () => window.AdminRuntimeSettings.load(),
   'tourist-spots': () => window.AdminTouristSpots.load(),
   'tourist-spot-clicks': () => window.AdminTouristSpotClicks.load(),
@@ -56,6 +57,7 @@ function currentHashSectionId() {
 }
 
 function renderSection(id) {
+  hideStatus(); // 前のセクションのエラー・完了通知を持ち越さない
   document.querySelectorAll('.section').forEach((el) => el.classList.add('hidden'));
   const target = document.getElementById(`section-${id}`);
   if (target) target.classList.remove('hidden');

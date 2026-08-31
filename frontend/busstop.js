@@ -464,8 +464,8 @@
         </div>
       </div>
 
-      <!-- 乗り場別お知らせ（このバス停でできることの下。乗り場が確定していて、かつお知らせがあるときだけ中身を入れる） -->
-      <div id="bs-platform-notice"></div>
+      <!-- バス停お知らせ（このバス停でできることの下。バス停単位＋乗り場単位。お知らせがあるときだけ中身を入れる） -->
+      <div id="bs-notices"></div>
 
       <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-200 p-4">
         <div class="flex items-center justify-between mb-2">
@@ -488,25 +488,30 @@
     loadApproaching(data, seq, platform);
     manageApproachingPolling(data, seq, platform);
     loadNearbySpots(data, seq);
-    loadPlatformNotice(data, seq, platform_);
+    loadBusstopNotices(data, seq, platform_);
   }
 
-  /* ---------- 乗り場別お知らせ（docs/platform-notices.md） ----------
-   * 「このバス停でできること」の下に、管理画面「乗り場お知らせ」で登録された画像/リンクを出す。
-   * - 乗り場が確定しているとき（乗り場別表示、または乗り場が1か所だけのバス停）だけ取得する。
-   *   すべての乗り場を統合表示しているときは出さない。
+  /* ---------- バス停お知らせ（docs/busstop-notices.md） ----------
+   * 「このバス停でできること」の下に、管理画面「バス停お知らせ」で登録されたお知らせ
+   * （見出し・画像・本文を任意に組み合わせ）を出す。
+   * - バス停単位（scope='stop'）は表示モードによらず常に取得・表示する。
+   * - 乗り場単位（scope='platform'）は乗り場が確定しているとき（乗り場別表示、または乗り場が
+   *   1か所だけのバス停）だけ表示する。すべての乗り場を統合表示しているときは出さない。
    * - お知らせが無ければセクションごと出さない（soft-fail：取得失敗時も何も出さない）。 */
-  async function loadPlatformNotice(data, seq, platformObj) {
-    const container = document.getElementById('bs-platform-notice');
+  async function loadBusstopNotices(data, seq, platformObj) {
+    const container = document.getElementById('bs-notices');
     if (!container) return;
     container.innerHTML = '';
-    if (!platformObj) return; // 全乗り場統合表示 -> お知らせは出さない
 
     try {
-      const query = new URLSearchParams({ platform: platformObj.stopId });
-      const res = await fetchJson(`${API_BASE}/busstop/${encodeURIComponent(data.stop.stopKey)}/platform-notice?${query.toString()}`);
+      const query = new URLSearchParams();
+      if (platformObj) query.set('platform', platformObj.stopId);
+      const qs = query.toString();
+      const res = await fetchJson(
+        `${API_BASE}/busstop/${encodeURIComponent(data.stop.stopKey)}/notices${qs ? `?${qs}` : ''}`
+      );
       if (seq !== renderSeq) return;
-      renderPlatformNotice(container, res.notices || [], platformObj, data);
+      renderBusstopNotices(container, res, platformObj, data);
     } catch (err) {
       if (seq !== renderSeq) return;
       // 取得失敗はバス停情報自体の表示を妨げない（soft-fail）
@@ -514,44 +519,26 @@
     }
   }
 
-  function renderPlatformNotice(container, notices, platformObj, data) {
-    if (!notices.length) {
-      container.innerHTML = '';
-      return;
-    }
+  /** 1件のお知らせ（見出し＋画像＋本文）を描画する。中身が空なら '' を返す。 */
+  function noticeItemHtml(notice) {
+    const title = notice.title
+      ? `<p class="font-bold text-gray-900 text-sm mb-1.5">${esc(notice.title)}</p>`
+      : '';
+    const image = notice.imageUrl
+      ? `<img src="${esc(notice.imageUrl)}" alt="${esc(notice.title || 'お知らせ')}"
+             class="w-full rounded-xl border border-amber-200 object-contain bg-white mb-2" loading="lazy">`
+      : '';
+    const body = notice.body
+      ? `<p class="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">${linkifyNotice(notice.body)}</p>`
+      : '';
+    if (!image && !body) return '';
+    return `<div>${title}${image}${body}</div>`;
+  }
 
-    const heading = data.hasMultiplePlatforms
-      ? `${esc(platformLabel(platformObj))}のお知らせ`
-      : 'この乗り場のお知らせ';
-
-    const items = notices.map((notice) => {
-      const title = notice.title
-        ? `<p class="font-bold text-gray-900 text-sm mb-1.5">${esc(notice.title)}</p>`
-        : '';
-      if (notice.kind === 'image' && notice.imageUrl) {
-        return `
-          <div>
-            ${title}
-            <img src="${esc(notice.imageUrl)}" alt="${esc(notice.title || 'お知らせ')}"
-                 class="w-full rounded-xl border border-amber-200 object-contain bg-white" loading="lazy">
-          </div>`;
-      }
-      if (notice.kind === 'link' && notice.linkBody) {
-        return `
-          <div>
-            ${title}
-            <p class="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">${linkifyNotice(notice.linkBody)}</p>
-          </div>`;
-      }
-      return '';
-    }).join('');
-
-    if (!items.trim()) {
-      container.innerHTML = '';
-      return;
-    }
-
-    container.innerHTML = `
+  function noticeCardHtml(heading, notices) {
+    const items = (notices || []).map(noticeItemHtml).join('');
+    if (!items.trim()) return '';
+    return `
       <div class="bg-amber-50 rounded-2xl shadow-sm border-2 border-amber-200 p-4 mb-4">
         <div class="flex items-center gap-2 mb-3">
           <span class="shrink-0 text-base">📢</span>
@@ -559,6 +546,17 @@
         </div>
         <div class="space-y-4">${items}</div>
       </div>`;
+  }
+
+  function renderBusstopNotices(container, res, platformObj, data) {
+    const platformHeading = platformObj && data.hasMultiplePlatforms
+      ? `${platformLabel(platformObj)}のお知らせ`
+      : 'この乗り場のお知らせ';
+
+    // バス停単位を先、乗り場単位を後に並べる。
+    const html = noticeCardHtml('このバス停のお知らせ', res.stopNotices)
+      + (platformObj ? noticeCardHtml(platformHeading, res.platformNotices) : '');
+    container.innerHTML = html;
   }
 
   /** 表示モード切替（標柱が複数ある場合のみ表示する。仕様書 3.4 A） */
@@ -983,13 +981,9 @@
     }
   }
 
-  /** 観光スポットの写真（1枚以上）を横スクロールの帯で並べる。1枚だけなら全幅。 */
+  /** 観光スポットの写真を1枚ずつ表示するカルーセル（spot-photos.js）。複数枚なら5秒間隔の自動送り＋手動操作。1枚なら全幅の静止画。 */
   function spotPhotoStrip(spot) {
-    const photos = Array.isArray(spot.photoUrls) ? spot.photoUrls : [];
-    if (photos.length === 0) return '';
-    return `<div class="flex gap-1 overflow-x-auto bg-gray-100">${photos
-      .map((u) => `<img src="${esc(u)}" alt="${esc(spot.name)}" class="h-32 object-contain shrink-0${photos.length === 1 ? ' w-full' : ''}">`)
-      .join('')}</div>`;
+    return window.SpotPhotos ? window.SpotPhotos.markup(spot, { height: '8rem' }) : '';
   }
 
   /** 公式サイトリンクのタップを記録する（掲載の有用性計測用、観光スポット情報_仕様書）。soft-fail。 */
@@ -1035,6 +1029,8 @@
     container.querySelectorAll('a[data-spot-link]').forEach((a) => {
       a.addEventListener('click', () => sendSpotLinkBeacon(a.dataset.spotLink));
     });
+
+    if (window.SpotPhotos) window.SpotPhotos.hydrate(container);
   }
 
   /* ---------- エントリポイント ---------- */

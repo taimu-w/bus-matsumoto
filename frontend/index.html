@@ -194,6 +194,14 @@
       <!-- ステータス表示だけは「稼働中のバス台数」というリアルタイム性を持つ情報のため、
            他のライブ表示（リアルタイム運行中バッジ等）と合わせて緑を残す。 -->
       <p id="busmap-status" class="px-4 py-2 text-xs font-bold text-green-900 bg-green-50 border-b border-green-100">バス位置を読み込み中...</p>
+      <!-- 路線で絞り込むフィルタ。既定は「すべての路線」。選択は #/busmap/<feedId>/<routeId>
+           としてURLに載せる（共有・リロードで復元できる）。app.js側で選択肢を流し込む。 -->
+      <div class="px-4 py-2.5 border-b border-blue-100 flex items-center gap-2">
+        <label for="busmap-route-select" class="text-xs font-bold text-blue-900 shrink-0">路線で絞り込み</label>
+        <select id="busmap-route-select" class="flex-1 min-w-0 text-sm font-bold text-blue-900 bg-blue-50 border-2 border-blue-100 rounded-lg px-2 py-1.5 outline-none focus:border-blue-400">
+          <option value="all">すべての路線</option>
+        </select>
+      </div>
       <!-- Leafletは高さ0のコンテナだと何も描画しないので、高さはCSSで必ず確定させる -->
       <div id="map" class="map-canvas"></div>
     </div>
@@ -236,6 +244,11 @@
       </h2>
       <div id="realtime-buses" class="space-y-4"></div>
       <p id="realtime-empty" class="text-sm text-gray-500 px-1" style="display:none;">現在リアルタイムで検知しているバスはありません。</p>
+      <div id="realtime-suspended" class="hidden rounded-xl border-2 border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+        <p class="font-bold">この路線のリアルタイム運行情報は一時休止しています。</p>
+        <p id="realtime-suspended-reason" class="mt-1 hidden"></p>
+        <p class="mt-1 text-amber-800">下の時刻表は通常どおりご利用いただけます。</p>
+      </div>
     </div>
 
     <!-- 時刻表（参考）セクション -->
@@ -419,8 +432,10 @@
 </div>
 
 
-<!-- favorites.js・timetable.js・stopmap.js・busstop.js・routesearch.js・spotsearch.js・onboarding.js は app.js より先に読み込む（app.js の初回ルーティングから参照するため） -->
+<!-- favorites.js・spot-photos.js・timetable.js・stopmap.js・busstop.js・routesearch.js・spotsearch.js・onboarding.js は app.js より先に読み込む（app.js の初回ルーティングから参照するため）。
+     spot-photos.js は busstop.js・routesearch.js・spotsearch.js が観光スポットの写真描画に使う共通モジュールなので、それらより先に置く。 -->
 <script src="/favorites.js"></script>
+<script src="/spot-photos.js"></script>
 <script src="/timetable.js"></script>
 <script src="/stopmap.js"></script>
 <script src="/busstop.js"></script>
