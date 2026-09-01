@@ -86,7 +86,7 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 
 **到着予測はパイプラインの⑧番目のステップとしてプリコンピュートされます。** `etaPredictor.js`の`computeAndStoreAllArrivals()`が`delayCalc()`の直後に呼ばれ、全active割り当て（担当・候補とも）の到着予測を一括計算して`trip_arrival_predictions`テーブルへUPSERTします。計算アルゴリズム本体は`predictArrivals(client, assignmentId)`（引数は車両IDではなく**割り当てID**）。`/api/buses`・ルート検索は`getArrivalsForAssignment(client, assignmentId)`で`trip_arrival_predictions`から読み出すだけで、最大60秒のラグと引き換えにDBスパイクと重複計算を排除しています。48時間以上前の予測は`computeAndStoreAllArrivals()`内で毎回掃除されます。詳細は[docs/eta-prediction-algorithm.md](docs/eta-prediction-algorithm.md)。
 
-`backend/src/utils/time.js`と`utils/geo.js`は、ほぼすべてのサービスで使われる共通ヘルパー（時刻文字列の変換、遅延計算、ハバーサイン距離）です。
+`backend/src/utils/time.js`と`utils/geo.js`は、ほぼすべてのサービスで使われる共通ヘルパー（時刻文字列の変換、遅延計算、ハバーサイン距離）です。`utils/geo.js`は徒歩の所要時間の実態推定（`estimateWalkMinutes`/`estimateWalkSeconds`。「直線距離×迂回係数＋信号バッファ」で、迂回係数・信号バッファとも直線距離に応じて増やす区分線形）も持ち、時刻表検索の「近くのバス停」・スポット検索・観光スポット情報・経路検索の徒歩接続で共通に使います（表示する距離は直線距離のまま、徒歩分数だけ実態寄りに換算。GPS照合・通過判定には使いません）。
 
 ### 複数フィード対応の設計
 

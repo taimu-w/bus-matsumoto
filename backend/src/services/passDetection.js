@@ -11,6 +11,10 @@
 //      所要時間が算出できない場合のみ、従来の固定値20分にフォールバックする。
 //   ③ ETAによる時間制約（ETA-7分 〜 ETA+20分）を満たすバス停だけを候補とする
 //      （循環線対策の追加強化。①②の既存仕様はそのまま維持し、削除・弱体化しない）
+//   ④ 同名バス停の通過順序ゲート：往復非分離の循環線（美ヶ原温泉線・浅間線など）で
+//      同じ物理バス停を2回通るとき、1回目（手前のseq_order）がまだ到着済になっていない
+//      うちは2回目以降の同名行を付近入り候補から外す（computeSameNameOrderGate）。
+//      「2回目のバス停通過時刻が1回目の通過時刻になる」誤りを防ぐ。①②③はそのまま維持する。
 //
 // ③で使うETAは、trip_arrival_predictionsに保存されている値をpass()の開始時点で
 // 読み取ったものを使う。パイプラインは 6:pass() → 7:delayCalc() → 8:computeAndStoreAllArrivals()
@@ -176,6 +180,43 @@ function computeEarlyExclusionMin(assignment, stopMaster) {
 }
 
 /**
+ * 【循環線対策④（同名バス停の通過順序ゲート）— 純粋関数】
+ * 循環線・往復非分離路線（美ヶ原温泉線・浅間線など）では、同じ物理バス停を1便で
+ * 複数回通る。往路の標柱と復路の標柱はGTFS上おおむね別 stop_id（同名で十数〜百数十m
+ * 離れて隣り合う。まれに完全に同一の stop_id）で、trip_stop_progress には seq_order
+ * 違いの同名複数行として現れる。その複数点は STOP_RADIUS_METERS（既定120m）圏内に
+ * 収まるほど近いことが多い。
+ *
+ * 1回目（手前の seq_order）がまだ到着済になっていないうちに、GPSのばらつきで2回目以降
+ * （先の seq_order）の行へ最近傍マッチしてしまうと、その行へ1回目相当の早い時刻が入り、
+ * promoteStuckNearbyStops / 線形補間 で確定して「2回目のバス停通過時刻が1回目の通過時刻に
+ * なる」誤りが起きる（美ヶ原温泉線の新井橋など、実データで確認済み）。
+ *
+ * バスは同じ場所を必ず 1回目 → 2回目 の順にしか通れないので、「同名のより手前のバス停が
+ * まだ到着済になっていない」行は付近入り候補から外す（seq_order を返す）。手前の同名が
+ * すべて到着済になれば従来どおり候補に戻る。1回しか通らない通常のバス停・同名の1回目・
+ * 手前が片付いた2回目はいずれもゲートに入らない（＝現行の挙動を変えない）。
+ *
+ * @param {Array<{seq_order:number, name:string, status:string}>} stopMaster
+ * @returns {Set<number>} 付近入りを保留する seq_order の集合
+ */
+function computeSameNameOrderGate(stopMaster) {
+  const gated = new Set();
+  const seenNames = new Set();
+  const earlierUnarrivedNames = new Set();
+  // getStopMaster は seq_order 昇順だが、純粋関数として順序に依存しないよう内部でソートする。
+  const bySeq = [...stopMaster].sort((a, b) => a.seq_order - b.seq_order);
+  for (const s of bySeq) {
+    if (seenNames.has(s.name) && earlierUnarrivedNames.has(s.name)) {
+      gated.add(s.seq_order);
+    }
+    seenNames.add(s.name);
+    if (s.status !== '到着済') earlierUnarrivedNames.add(s.name);
+  }
+  return gated;
+}
+
+/**
  * 【付近入り(entry)】判定アルゴリズム本体（①②③）は従来のpassStep1And3から変更していない。
  * 変わったのは判定結果の意味づけだけ：「到着済に確定」ではなく「付近状態に入る（最初の
  * 近接観測）」を表す候補を返す。到着済・付近いずれかの状態のバス停は、既に確定済みか
@@ -206,6 +247,11 @@ function passStepEntry(assignment, stopMaster, gpsRows, radiusMeters, etaByStopI
   const excludedSet = new Set(
     stopMaster.filter((s) => s.status === '到着済' || s.status === '付近').map((s) => s.seq_order)
   );
+
+  // 【循環線対策④（同名バス停の通過順序）】手前の同名バス停がまだ到着済でないうちは、
+  // その先の同名の行（2回目以降の通過）を付近入り候補から外す（詳細は computeSameNameOrderGate）。
+  const sameNameOrderGate = computeSameNameOrderGate(stopMaster);
+
   const tentativeMatches = [];
 
   for (const gps of gpsRows) {
@@ -224,6 +270,9 @@ function passStepEntry(assignment, stopMaster, gpsRows, radiusMeters, etaByStopI
 
       // 【循環線対策②】初期の誤判定防止（始発からearlyExclusionMin分以内は後半80%を除外）
       if (!Number.isNaN(minSinceStart) && minSinceStart < earlyExclusionMin && stop.seq_order / totalStops > 0.8) continue;
+
+      // 【循環線対策④（同名バス停の通過順序）】1回目がまだ到着済でない同名の2回目以降は取らない
+      if (sameNameOrderGate.has(stop.seq_order)) continue;
 
       // 【距離制約】STOP_RADIUS_METERS以内のバス停だけを候補とする
       const dist = haversineDistanceMeters(gps.lat, gps.lon, stop.lat, stop.lon);
@@ -929,6 +978,8 @@ module.exports = {
   pass,
   processAssignmentPass,
   shouldConfirmDeparture,
+  passStepEntry,
+  computeSameNameOrderGate,
   passStepConfirm,
   buildNearbyTrackingState,
   findNextUnarrivedStop,

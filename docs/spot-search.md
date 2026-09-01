@@ -58,6 +58,9 @@ GTFSインメモリインデックス（`gtfsTimetable.js`）と `tourist_spots`
 
 - `gtfsTimetable.searchNearbyStops()` で近い順に取得し、**半径内（既定500m、`?radius=` で100〜3000m）**・
   **距離昇順で最大 `?limit` 件（既定8、上限20）**。半径は観光スポット情報機能の初期値に合わせてある。
+- 半径の判定・並び順・表示する `distanceMeters` はいずれも**直線距離（ハバーサイン）**。
+  表示する `walkMinutes` だけは `utils/geo.js` の `estimateWalkMinutes()`（直線距離に迂回係数・
+  信号待ちを織り込んだ推定。距離が伸びるほど大きくなる）で換算する。
 - 対象がバス停のときは、そのバス停自身を `primaryStop`（`isPrimary: true`・距離0）として先頭に置き、
   付近のバス停一覧からは除外する。
 - `routes` は「対象バス停＋付近のバス停」を通る路線を `feedId:routeId` で重複排除し、

@@ -8,12 +8,11 @@
 // 指定する文字列。名称による名寄せはせず、IDが同じなら名称が変わっても同一スポットとして扱う。
 
 const pool = require('../config/db');
-const { haversineDistanceMeters } = require('../utils/geo');
+const { haversineDistanceMeters, estimateWalkMinutes } = require('../utils/geo');
 const { kanaToRomaji, capitalizeRomaji, normalizeSearchText } = require('../utils/kana');
 
 const DEFAULT_NEARBY_RADIUS_METERS = 500; // バス停統合しきい値400mを参考にした初期値
 const DEFAULT_NEARBY_LIMIT = 5;
-const WALK_SPEED_METERS_PER_MIN = 80; // gtfsTimetable.js / gtfsRouteSearch.js と同値
 
 // 公式サイトリンクのタップ数集計（tourist_spot_link_clicks）の保持日数。
 // 「最大1年間」のルックバックが常に成立するよう13か月弱を確保する（visitorTracker.js と
@@ -77,8 +76,9 @@ async function findNearbySpots(lat, lon, { radiusMeters = DEFAULT_NEARBY_RADIUS_
   candidates.sort((a, b) => a.distanceMeters - b.distanceMeters);
   return candidates.slice(0, limit).map(({ row, distanceMeters }) => ({
     ...serializeRow(row),
+    // 距離は直線距離のまま。徒歩分数だけ迂回・信号待ちを織り込んだ推定にする（utils/geo.js）。
     distanceMeters: Math.round(distanceMeters),
-    walkMinutes: Math.max(1, Math.round(distanceMeters / WALK_SPEED_METERS_PER_MIN))
+    walkMinutes: estimateWalkMinutes(distanceMeters)
   }));
 }
 

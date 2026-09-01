@@ -23,7 +23,7 @@ const {
 } = require('./gtfsTimetable');
 const { expandFrequencies } = require('./gtfsFrequencies');
 const { getFareIndex, lookupFare } = require('./gtfsFare');
-const { haversineDistanceMeters } = require('../utils/geo');
+const { haversineDistanceMeters, estimateWalkMinutes, estimateWalkSeconds } = require('../utils/geo');
 const { findLiveAssignment, buildBusEntry } = require('./realtimeTripLookup');
 const { getSuspendedRouteIdSet } = require('./realtimeSuspension');
 const { qualifyRouteId } = require('./gtfsFeedManager');
@@ -37,7 +37,8 @@ const DAY_SECONDS = 86400;
 // 「道路の向かい側の別名バス停」などをつなぐための最重要パラメータ（仕様書7章）。
 const WALK_RADIUS_METERS = 400;
 const WALK_RADIUS_RELAXED_METERS = 800;
-const WALK_SPEED_METERS_PER_MIN = 80;
+// 徒歩の所要時間は utils/geo.js の estimateWalkSeconds/estimateWalkMinutes（直線距離に迂回係数・
+// 信号待ちを織り込んだ推定）を使う。乗り継ぎ可否の判定は上の直線距離しきい値のまま。
 const MIN_WALK_SECONDS = 60;
 // 同一バス停での乗り継ぎに必要な最低の余裕時間
 const MIN_TRANSFER_SECONDS = 60;
@@ -288,10 +289,7 @@ function buildFootpaths(index, radiusMeters) {
       links.push({
         groupKey: other.groupKey,
         distanceMeters: Math.round(distance),
-        walkSeconds: Math.max(
-          MIN_WALK_SECONDS,
-          Math.round((distance / WALK_SPEED_METERS_PER_MIN) * 60)
-        )
+        walkSeconds: Math.max(MIN_WALK_SECONDS, estimateWalkSeconds(distance))
       });
     }
     if (links.length > 0) {
@@ -1542,8 +1540,9 @@ function buildSpotWalkInfo(endpoint, actualGroupKey) {
   const distanceMeters = endpoint.distanceByGroupKey.get(actualGroupKey);
   if (!Number.isFinite(distanceMeters)) return null;
   return {
+    // 距離は直線距離のまま。徒歩分数だけ迂回・信号待ち込みの推定にする（utils/geo.js）。
     distanceMeters: Math.round(distanceMeters),
-    walkMinutes: Math.max(1, Math.round(distanceMeters / WALK_SPEED_METERS_PER_MIN))
+    walkMinutes: estimateWalkMinutes(distanceMeters)
   };
 }
 

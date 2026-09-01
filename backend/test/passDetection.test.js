@@ -2,6 +2,8 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   shouldConfirmDeparture,
+  passStepEntry,
+  computeSameNameOrderGate,
   passStepConfirm,
   buildNearbyTrackingState,
   findNextUnarrivedStop,
@@ -239,6 +241,112 @@ test('findVectorConfirmation: 条件を満たすペアが無ければnull（フ�
     gpsAt2DOffsetMeters(-50, 0, '8:11', '2026-08-25T08:11:00+09:00') // まだ反対側に抜けていない
   ];
   assert.equal(findVectorConfirmation(gpsRows, stop), null);
+});
+
+// --- 循環線対策④（同名バス停の通過順序ゲート）のテスト ---
+// 美ヶ原温泉線・浅間線のような「往路と復路が区別されない循環線」で、同じ物理バス停を
+// 1便で2回通るケース。往路の標柱と復路の標柱は seq_order 違いの同名2行になり、
+// 数十m しか離れていないため GPS のばらつきで復路側へ誤マッチしうる。
+
+test('computeSameNameOrderGate: 1回目が未到着なら同名の2回目以降だけをゲートする', () => {
+  const stopMaster = [
+    { seq_order: 0, name: '松本バスターミナル', status: '到着済' }, // 始発（origin）
+    { seq_order: 13, name: '新井口', status: '到着済' },
+    { seq_order: 14, name: '新井橋', status: '' },                 // 往路の1回目（未到着）
+    { seq_order: 15, name: '藤井', status: '' },
+    { seq_order: 19, name: '新井橋', status: '' },                 // 復路の2回目 → ゲート対象
+    { seq_order: 33, name: '松本バスターミナル', status: '' }      // 終点（始発が到着済なのでゲートしない）
+  ];
+  const gate = computeSameNameOrderGate(stopMaster);
+  assert.deepEqual([...gate].sort((a, b) => a - b), [19]);
+});
+
+test('computeSameNameOrderGate: 1回目が到着済になればゲートは解ける', () => {
+  const stopMaster = [
+    { seq_order: 14, name: '新井橋', status: '到着済' }, // 往路の1回目が到着済に
+    { seq_order: 19, name: '新井橋', status: '' }        // 復路の2回目は候補に戻る
+  ];
+  assert.equal(computeSameNameOrderGate(stopMaster).size, 0);
+});
+
+test('computeSameNameOrderGate: 1回目が付近のうちは2回目をゲートしたままにする', () => {
+  const stopMaster = [
+    { seq_order: 14, name: '新井橋', status: '付近' },
+    { seq_order: 19, name: '新井橋', status: '' }
+  ];
+  assert.deepEqual([...computeSameNameOrderGate(stopMaster)], [19]);
+});
+
+test('computeSameNameOrderGate: 1回しか通らない通常路線ではゲートは空（現行挙動を変えない）', () => {
+  const stopMaster = [
+    { seq_order: 0, name: 'A', status: '到着済' },
+    { seq_order: 1, name: 'B', status: '' },
+    { seq_order: 2, name: 'C', status: '' },
+    { seq_order: 3, name: 'D', status: '' }
+  ];
+  assert.equal(computeSameNameOrderGate(stopMaster).size, 0);
+});
+
+test('computeSameNameOrderGate: 同名が3回登場する場合、直前の同名が片付いている回だけ候補に戻す', () => {
+  const stopMaster = [
+    { seq_order: 0, name: 'ターミナル', status: '到着済' }, // 1回目（始発）は済み
+    { seq_order: 5, name: 'ターミナル', status: '' },        // 2回目：直前(seq0)が到着済 → ゲートしない
+    { seq_order: 9, name: 'ターミナル', status: '' }         // 3回目：直前(seq5)が未到着 → ゲートする
+  ];
+  assert.deepEqual([...computeSameNameOrderGate(stopMaster)], [9]);
+});
+
+// passStepEntry の結合テスト。新井橋（往路 seq14 / 復路 seq19、約60m）に相当する配置で、
+// GPS点が復路側の標柱の方に近くても、往路側が未到着なら復路側へは付近入りしないこと。
+const ARAIBASHI_OUT = { stop_id: 140, seq_order: 14, name: '新井橋', lat: 36.242741, lon: 137.999857, scheduled_time: '6:13' };
+const ARAIBASHI_IN = { stop_id: 190, seq_order: 19, name: '新井橋', lat: 36.243198, lon: 137.999377, scheduled_time: '6:20' };
+function loopStopMaster(overrides = {}) {
+  const base = [
+    { stop_id: 130, seq_order: 13, name: '新井口', lat: 36.241774, lon: 137.996229, status: '到着済', scheduled_time: '6:11' },
+    { ...ARAIBASHI_OUT, status: '' },
+    { stop_id: 150, seq_order: 15, name: '藤井', lat: 36.243285, lon: 138.004533, status: '', scheduled_time: '6:15' },
+    { ...ARAIBASHI_IN, status: '' },
+    { stop_id: 200, seq_order: 20, name: '新井口', lat: 36.241659, lon: 137.996159, status: '', scheduled_time: '6:22' }
+  ];
+  return base.map((s) => ({ ...s, ...(overrides[s.seq_order] || {}) }));
+}
+
+test('passStepEntry: 往路の新井橋が未到着なら、GPSが復路側に近くても復路側へは付近入りしない', () => {
+  const stopMaster = loopStopMaster();
+  // 復路標柱(seq19)から約9m・往路標柱(seq14)から約58m の1点（GPSのばらつきを模した配置）
+  const gpsRows = [
+    { id: 1, gps_time: '6:13', gps_time_ts: '2026-08-25T06:13:00+09:00', lat: 36.24315, lon: 137.99945 }
+  ];
+  const matches = passStepEntry({ start_time: '6:00' }, stopMaster, gpsRows, 120, null);
+  assert.equal(matches.length, 1);
+  // 復路側(seq19)ではなく往路側(seq14)へ付近入りする
+  assert.equal(matches[0].seqOrder, 14);
+  assert.equal(matches[0].stopId, ARAIBASHI_OUT.stop_id);
+});
+
+test('passStepEntry: 往路の新井橋が到着済になれば、復路側の新井橋へ通常どおり付近入りできる', () => {
+  const stopMaster = loopStopMaster({ 14: { status: '到着済', actual_time: '6:13' } });
+  const gpsRows = [
+    { id: 1, gps_time: '6:20', gps_time_ts: '2026-08-25T06:20:00+09:00', lat: 36.24315, lon: 137.99945 }
+  ];
+  const matches = passStepEntry({ start_time: '6:00' }, stopMaster, gpsRows, 120, null);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].seqOrder, 19);
+  assert.equal(matches[0].stopId, ARAIBASHI_IN.stop_id);
+});
+
+test('passStepEntry: 同名バス停が無い通常配置では従来どおり最近傍へ付近入りする（回帰防止）', () => {
+  const stopMaster = [
+    { stop_id: 1, seq_order: 0, name: 'A', lat: 36.2400, lon: 137.9700, status: '到着済', scheduled_time: '6:00' },
+    { stop_id: 2, seq_order: 1, name: 'B', lat: 36.2410, lon: 137.9700, status: '', scheduled_time: '6:02' },
+    { stop_id: 3, seq_order: 2, name: 'C', lat: 36.2420, lon: 137.9700, status: '', scheduled_time: '6:04' }
+  ];
+  const gpsRows = [
+    { id: 1, gps_time: '6:02', gps_time_ts: '2026-08-25T06:02:00+09:00', lat: 36.2410, lon: 137.9700 }
+  ];
+  const matches = passStepEntry({ start_time: '6:00' }, stopMaster, gpsRows, 120, null);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].seqOrder, 1);
 });
 
 test('describeArrivalMethod: 既知の判定方法は日本語ラベルを返す', () => {
