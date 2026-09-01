@@ -75,9 +75,11 @@
     try {
       // 汎用api()ヘルパーはerrors配列を持つ400レスポンスを汎用メッセージに潰してしまうため、
       // ここだけ生のfetchでレスポンス本体（行番号付きのバリデーションエラー）を見る。
+      // 認証はhttpOnly Cookie（同一オリジンなので既定で送られる）。
       const res = await fetch('/api/admin/tourist-spots', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Basic ${state.token}` },
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text })
       });
       const data = await res.json().catch(() => ({}));

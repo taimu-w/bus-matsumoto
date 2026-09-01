@@ -1,6 +1,17 @@
 # APIエンドポイント一覧（`routes/api.js`）
 
-`router`は`/api`配下にマウントされています。管理系（`/admin/...`）は`requireAdminAuth`（Basic認証、既定ユーザー名/パスワードは`ADMIN_USERNAME`/`ADMIN_PASSWORD`環境変数）で保護されています。
+`router`は`/api`配下にマウントされています。管理系（`/admin/...`）は`requireAdminAuth`で保護されています。
+
+**認証は2経路あり、どちらでも通ります**（判定本体は`services/adminAuth.js`）。
+
+| 経路 | 使う場面 | 内容 |
+|---|---|---|
+| サーバー側セッション | 管理画面（`admin.html`） | `POST /api/admin/session`で発行される`bt_admin_session` Cookie（httpOnly・SameSite=Strict・既定12時間の絶対期限）。ブラウザ側には資格情報もトークンも残らない。Cookie認証のリクエストは`Origin`ヘッダーが自ホストと一致することも要求する（CSRFの多層防御） |
+| Basic認証ヘッダー | curl・監視ツールなど | `Authorization: Basic base64(user:pass)`。従来からある経路で、消すと既存の手順書が黙って壊れるため残してある |
+
+資格情報は`ADMIN_USERNAME`/`ADMIN_PASSWORD`環境変数（既定`admin`/`admin123`）で、比較は`crypto.timingSafeEqual`による定数時間比較です。認証に**失敗**した回数はIPごとに数えられ、`ADMIN_AUTH_MAX_FAILURES`（既定10回）を超えると`ADMIN_AUTH_WINDOW_MIN`（既定15分）だけ429を返します（総当たり対策）。数えるのは「資格情報を提示して外したとき」だけなので、期限切れセッションのポーリングや未ログインの素のアクセスでは増えません。
+
+セッションはプロセス内メモリなので、**サーバーの再起動・デプロイで全て失効します**（＝再ログインが必要）。管理画面は401を受け取るとログイン画面へ戻ります。
 
 ## 公開API（利用者向け画面）
 
@@ -13,7 +24,7 @@
 | GET | `/api/stops/search` | バス停名の部分一致検索（全路線対応） |
 | GET | `/api/timetable` | 本日運行対象の便の時刻表（`daily_trips`ベース。frequencies由来の仮想便も含む） |
 | GET | `/api/buses` | **担当車両が割り当てられている当日便のリアルタイム運行状況＋到着予測**（`trip_arrival_predictions`から読み出すだけ。計算はパイプライン側でプリコンピュート済み → [eta-prediction-algorithm.md](eta-prediction-algorithm.md)）。候補車両は公開しない。管理画面「リアルタイム休止」中の路線は`{ buses: [], realtimeSuspended: true, suspensionReason }`を返す（[realtime-suspension.md](realtime-suspension.md)） |
-| GET | `/api/buses-for-map` | バスマップ用の走行中バス位置（担当車両のみ・到着予測なしの軽量版）。`routeId`は任意（qualified route id）で、省略時（および`routeId=all`）は全路線を返す。利用者向けバスマップの「路線で絞り込み」セレクトで路線を選んだときだけ付く。リアルタイム休止中の路線のバスは除外し（Basic認証済みの管理画面リクエストは除外しない）、`suspendedRouteIds`（休止中のqualified route id一覧）を常に添える |
+| GET | `/api/buses-for-map` | バスマップ用の走行中バス位置（担当車両のみ・到着予測なしの軽量版）。`routeId`は任意（qualified route id）で、省略時（および`routeId=all`）は全路線を返す。利用者向けバスマップの「路線で絞り込み」セレクトで路線を選んだときだけ付く。リアルタイム休止中の路線のバスは除外し（認証済みの管理画面リクエストは除外しない）、`suspendedRouteIds`（休止中のqualified route id一覧）を常に添える |
 | GET | `/api/service-status` | アルピコ交通の運行状況（1時間ごとにスクレイピングしてキャッシュ済み） |
 
 ## 経路検索
@@ -21,7 +32,7 @@
 | メソッド | パス | 概要 |
 |---|---|---|
 | GET | `/api/route-search/stops` | 出発地・目的地の候補（漢字/ひらがな/カタカナ/ローマ字。返す`stopKey`は時刻表検索・バス停検索と共通） |
-| GET | `/api/route-search` | 経路検索：乗換2回まで・徒歩接続あり・任意日付・運賃つき。`fromStopKey`/`from`・`toStopKey`/`to`・`date=YYYY-MM-DD`・`time=HH:MM`・`limit`（`departureTime`は`time`の別名として受付）。詳細設定（すべて任意。未指定なら既定の条件）：`maxTransfers=0..3`（`0`＝乗り換えなし）・`allowWalkTransfer=false`（徒歩での乗り継ぎを使わない）・`minTransferMinutes=1..15`（乗り換えの余裕時間）。詳細は[route-search.md](route-search.md) |
+| GET | `/api/route-search` | **1IPあたり`ROUTE_SEARCH_RATE_LIMIT_PER_MIN`件/分の上限あり（既定240。超過時は429＋`Retry-After`）。** 経路検索：乗換2回まで・徒歩接続あり・任意日付・運賃つき。`fromStopKey`/`from`・`toStopKey`/`to`・`date=YYYY-MM-DD`・`time=HH:MM`・`limit`（`departureTime`は`time`の別名として受付）。詳細設定（すべて任意。未指定なら既定の条件）：`maxTransfers=0..3`（`0`＝乗り換えなし）・`allowWalkTransfer=false`（徒歩での乗り継ぎを使わない）・`minTransferMinutes=1..15`（乗り換えの余裕時間）。詳細は[route-search.md](route-search.md) |
 
 ## スポット検索
 
@@ -30,7 +41,7 @@
 | メソッド | パス | 概要 |
 |---|---|---|
 | GET | `/api/spot-search/suggest` | 入力候補（`q`・`limit`）。`{ stops, spots, routes }` をまとめて返す（バス停・観光スポットは時刻表検索／経路検索と同じ検索、路線は`routes`テーブルの名称一致） |
-| GET | `/api/spot-search` | スポット検索の実行（`spotId`／`stopKey`／`q` のいずれか、`radius=100..3000`（既定500）、`limit=1..20`（既定8））。対象が観光スポット／その他のスポット／バス停に解決したら検索回数を+1する（`spot_search_counts`）。路線に解決した場合は`{ found:true, resolvedFrom:'route', route }`を返し、フロントがリアルタイム時刻表へ遷移する |
+| GET | `/api/spot-search` | **1IPあたり`COUNT_RATE_LIMIT_PER_MIN`件/分の上限あり（既定240。検索回数を増やす副作用があるため）。** スポット検索の実行（`spotId`／`stopKey`／`q` のいずれか、`radius=100..3000`（既定500）、`limit=1..20`（既定8））。対象が観光スポット／その他のスポット／バス停に解決したら検索回数を+1する（`spot_search_counts`）。路線に解決した場合は`{ found:true, resolvedFrom:'route', route }`を返し、フロントがリアルタイム時刻表へ遷移する |
 
 ## 時刻表検索・バス停検索
 
@@ -49,12 +60,15 @@
 | GET | `/api/busstop/:stopKey/nearby-spots` | 周辺の観光スポット（`photoUrls`は配列） |
 | GET | `/api/busstop/:stopKey/notices` | そのバス停のお知らせ。`{ stopNotices, platformNotices }`。`stopNotices`（バス停単位）は常に返す。`platformNotices`（乗り場単位）は`?platform=`が確定しているときだけ（統合表示なら`[]`）（[busstop-notices.md](busstop-notices.md)） |
 | GET | `/api/tourist-spots/:id` | 観光スポット1件の詳細。`:id`は管理画面で指定する識別子。経路検索結果のスポット詳細ポップアップ用 |
-| POST | `/api/tourist-spots/:id/link-click` | 公式サイトリンクのタップを記録（`sendBeacon`。URL未登録スポットは無視。結果に関わらず`{ok:true}`。[tourist-spots.md](tourist-spots.md)） |
+| POST | `/api/tourist-spots/:id/link-click` | **1IPあたり`COUNT_RATE_LIMIT_PER_MIN`件/分の上限あり（既定240。タップ数を増やす副作用があるため）。** 公式サイトリンクのタップを記録（`sendBeacon`。URL未登録スポットは無視。結果に関わらず`{ok:true}`。[tourist-spots.md](tourist-spots.md)） |
 
-## 管理API（要Basic認証）
+## 管理API（要認証）
+
+冒頭に書いたとおり、セッションCookieとBasic認証ヘッダーのどちらでも通ります。
 
 | メソッド | パス | 概要 |
 |---|---|---|
+| POST / GET / DELETE | `/api/admin/session` | 管理画面のログイン・セッション確認・ログアウト。POSTは`{username, password}`を受け取り、成功したら`bt_admin_session` Cookie（httpOnly・SameSite=Strict）をSet-Cookieで返す。GETは`requireAdminAuth`つきで、生きていれば`{ok:true, expiresAt}`。DELETEはサーバー側セッションを破棄しCookieも消す（認証不要＝既に失効したセッションでも消せる）。POSTは認証失敗をIPごとに数え、上限超過で429 |
 | GET / PUT | `/api/admin/settings` | お知らせ設定の取得・更新。`notices`（通常のお知らせ配列、最大3件。各要素`{title, body, imageUrl, startDate, endDate}`。`imageUrl`は`https://`のみ、`startDate`/`endDate`は`YYYY-MM-DD`または空＝無期限）と`importantNotice`（`{body, imageUrl, startDate, endDate}`。旧形式の文字列も受理）。GETは配信期間切れも含めた全件を返す |
 | GET / PUT / DELETE | `/api/admin/runtime-settings`（`/:key`） | 運用パラメータ（判定半径・タイムアウト・しきい値等）の取得・上書き保存・上書き解除（既定値へ戻す）。定義一覧は[backend/src/config/runtimeSettingsCatalog.js](../backend/src/config/runtimeSettingsCatalog.js) |
 | GET / POST / DELETE | `/api/admin/holidays`（`/:date`） | 祝日カレンダーの取得・追加・削除（ETA統計の曜日区分に使用） |

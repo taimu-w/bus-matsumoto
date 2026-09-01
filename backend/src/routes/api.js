@@ -59,11 +59,33 @@ const {
   refreshRuntimeSettingsCache
 } = require('../services/runtimeSettings');
 const { SETTINGS_CATALOG, SETTINGS_BY_KEY, validateSettingValue } = require('../config/runtimeSettingsCatalog');
+const adminAuth = require('../services/adminAuth');
+const securityConfig = require('../config/security');
+const {
+  createRateLimiter,
+  getClientKey,
+  getAdminAuthBlock,
+  recordAdminAuthFailure,
+  clearAdminAuthFailures
+} = require('../middleware/rateLimit');
 
 const router = express.Router();
 
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+// 高コスト・集計値を増やす公開エンドポイント向けのレートリミッタ
+// （docs/system-review-2026-09.md S-3）。ホットパス（/api/buses など20秒ポーリングされる
+// エンドポイント）には掛けない——利用者の画面が止まるリスクの方が大きいため。
+const routeSearchRateLimit = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: securityConfig.ROUTE_SEARCH_RATE_LIMIT_PER_MIN,
+  scope: '/api/route-search',
+  message: '経路検索のリクエストが多すぎます。しばらく待ってからお試しください。'
+});
+const countRateLimit = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: securityConfig.COUNT_RATE_LIMIT_PER_MIN,
+  scope: '集計カウント系API',
+  message: 'リクエストが多すぎます。しばらく待ってからお試しください。'
+});
 
 // 運用監視のしきい値（ASSIGN_RADIUS_METERS等と同じ流儀で環境変数上書き可・既定値付き）。
 // 2026-08-21以降は管理画面「運用パラメータ設定」からも編集できる
@@ -82,10 +104,12 @@ function buildAlertKey(type, ...parts) {
 
 // フロントエンドがX-Client-Idヘッダーを付けて叩くAPIリクエストを閲覧数としてカウントする
 // （サーバー負荷判定・管理画面の閲覧数表示に使用。ヘッダーが無いリクエストは対象外）。
+// クライアントIPも渡すのは、1つのIPからX-Client-Idを無数に振って閲覧数を水増しできないよう
+// visitorTracker側でIPごとの上限を掛けるため（docs/system-review-2026-09.md S-3）。
 router.use((req, res, next) => {
   const clientId = req.headers['x-client-id'];
   if (typeof clientId === 'string' && clientId.length > 0 && clientId.length <= 100) {
-    visitorTracker.recordVisit(clientId);
+    visitorTracker.recordVisit(clientId, getClientKey(req));
   }
   next();
 });
@@ -204,34 +228,91 @@ async function loadSystemSettings(routeId, options = {}) {
   return serialized;
 }
 
-// Basic認証ヘッダーが管理者の資格情報と一致するかだけを判定する（例外・レスポンスなし）。
+// リクエストが管理者として認証済みかだけを判定する（例外・レスポンス・副作用なし）。
 // requireAdminAuth の判定本体であり、公開エンドポイントで「管理画面からのリクエストか」を
 // 副作用なく確かめたいとき（/api/buses-for-map のリアルタイム休止バイパス等）にも使う。
+//
+// 経路は2つ。判定ロジックの本体は services/adminAuth.js にある。
+//   1. サーバー側セッション（httpOnly Cookie）… 管理画面のログイン後はこちら
+//   2. Basic認証ヘッダー … curl・監視ツール等の従来経路。消すと黙って壊れるため残してある
 function isAuthenticatedAdmin(req) {
-  const authHeader = req.headers.authorization || '';
-  if (!authHeader.startsWith('Basic ')) return false;
-
-  let decoded;
-  try {
-    decoded = Buffer.from(authHeader.replace(/^Basic\s+/i, ''), 'base64').toString('utf8');
-  } catch (err) {
-    return false;
+  const sessionToken = adminAuth.readSessionToken(req);
+  if (sessionToken && adminAuth.verifySessionToken(sessionToken) && adminAuth.isSameOriginRequest(req)) {
+    return true;
   }
 
-  const separatorIndex = decoded.indexOf(':');
-  if (separatorIndex === -1) return false;
-
-  const username = decoded.slice(0, separatorIndex);
-  const password = decoded.slice(separatorIndex + 1);
-  return username === ADMIN_USERNAME && password === ADMIN_PASSWORD;
+  const credentials = adminAuth.parseBasicAuthHeader(req.headers.authorization);
+  if (!credentials) return false;
+  return adminAuth.verifyCredentials(credentials.username, credentials.password);
 }
 
 function requireAdminAuth(req, res, next) {
+  const block = getAdminAuthBlock(req);
+  if (block) {
+    res.setHeader('Retry-After', String(block.retryAfterSeconds));
+    return res.status(429).json({
+      error: `ログイン試行が多すぎます。${Math.ceil(block.retryAfterSeconds / 60)}分ほど待ってからやり直してください。`,
+      retryAfterSeconds: block.retryAfterSeconds
+    });
+  }
+
   if (!isAuthenticatedAdmin(req)) {
+    // 総当たりとして数えるのは「資格情報を提示したうえで外した」ときだけ。
+    // 期限切れセッションのポーリングや未ログインの素のアクセスは数えない
+    // （数えると、セッション切れの管理画面が自分自身をロックアウトしてしまう）。
+    if (adminAuth.hasPresentedCredentials(req)) recordAdminAuthFailure(req);
     return res.status(401).json({ error: '管理画面へのログインが必要です。' });
   }
+
+  clearAdminAuthFailures(req);
   return next();
 }
+
+// ==========================================================
+// 管理画面のセッション（docs/system-review-2026-09.md S-2）。
+// 資格情報を受け取るのはログインの1回だけで、以後はhttpOnly・SameSite=Strictの
+// ランダムトークンで認証する。ブラウザ側（localStorage）には何も保存しない。
+// セッションはプロセス内メモリなので、サーバー再起動で全て失効する＝再ログインが要る。
+// ==========================================================
+
+// POST /api/admin/session -> ログイン。成功したらSet-Cookieでセッションを渡す。
+router.post('/admin/session', (req, res) => {
+  const block = getAdminAuthBlock(req);
+  if (block) {
+    res.setHeader('Retry-After', String(block.retryAfterSeconds));
+    return res.status(429).json({
+      error: `ログイン試行が多すぎます。${Math.ceil(block.retryAfterSeconds / 60)}分ほど待ってからやり直してください。`,
+      retryAfterSeconds: block.retryAfterSeconds
+    });
+  }
+
+  const username = typeof req.body?.username === 'string' ? req.body.username : '';
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  if (!username || !password || !adminAuth.verifyCredentials(username, password)) {
+    recordAdminAuthFailure(req);
+    return res.status(401).json({ error: 'ユーザー名またはパスワードが違います。' });
+  }
+
+  clearAdminAuthFailures(req);
+  const { token, expiresAt } = adminAuth.createSession();
+  res.setHeader('Set-Cookie', adminAuth.buildSessionCookie(token, req));
+  return res.json({ ok: true, expiresAt: new Date(expiresAt).toISOString() });
+});
+
+// GET /api/admin/session -> セッションが生きているかの確認（管理画面の再訪問時に使う）
+router.get('/admin/session', requireAdminAuth, (req, res) => {
+  const expiresAt = adminAuth.getSessionExpiry(adminAuth.readSessionToken(req));
+  res.json({ ok: true, expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null });
+});
+
+// DELETE /api/admin/session -> ログアウト。サーバー側のセッションを破棄しCookieも消す。
+// 認証を要求しない（既に失効したセッションでも「消す」操作は通したいため）。
+router.delete('/admin/session', (req, res) => {
+  const token = adminAuth.readSessionToken(req);
+  if (token) adminAuth.destroySession(token);
+  res.setHeader('Set-Cookie', adminAuth.buildClearedSessionCookie(req));
+  res.json({ ok: true });
+});
 
 // GET /api/routes -> 利用可能な路線一覧（GTFSのroute.txt由来）
 router.get('/routes', async (req, res) => {
@@ -1463,7 +1544,10 @@ router.get('/route-search/stops', async (req, res) => {
 //   fromSpotId|toSpotId は観光スポットIDを起点/終点にする場合（観光スポット情報_仕様書）。
 //   maxTransfers / allowWalkTransfer / minTransferMinutes は詳細設定。
 //   いずれも未指定なら従来どおりの条件（乗換2回まで・徒歩接続あり・乗換余裕1分）で検索する。
-router.get('/route-search', async (req, res) => {
+// RAPTOR探索＋段階的フォールバックはDBを見ない代わりにCPUを使う。任意の日付・時刻で
+// 叩けるため、少数のクライアントがCPUを専有できないようレートリミットを掛けている（S-3）。
+// 入力候補（/route-search/stops）はキーストロークごとに飛ぶので対象外。
+router.get('/route-search', routeSearchRateLimit, async (req, res) => {
   try {
     const isArrival = req.query.timeMode === 'arrival' || Boolean(req.query.arrivalTime);
     const result = await searchJourneys({
@@ -1528,7 +1612,9 @@ router.get('/spot-search/suggest', async (req, res) => {
 // GET /api/spot-search?spotId=... | stopKey=... | q=... -> スポット検索の実行。
 // 対象が観光スポット／その他のスポットに確定したら検索回数を +1 する（spot_search_counts）。
 // 対象が路線に解決した場合は found:true・resolvedFrom:'route' を返し、フロントがリアルタイム時刻表へ遷移する。
-router.get('/spot-search', async (req, res) => {
+// 検索回数（spot_search_counts）を増やす副作用があるため、無認証で水増しされないよう
+// レートリミットを掛けている（S-3）。入力候補（/spot-search/suggest）はカウントしないので対象外。
+router.get('/spot-search', countRateLimit, async (req, res) => {
   try {
     const result = await spotSearch.search({
       spotId: req.query.spotId || null,
@@ -2687,7 +2773,8 @@ router.get('/tourist-spots/:id', async (req, res) => {
 // POST /api/tourist-spots/:id/link-click -> 公式サイトリンクのタップを記録する（観光スポット情報_仕様書）。
 // バス停ページ・経路検索ポップアップの「公式サイトを見る」リンクから navigator.sendBeacon で叩く。
 // 掲載の有用性を測るだけの用途なので、本文もクライアントIDも取らず、結果に関わらず 200 を返す（soft）。
-router.post('/tourist-spots/:id/link-click', async (req, res) => {
+// 無認証でタップ数を水増しできないようレートリミットを掛けている（S-3）。
+router.post('/tourist-spots/:id/link-click', countRateLimit, async (req, res) => {
   const id = String(req.params.id || '').trim();
   if (!id) return res.status(400).json({ error: '不正なIDです。' });
   try {

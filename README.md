@@ -39,6 +39,7 @@ bussystem/
 │   │   │   ├── pipeline.js       ★メイン処理チェーンの実行順序を定義
 │   │   │   └── scheduler.js      setIntervalによる定期実行の管理
 │   │   ├── config/                路線・フィード対応などコード管理の設定
+│   │   ├── middleware/           HTTPS強制・セキュリティヘッダー・レートリミット
 │   │   ├── services/             ★業務ロジック本体（4章に一覧）
 │   │   ├── routes/
 │   │   │   └── api.js            REST APIエンドポイント一覧（docs/api-reference.md）
@@ -48,6 +49,7 @@ bussystem/
 │   └── package.json
 ├── data gtfs/                    GTFS標準形式のマスタデータ（フィードIDごとのディレクトリ）
 ├── frontend/                     素のHTML/CSS/JS（利用者向け画面・管理画面。ビルドステップなし）
+│   └── vendor/                   同梱したTailwind・Leaflet（CDNから読み込まない。手で編集しない）
 ├── docs/                         詳細設計資料（一覧は12章）
 ├── Dockerfile / docker-compose.yml
 └── .env.example                  環境変数のサンプル
@@ -151,7 +153,9 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 - DBスキーマ（テーブル一覧・役割）: [docs/database.md](docs/database.md)
 - APIエンドポイント一覧: [docs/api-reference.md](docs/api-reference.md)
 
-代表的な公開エンドポイントだけ挙げると、`GET /api/buses`（担当車両のリアルタイム運行状況＋到着予測）・`GET /api/timetable`（本日の時刻表）・`GET /api/route-search`（経路検索。詳細設定 `maxTransfers`/`allowWalkTransfer`/`minTransferMinutes` は任意で、未指定なら既定の条件）・`GET /api/routes`（路線一覧）です。管理系（`/api/admin/...`）はBasic認証（`ADMIN_USERNAME`/`ADMIN_PASSWORD`）で保護されています。
+代表的な公開エンドポイントだけ挙げると、`GET /api/buses`（担当車両のリアルタイム運行状況＋到着予測）・`GET /api/timetable`（本日の時刻表）・`GET /api/route-search`（経路検索。詳細設定 `maxTransfers`/`allowWalkTransfer`/`minTransferMinutes` は任意で、未指定なら既定の条件）・`GET /api/routes`（路線一覧）です。管理系（`/api/admin/...`）は`requireAdminAuth`で保護されており、認証は**サーバー側セッション（`POST /api/admin/session`で発行するhttpOnly Cookie）**か、従来どおりの**Basic認証ヘッダー**（`ADMIN_USERNAME`/`ADMIN_PASSWORD`）のどちらでも通ります。
+
+`/api/route-search`（RAPTOR探索）と集計値を増やす系（`/api/spot-search`・`/api/tourist-spots/:id/link-click`）には1IPあたりのレートリミットが掛かっています。20秒間隔でポーリングされるホットパス（`/api/buses`等）には掛けていません（利用者の画面が止まるリスクの方が大きいため）。上限は環境変数で調整できます（§8）。
 
 ---
 
@@ -163,9 +167,10 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 - `frontend/onboarding.js`: はじめての方向けチュートリアル。初回訪問時にホーム画面でだけ自動表示し、完了フラグ（localStorage `busTimeOnboardingSeen`）を立てる。`/howto` の「使い方ツアー」ボタン（`/?tutorial=1`）や `window.Onboarding.open()` からいつでも再表示できる。
 - `frontend/howto.html`: 使い方ページ（`/howto`。静的HTML、JSなし）。目的別の導線・機能別の手順・よくある質問（`<details>`）をまとめる。
 - `frontend/timetable.js`（時刻表検索）・`frontend/busstop.js`（バス停検索）・`frontend/stopmap.js`（バス停マップ）・`frontend/routesearch.js`（経路検索）・`frontend/spotsearch.js`（スポット検索）は、いずれもハッシュではなくパス（History API）でルーティングします。経路検索は「経路一覧（`/routesearch?…`）→ 経路詳細（`…&journey=N`）」の2階層で、乗り換え時刻や通過バス停は詳細側に表示します（[docs/route-search.md](docs/route-search.md) 6.3）。経路一覧の上下には「1本前 / 1本後」ボタンがあり、先頭の経路を基準に1本ぶんずらして検索し直します（「1本前」は到着時刻指定へ切り替え。同 6.3.1）。検索フォームには折りたたみの「詳細設定」があり、乗り換え回数（「乗り換えなし」など）・徒歩での乗り継ぎの有無・乗り換えの余裕時間を指定できます。**既定は絞り込みなしの条件**で、既定値の項目はURLにも載せません（同 5.8・6.2）。スポット検索（`/spotsearch`）は地名（観光スポット・その他のスポット）・バス停・路線を1つ入力すると、スポット情報＋付近のバス停＋周辺を通る路線を表示し、路線名クリックでリアルタイム時刻表（`#/realtime/{feedId}/{routeId}`）・バス停名タップでバス停ページへ遷移します（[docs/spot-search.md](docs/spot-search.md)）。
-- `frontend/admin.html`: Basic認証で保護された管理画面（運行ダッシュボード・便の割当監視・予測精度の監視・当日の状況・異常アラート・GTFS/位置情報フィード監視・API稼働監視・ジョブ監視・お知らせ編集・バス停お知らせ・祝日カレンダー・外部IDマッピング・方向マッピング・リアルタイム休止・運用パラメータ設定・観光スポット管理・観光スポットの検索・アクセス数・車両名・メモ管理）。「リアルタイム休止」は、突発的な運休・輸送障害でGPS由来のリアルタイム情報が実態と食い違うとき、路線ごとにリアルタイム表示だけを利用者向け画面（リアルタイム運行状況・バスマップ・経路検索の重ね合わせ・便詳細のリアルタイム切替・接近中のバス）から一時的に止めるキルスイッチです。時刻表ベースの表示・経路探索・管理画面の運行監視は影響を受けません（`route_realtime_suspensions`テーブル、[docs/realtime-suspension.md](docs/realtime-suspension.md)）。「バス停お知らせ」は、バス停詳細ページに出る見出し＋画像＋本文のお知らせで、バス停単位（常に表示）と乗り場単位（乗り場別表示のときだけ）の2つの配信範囲がある（`busstop_notices`テーブル、[docs/busstop-notices.md](docs/busstop-notices.md)）。車両名・メモ管理（`vehicle_labels`テーブル、キーは`car_id`）で名前を付けた車両は、運行ダッシュボードの便詳細セクションで車両IDの代わりに名前で表示され、名前タップでメモが出ます。「観光スポット管理」ではタブ区切りテキストの1列目に指定するID（`tourist_spots.id`）で各スポットを識別し（名称による名寄せはせず、IDが同じなら改称しても同一スポット）、写真を「,」区切りで複数枚登録できます。別メニュー「観光スポットの検索・アクセス数」でスポット検索の検索回数（`spot_search_counts`）と公式サイトリンクのタップ回数（`tourist_spot_link_clicks`）を指定期間（最大1年）でまとめて集計し、掲載の有用性を確認できます（[docs/spot-search.md](docs/spot-search.md) / [docs/tourist-spots.md](docs/tourist-spots.md)）。
+- `frontend/admin.html`: 認証で保護された管理画面（運行ダッシュボード・便の割当監視・予測精度の監視・当日の状況・異常アラート・GTFS/位置情報フィード監視・API稼働監視・ジョブ監視・お知らせ編集・バス停お知らせ・祝日カレンダー・外部IDマッピング・方向マッピング・リアルタイム休止・運用パラメータ設定・観光スポット管理・観光スポットの検索・アクセス数・車両名・メモ管理）。「リアルタイム休止」は、突発的な運休・輸送障害でGPS由来のリアルタイム情報が実態と食い違うとき、路線ごとにリアルタイム表示だけを利用者向け画面（リアルタイム運行状況・バスマップ・経路検索の重ね合わせ・便詳細のリアルタイム切替・接近中のバス）から一時的に止めるキルスイッチです。時刻表ベースの表示・経路探索・管理画面の運行監視は影響を受けません（`route_realtime_suspensions`テーブル、[docs/realtime-suspension.md](docs/realtime-suspension.md)）。「バス停お知らせ」は、バス停詳細ページに出る見出し＋画像＋本文のお知らせで、バス停単位（常に表示）と乗り場単位（乗り場別表示のときだけ）の2つの配信範囲がある（`busstop_notices`テーブル、[docs/busstop-notices.md](docs/busstop-notices.md)）。車両名・メモ管理（`vehicle_labels`テーブル、キーは`car_id`）で名前を付けた車両は、運行ダッシュボードの便詳細セクションで車両IDの代わりに名前で表示され、名前タップでメモが出ます。「観光スポット管理」ではタブ区切りテキストの1列目に指定するID（`tourist_spots.id`）で各スポットを識別し（名称による名寄せはせず、IDが同じなら改称しても同一スポット）、写真を「,」区切りで複数枚登録できます。別メニュー「観光スポットの検索・アクセス数」でスポット検索の検索回数（`spot_search_counts`）と公式サイトリンクのタップ回数（`tourist_spot_link_clicks`）を指定期間（最大1年）でまとめて集計し、掲載の有用性を確認できます（[docs/spot-search.md](docs/spot-search.md) / [docs/tourist-spots.md](docs/tourist-spots.md)）。
 - `frontend/spot-photos.js`: 観光スポットの写真表示の共通モジュール（`window.SpotPhotos`）。バス停ページ・経路検索のスポット詳細ポップアップ・スポット検索が、1枚ずつ表示するカルーセル（複数枚は5秒間隔の自動送り＋スワイプ／矢印／インジケーター）を描画するのに使う。`busstop.js`・`routesearch.js`・`spotsearch.js` より前に読み込む（[docs/tourist-spots.md](docs/tourist-spots.md) の「写真表示（カルーセル）」）。
 - `frontend/style.css`: 共通スタイル。
+- `frontend/vendor/`: **Tailwind CSS と Leaflet をリポジトリに同梱**したもの（CDNからは読み込みません）。中身はサードパーティ製の配布物そのままなので手で編集せず、更新は[frontend/vendor/README.md](frontend/vendor/README.md)の手順で行ってください。`leaflet.css`が`url(images/…)`と相対参照しているため`leaflet/images/`を消さないこと。Tailwindはファイル名にバージョンが入るので、更新時は参照している4つのHTML（`index.html`・`admin.html`・`howto.html`・`servicestatus.html`）を全部書き換えます。
 
 > **`index.html`の静的ファイル参照は必ず絶対パス（`/app.js`など）にすること。** 時刻表検索は`/timetable/stops/{stop_id}`のような階層のあるURLを使うため、相対パスだと`/timetable/stops/app.js`を読みに行き、サーバーのSPAフォールバックがindex.htmlを返してスクリプトが一切動かなくなります。
 
@@ -201,7 +206,21 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 | `ADMIN_STALE_GPS_MIN` / `ADMIN_DELAY_ALERT_MIN` / `ADMIN_SEVERE_DELAY_MIN` / `ADMIN_UNASSIGNED_OVERDUE_MIN` / `ADMIN_ETA_STALE_MIN`※ | `5` / `5` / `15` / `5` / `10` | 管理画面ダッシュボード・アラート表示のしきい値（分） |
 | `SERVICE_STATUS_POLL_INTERVAL_MIN`※再起動要 | `60` | アルピコ運行状況スクレイピングの間隔（分） |
 | `ALPICO_STATUS_URL` | - | アルピコ交通「現在の運行状況」ページのURL |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin123` | 管理画面のBasic認証情報 |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin123` | 管理画面の認証情報。**未設定だと既定値のまま管理画面が開くため、公開環境では必ず設定すること** |
+| `ADMIN_SESSION_TTL_MIN` | `720` | 管理者セッション（httpOnly Cookie）の有効期限（分）。スライド更新なしの絶対期限 |
+| `ADMIN_SESSION_COOKIE_SECURE` | `auto` | セッションCookieの`Secure`属性。`auto`＝HTTPSで届いたとき／`FORCE_HTTPS`時に付ける。`true`/`false`で強制も可 |
+| `TRUST_PROXY` | - | Expressの`trust proxy`。リバースプロキシ配下では必須（`1`＝1段）。**未設定だと全利用者が同一IP扱いになりレートリミットが正しく効かず、`req.secure`も常にfalseになる** |
+| `FORCE_HTTPS` | `false` | 平文HTTPで届いたリクエストをHTTPSへ寄せる（GET/HEADは301、それ以外は403） |
+| `HSTS_MAX_AGE_SEC` / `HSTS_INCLUDE_SUBDOMAINS` | `15552000` / `false` | `Strict-Transport-Security`の内容。HTTPSで届いたリクエストにだけ付く。`0`でHSTS自体を出さない |
+| `CSP_MODE` | `off` | `Content-Security-Policy`。`off` / `report-only` / `on`。有効化前に`report-only`で全画面を一巡すること |
+| `CORS_ALLOWED_ORIGINS` | - | 公開APIで許可するオリジン（カンマ区切り）。空なら全オリジン許可。**管理API（`/api/admin/*`）にはこの設定に関係なくCORSヘッダーを付けない** |
+| `RATE_LIMIT_ENABLED` | `true` | 下記レートリミットのマスタースイッチ |
+| `ADMIN_AUTH_MAX_FAILURES` / `ADMIN_AUTH_WINDOW_MIN` | `10` / `15` | 管理画面の認証失敗がこの回数を超えたIPをこの分数ブロックする（総当たり対策）。数えるのは資格情報を提示して外したときだけ |
+| `ROUTE_SEARCH_RATE_LIMIT_PER_MIN` | `240` | `/api/route-search`（RAPTOR探索）の1IP・1分あたりの上限。`0`で無効 |
+| `COUNT_RATE_LIMIT_PER_MIN` | `240` | 集計値を増やす系（`/api/spot-search`・`/api/tourist-spots/:id/link-click`）の1IP・1分あたりの上限。`0`で無効 |
+| `VISITOR_MAX_CLIENTS_PER_IP` | `200` | サイト閲覧数（`X-Client-Id`）を1IPあたり何種類まで数えるか。`0`で無制限。上限に達してもリクエスト自体は通る（数えないだけ） |
+
+> **セキュリティ関連の設定（`ADMIN_SESSION_*`・`TRUST_PROXY`・`FORCE_HTTPS`・`HSTS_*`・`CSP_MODE`・`CORS_ALLOWED_ORIGINS`・レートリミット各種）は、意図的に管理画面から編集できません。** 定義は[backend/src/config/security.js](backend/src/config/security.js)にまとまっており、変更にはデプロイが必要です。レートリミットの上限やセッションの有効期限を管理画面から変えられると、設定ミスがそのまま管理画面自身へのロックアウト（＝復旧手段が無い状態）になるためです。既定値はすべて「設定しなければこれまでどおり動く」側に倒してあります。
 
 > ※印の項目は、環境変数に加えて**管理画面「運用パラメータ設定」**（`GET/PUT/DELETE /api/admin/runtime-settings`）からも編集できます。優先順位は「管理画面での上書き値(DB) > 環境変数 > コード既定値」で、管理画面で編集しなければこれまでどおり環境変数（未設定ならコード既定値）だけで動きます。定義一覧は[backend/src/config/runtimeSettingsCatalog.js](backend/src/config/runtimeSettingsCatalog.js)。「再起動要」の2項目（ポーリング間隔）は`setInterval`の間隔として起動時にしか読まれないため、管理画面で変更してもサーバー再起動まで反映されません。それ以外は次回のパイプライン実行（既定60秒間隔）までに反映されます。
 >
@@ -235,6 +254,23 @@ PostgreSQLは別途起動しておき、`.env`（または環境変数）で接�
 ```bash
 npm test   # backend/test/ の回帰テスト（node --test。DB不要な純粋関数のみ対象）
 ```
+
+### 本番公開時に必ず行うこと
+
+このアプリ自体はTLS終端を行いません（平文HTTPでポートを開くだけです）。公開する場合は
+**前段にリバースプロキシ（nginx / Caddy / Cloudflare 等）を置いてHTTPSで終端**し、`.env`に次を設定してください。
+
+| 設定 | 理由 |
+|---|---|
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 未設定だと `admin` / `admin123` のまま管理画面が開きます |
+| `TRUST_PROXY=1` | クライアントIPの判定（レートリミットの単位）とHTTPS判定（HSTS・`Secure` Cookie）に必要。**未設定だと全利用者が同一IP扱いになります** |
+| `FORCE_HTTPS=true` | 平文HTTPで届いたリクエストをHTTPSへ寄せます（GET/HEADは301、それ以外は403） |
+| `CORS_ALLOWED_ORIGINS` | 公開APIを叩けるオリジンを絞ります（未設定なら全オリジン許可のまま） |
+
+管理画面のログイン情報は**ブラウザに保存されません**（サーバー側セッション＝httpOnly Cookie）。
+そのぶんサーバーを再起動・デプロイするとセッションが失効し、再ログインが必要になります。
+`CSP_MODE`は既定`off`です。有効にする場合は`report-only`で全画面を一巡し、
+ブロックが出ないことを確認してから`on`にしてください。
 
 ---
 

@@ -16,6 +16,14 @@ services:
       timeout: 5s
       retries: 15
 
+  # このcomposeはアプリ本体を平文HTTPで3000番に出すだけで、TLS終端は行いません。
+  # 公開する場合は前段にリバースプロキシ（nginx / Caddy / Cloudflare 等）を置き、
+  # そこでHTTPS終端とHTTP→HTTPSリダイレクトを行ってください。管理画面のログインも
+  # セッションCookieも、平文HTTPだと経路上で盗めます。
+  # プロキシを置いたら .env に次を設定すること（backend/.env.example 参照）:
+  #   TRUST_PROXY=1        … クライアントIP（レートリミットの単位）とHTTPS判定に必要
+  #   FORCE_HTTPS=true     … 平文で届いたリクエストをHTTPSへ寄せる
+  #   ADMIN_USERNAME / ADMIN_PASSWORD … 未設定だと admin / admin123 のまま起動する
   backend:
     build:
       context: .
@@ -30,6 +38,8 @@ services:
       db:
         condition: service_healthy
     ports:
+      # 前段にプロキシを置く構成では "127.0.0.1:3000:3000" にして、
+      # アプリ本体を外部へ直接公開しないようにするのが安全です。
       - "3000:3000"
 
 volumes:

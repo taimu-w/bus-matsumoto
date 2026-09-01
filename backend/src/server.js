@@ -5,11 +5,35 @@ const cors = require('cors');
 const apiRouter = require('./routes/api');
 const scheduler = require('./jobs/scheduler');
 const serviceStatusJob = require('./jobs/serviceStatusJob');
+const security = require('./config/security');
+const { httpsRedirect, securityHeaders } = require('./middleware/securityHeaders');
 const { refreshRuntimeSettingsCache } = require('./services/runtimeSettings');
 const { refreshDirectionRulesCache } = require('./services/directionRules');
 
 const app = express();
-app.use(cors());
+
+// リバースプロキシ配下でクライアントIP（レートリミットの単位）とプロトコル（req.secure＝HSTS・
+// Secure Cookieの前提）を正しく判定するための設定。既定はfalse（X-Forwarded-Forを信用しない）。
+// 手前にプロキシが無いのに有効化すると、ヘッダー詐称でレートリミットを回避されるため注意。
+app.set('trust proxy', security.TRUST_PROXY);
+// バージョン込みの`X-Powered-By: Express`を返さない（狙い撃ちの手がかりを減らす）
+app.disable('x-powered-by');
+
+app.use(httpsRedirect);
+app.use(securityHeaders);
+
+// CORS: 公開APIにだけ付ける。/api/admin/* にはCORSヘッダーを一切付けないため、
+// 別オリジンのページから管理APIのレスポンスを読むことはできない
+// （管理画面は同一オリジンから叩くのでCORSを必要としない）。
+// CORS_ALLOWED_ORIGINSが未設定なら、従来どおり公開APIは全オリジン許可のまま。
+const corsMiddleware = cors(
+  security.CORS_ALLOWED_ORIGINS.length > 0 ? { origin: security.CORS_ALLOWED_ORIGINS } : undefined
+);
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/admin')) return next();
+  return corsMiddleware(req, res, next);
+});
+
 app.use(express.json());
 
 app.use('/api', apiRouter);
@@ -43,6 +67,14 @@ app.get('*', (req, res, next) => {
 const PORT = parseInt(process.env.PORT || '3000', 10);
 app.listen(PORT, async () => {
   console.log(`[server] 横田信大循環線リアルタイム運行管理システム起動: http://localhost:${PORT}`);
+  // セキュリティ設定は環境変数でしか変えられない（管理画面から見えない）ため、
+  // 「本番なのにHTTPS強制もCORS制限も入っていない」を起動ログで気づけるようにしておく。
+  console.log(
+    `[server] セキュリティ設定: trustProxy=${JSON.stringify(security.TRUST_PROXY)} ` +
+    `forceHttps=${security.FORCE_HTTPS} ` +
+    `cors=${security.CORS_ALLOWED_ORIGINS.length > 0 ? security.CORS_ALLOWED_ORIGINS.join(',') : '全オリジン許可'} ` +
+    `csp=${security.CSP_MODE} rateLimit=${security.RATE_LIMIT_ENABLED ? 'ON' : 'OFF'}`
+  );
 
   // 管理画面から上書きされた運用パラメータ（POLL_INTERVAL_SECONDS等、起動時にしか
   // 読まれない設定を含む）をscheduler/serviceStatusJob起動前に読み込んでおく。

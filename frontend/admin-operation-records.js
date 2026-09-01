@@ -43,9 +43,11 @@
     try {
       const params = new URLSearchParams({ from, to });
       if (routeId) params.set('routeId', routeId);
-      const headers = {};
-      if (state.token) headers['Authorization'] = `Basic ${state.token}`;
-      const response = await fetch(`/api/admin/operation-records/export?${params.toString()}`, { headers });
+      // 認証はhttpOnly Cookie（同一オリジンなので既定で送られる）。
+      // CSVをそのまま受け取りたいので、JSON前提のapi()ではなく生のfetchを使う。
+      const response = await fetch(`/api/admin/operation-records/export?${params.toString()}`, {
+        credentials: 'same-origin'
+      });
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         throw new Error(data.error || 'ダウンロードに失敗しました');

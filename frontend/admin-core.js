@@ -1,7 +1,11 @@
 // 管理画面の基盤（認証・共有fetch・共通ヘルパー・ポーリング機構）。
 // ルーティングやセクション固有の処理は持たない。admin-router.js / admin-<section>.js より先に読み込むこと。
 
-const state = { token: null };
+// 認証状態はこのフラグだけ。**資格情報もトークンもブラウザ側には一切保持しない**
+// （認証はサーバー側セッション＝httpOnly Cookieで、JSからは読めない）。
+// 旧実装は btoa("user:pass") を localStorage に保存していたが、base64は暗号化ではなく
+// XSSが1件でもあれば資格情報ごと抜かれるため廃止した（docs/system-review-2026-09.md S-2）。
+const state = { authenticated: false };
 
 const loginCardWrap = document.getElementById('login-card-wrap');
 const appShell = document.getElementById('app-shell');
@@ -105,16 +109,51 @@ function showLoginStatus(message, tone = 'info') {
   loginStatusBox.classList.remove('hidden');
 }
 
-function setAuthToken(username, password) {
-  state.token = btoa(`${username}:${password}`);
+// ==========================================================
+// 認証（サーバー側セッション。POST/DELETE /api/admin/session）
+// ==========================================================
+
+// ログイン。資格情報をネットワークに載せるのはこの1回だけで、以後はCookieが認証を担う。
+async function login(username, password) {
+  await api('/api/admin/session', {
+    method: 'POST',
+    body: JSON.stringify({ username, password })
+  });
+  state.authenticated = true;
+  sessionExpiredHandled = false;
 }
 
-function clearAuthToken() {
-  state.token = null;
-  localStorage.removeItem('adminToken');
+// ログアウト。サーバー側のセッションも確実に破棄する（クライアント側だけ消しても
+// トークンが生き残る、という旧実装の弱点をなくすため）。
+async function logout() {
+  try {
+    await api('/api/admin/session', { method: 'DELETE' });
+  } catch (err) {
+    // 通信に失敗しても画面はログアウト状態にする（次回アクセス時に401で弾かれる）
+  }
+  applyLoggedOutState();
+}
+
+function applyLoggedOutState() {
+  state.authenticated = false;
   stopAllPollers();
   appShell.classList.add('hidden');
   loginCardWrap.classList.remove('hidden');
+}
+
+// セッション切れ（＝サーバー再起動・有効期限超過）でログイン画面へ戻す。
+// 複数のポーラーが同時に401を受け取るため、1回だけ処理する。
+let sessionExpiredHandled = false;
+
+function handleSessionExpired() {
+  if (!state.authenticated || sessionExpiredHandled) return;
+  sessionExpiredHandled = true;
+  if (badgeTimer) {
+    clearInterval(badgeTimer);
+    badgeTimer = null;
+  }
+  applyLoggedOutState();
+  showLoginStatus('セッションの有効期限が切れました。再度ログインしてください。', 'error');
 }
 
 async function api(path, options = {}) {
@@ -122,12 +161,15 @@ async function api(path, options = {}) {
     'Content-Type': 'application/json',
     ...(options.headers || {}),
   };
-  if (state.token) headers['Authorization'] = `Basic ${state.token}`;
 
-  const response = await fetch(path, { ...options, headers });
+  // 認証はhttpOnly Cookie。同一オリジンなので既定で送られるが、意図を明示しておく。
+  const response = await fetch(path, { credentials: 'same-origin', ...options, headers });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.error || '処理に失敗しました');
+    if (response.status === 401) handleSessionExpired();
+    const error = new Error(data.error || '処理に失敗しました');
+    error.status = response.status;
+    throw error;
   }
   return data;
 }

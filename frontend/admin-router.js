@@ -85,7 +85,7 @@ document.querySelectorAll('[data-section]').forEach((btn) => {
 });
 
 window.addEventListener('hashchange', () => {
-  if (!state.token) return; // 未ログイン時はルーティングを無視
+  if (!state.authenticated) return; // 未ログイン時はルーティングを無視
   renderSection(currentHashSectionId());
 });
 
@@ -113,20 +113,23 @@ async function handleLogin() {
 
   const loginBtn = document.getElementById('login-btn');
   loginBtn.disabled = true;
-  setAuthToken(username, password);
   try {
-    await api('/api/admin/settings'); // 認証確認を兼ねる
-    localStorage.setItem('adminToken', state.token);
-    applyEditorState();
-    if (badgeTimer) clearInterval(badgeTimer);
-    badgeTimer = setInterval(refreshAlertsBadge, 20000);
-    refreshAlertsBadge();
+    await login(username, password); // サーバー側セッションを発行してもらう（admin-core.js）
+    startAuthenticatedSession();
   } catch (err) {
-    state.token = null;
     showLoginStatus(err.message, 'error');
   } finally {
     loginBtn.disabled = false;
   }
+}
+
+// ログイン済み画面を出し、アラートバッジのポーリングを開始する。
+// 初回ログインとセッション復帰（再訪問）で共通。
+function startAuthenticatedSession() {
+  applyEditorState();
+  if (badgeTimer) clearInterval(badgeTimer);
+  badgeTimer = setInterval(refreshAlertsBadge, 20000);
+  refreshAlertsBadge();
 }
 
 document.getElementById('login-btn').addEventListener('click', handleLogin);
@@ -140,27 +143,24 @@ document.getElementById('login-btn').addEventListener('click', handleLogin);
   });
 });
 
-document.getElementById('logout-btn').addEventListener('click', () => {
+document.getElementById('logout-btn').addEventListener('click', async () => {
   if (badgeTimer) {
     clearInterval(badgeTimer);
     badgeTimer = null;
   }
-  clearAuthToken();
+  await logout(); // サーバー側セッションの破棄まで行う（admin-core.js）
   showLoginStatus('ログアウトしました。', 'info');
 });
 
-const storedToken = localStorage.getItem('adminToken');
-if (storedToken) {
-  state.token = storedToken;
-  api('/api/admin/settings')
-    .then(() => {
-      applyEditorState();
-      badgeTimer = setInterval(refreshAlertsBadge, 20000);
-      refreshAlertsBadge();
-    })
-    .catch(() => {
-      state.token = null;
-      localStorage.removeItem('adminToken');
-      showLoginStatus('保存済みセッションが無効です。再度ログインしてください。', 'error');
-    });
-}
+// 旧実装がlocalStorageへ保存していた資格情報（base64の user:pass）が残っている端末では、
+// この機会に必ず消す。移行後は書き込まないので、この1行だけで確実に消える。
+localStorage.removeItem('adminToken');
+
+// httpOnly CookieのセッションはJSから読めないため、サーバーに問い合わせて生死を確かめる。
+// 生きていればそのままログイン済み画面へ。無ければログイン画面のまま（初回訪問なので何も出さない）。
+api('/api/admin/session')
+  .then(() => {
+    state.authenticated = true;
+    startAuthenticatedSession();
+  })
+  .catch(() => { /* 未ログイン。ログインフォームを表示したまま待つ */ });

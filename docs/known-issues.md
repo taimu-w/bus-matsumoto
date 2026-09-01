@@ -194,16 +194,28 @@ pending便は`unassigned`にして閉じる。
 **修正案**: 候補ゼロを確定した時点で`closed_at`も同時に立てる。または`/api/admin/alerts`の未割当条件に
 「始発時刻から◯分以内」の上限を入れる。
 
-### M-15 CORS全開放・既定の管理者パスワード・非定数時間の認証比較
+### M-15 管理者パスワードの既定値が `admin` / `admin123` のまま起動できる
 
-*API / 管理画面* — `server.js`（`app.use(cors())`）、`api.js`（既定値 `admin/admin123` と `!==` 比較）
+*API / 管理画面* — `services/adminAuth.js`（`process.env.ADMIN_USERNAME || 'admin'`）
 
-`cors()`が引数なしで全オリジンを許可。認証情報の既定値が`.env.example`と同じで未設定でも起動する。
-ユーザー名・パスワードの比較が`!==`でタイミング差が残る。認証失敗時に`WWW-Authenticate`を返していない。
+`ADMIN_USERNAME`/`ADMIN_PASSWORD`を設定しなくても起動でき、その場合は誰でも知っている
+既定値で管理画面が開く。管理画面からは運用パラメータの変更・車両の手動割り当て・
+お知らせ配信・GTFS手動再取得ができるため、乗っ取られると利用者へ誤情報を配信できる。
 
-**修正案**: `cors({ origin: 許可オリジンの配列 })`に絞る。`ADMIN_PASSWORD`未設定時は起動を拒否するか
-ランダム値にして起動ログへ出す。比較は`crypto.timingSafeEqual`を使い、401に
-`WWW-Authenticate: Basic realm="admin"`を付ける。
+**修正案**: `ADMIN_PASSWORD`未設定時は起動を拒否するか、ランダム値を生成して起動ログへ1回だけ出す。
+
+同じ項目に含まれていた次の3点は対応済み（[system-review-2026-09.md](system-review-2026-09.md) S-2〜S-4）。
+
+- **CORS全開放** → 公開APIは`CORS_ALLOWED_ORIGINS`で絞れるようになり、管理API（`/api/admin/*`）には
+  そもそもCORSヘッダーを付けない。
+- **非定数時間の比較** → `crypto.timingSafeEqual`（SHA-256で固定長に潰してから比較）に置き換え済み。
+  ユーザー名・パスワードの判定を`&&`で短絡させないことで、どちらが外れたかも応答時間に出ない。
+- **総当たり** → 認証失敗をIPごとに数え、`ADMIN_AUTH_MAX_FAILURES`（既定10回）超過で
+  `ADMIN_AUTH_WINDOW_MIN`（既定15分）ブロックする。
+
+なお401に`WWW-Authenticate: Basic`は**意図的に付けていない**。付けるとfetchが401を受けた際に
+ブラウザ標準の認証ダイアログが出てしまい、管理画面自前のログインフォーム・セッション切れ処理と
+二重になるため。
 
 ### M-16 migrate.js が require されただけでマイグレーションを実行し、プロセスを終了させる
 
