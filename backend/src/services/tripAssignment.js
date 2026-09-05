@@ -12,7 +12,7 @@
 // 実績のコピーやマージは発生しない（仕様書 11・11.1）。
 const pool = require('../config/db');
 const { haversineDistanceMeters } = require('../utils/geo');
-const { computeDelayMinutes, getServiceDateString } = require('../utils/time');
+const { computeDelayMinutes, computeSignedDelayMinutes, getServiceDateString } = require('../utils/time');
 const { isDirectionIgnored } = require('./directionRules');
 const { getRuntimeSetting } = require('./runtimeSettings');
 
@@ -194,6 +194,7 @@ async function openAssignment(client, trip, candidate, role) {
     let status = st.is_through ? '通過' : '';
     let actualTime = null;
     let delayMinutes = null;
+    let signedDelayMinutes = null;
     let arrivalMethod = null;
     let arrivalEvidence = null;
 
@@ -203,6 +204,9 @@ async function openAssignment(client, trip, candidate, role) {
       status = '到着済';
       actualTime = candidate.gpsTime;
       delayMinutes = computeDelayMinutes(st.scheduled_time, actualTime);
+      // 始発バス停は早発（定刻前の出発）が起きうる唯一の判定点なので、
+      // 0に丸める前の符号付きの値も残す。
+      signedDelayMinutes = computeSignedDelayMinutes(st.scheduled_time, actualTime);
       arrivalMethod = 'start';
       arrivalEvidence = { distanceMeters: candidate.distance, gpsTime: candidate.gpsTime };
     }
@@ -211,8 +215,9 @@ async function openAssignment(client, trip, candidate, role) {
     // SET句に含めない（GTFS再取得のreseedで進行中の判定結果・根拠を巻き戻さないため）。
     await client.query(
       `INSERT INTO trip_stop_progress
-         (assignment_id, stop_id, seq_order, scheduled_time, status, actual_time, delay_minutes, arrival_method, arrival_evidence)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         (assignment_id, stop_id, seq_order, scheduled_time, status, actual_time, delay_minutes,
+          signed_delay_minutes, arrival_method, arrival_evidence)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (assignment_id, stop_id) DO UPDATE
          SET scheduled_time = EXCLUDED.scheduled_time,
              status = CASE
@@ -226,8 +231,13 @@ async function openAssignment(client, trip, candidate, role) {
              delay_minutes = CASE
                WHEN trip_stop_progress.status IN ('到着済', '付近') THEN trip_stop_progress.delay_minutes
                ELSE EXCLUDED.delay_minutes
+             END,
+             signed_delay_minutes = CASE
+               WHEN trip_stop_progress.status IN ('到着済', '付近') THEN trip_stop_progress.signed_delay_minutes
+               ELSE EXCLUDED.signed_delay_minutes
              END`,
-      [assignmentId, st.stop_id, st.seq_order, st.scheduled_time, status, actualTime, delayMinutes, arrivalMethod, arrivalEvidence]
+      [assignmentId, st.stop_id, st.seq_order, st.scheduled_time, status, actualTime, delayMinutes,
+       signedDelayMinutes, arrivalMethod, arrivalEvidence]
     );
   }
 
@@ -348,16 +358,90 @@ async function assignPendingTrips() {
 }
 
 /**
+ * 「始発時刻に候補車両が1台も見つからなかった便」を、十分に時間が経った時点でクローズする。
+ *
+ * この種の便は trip_vehicle_assignments に1行も持たないため reassignOrphanTrips() の
+ * 対象外で、closed_at が立つ経路が finishTrips() の翌日の運行日終了掃除しか無かった。
+ * その結果、管理画面の unassignedTrip アラートに一日中残り続けてノイズになっていた。
+ *
+ * クローズまでの猶予は VEHICLE_MAX_AGE_MIN（割り当ての強制終了までの経過時間・既定120分）を
+ * 流用する。担当車両が付いた便の割り当てもこの時間で強制終了されるため、
+ * 「便が運行情報の対象で居られる最大時間」の基準が両者で揃う。
+ *
+ * closeDailyTrip() は担当を経験した割り当てが無ければ何もアーカイブしないので、
+ * 実績・区間統計には一切影響しない。assignment_state は 'unassigned' のまま
+ * （'担当車両不在' 以外の理由では書き換えない）なので、割り当て監視画面の
+ * 表示（outcome='unassigned' / 理由「候補なし」）も従来どおり。
+ */
+async function closeCandidatelessTrips(client) {
+  const { closeDailyTrip } = require('./finishService');
+  const graceSeconds = getRuntimeSetting('VEHICLE_MAX_AGE_MIN') * 60;
+
+  const targets = await client.query(
+    `SELECT d.id, d.route_id, d.start_time
+     FROM daily_trips d
+     WHERE d.closed_at IS NULL
+       AND d.assignment_state = 'unassigned'
+       AND d.start_at <= now() - make_interval(secs => $1::double precision)
+       AND NOT EXISTS (
+         SELECT 1 FROM trip_vehicle_assignments a WHERE a.daily_trip_id = d.id
+       )
+     ORDER BY d.start_at ASC
+     LIMIT 200`,
+    [graceSeconds]
+  );
+
+  let closed = 0;
+  for (const trip of targets.rows) {
+    await closeDailyTrip(client, trip.id, '候補なし');
+    closed++;
+    console.log(
+      `[tripAssignment] 候補なしのままの便をクローズ: 便=${trip.start_time}発 route=${trip.route_id}`
+    );
+  }
+  return closed;
+}
+
+/**
+ * 始発時刻が到来しているのに、まだ割り当て判定を受けていない（pending の）便の件数。
+ * 深夜帯でも運行処理を回す必要があるかの判断に使う（jobs/pipeline.js）。
+ *
+ * 判定条件は assignPendingTrips() の抽出条件と同じにしてある。ここで1件以上あるのに
+ * assignPendingTrips() が対象なしになる、という食い違いが起きないようにするため。
+ */
+async function countDuePendingTrips() {
+  const client = await pool.connect();
+  try {
+    const serviceDate = getServiceDateString();
+    const evaluateBefore = new Date(Date.now() - assignDelaySeconds() * 1000);
+    const res = await client.query(
+      `SELECT count(*)::int AS count
+       FROM daily_trips
+       WHERE service_date = $1
+         AND assignment_state = 'pending'
+         AND start_at <= $2`,
+      [serviceDate, evaluateBefore]
+    );
+    return res.rows[0].count;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * 担当車両が運行終了した便について、始発時刻時点の候補から再割り当てする（仕様書 10）。
  *
  * 再割り当て候補は「始発時刻時点で候補になっていた車両」だけで、
  * 始発時刻後に近づいてきた車両を追加することはしない（仕様書 10.2）。
+ *
+ * 併せて、候補が1台も居なかった便のクローズ（closeCandidatelessTrips）もここで行う。
  */
 async function reassignOrphanTrips() {
   const { closeDailyTrip, SUCCESS_END_REASONS } = require('./finishService');
   const client = await pool.connect();
   let reassigned = 0;
   let closed = 0;
+  let closedCandidateless = 0;
 
   try {
     // 担当車両が有効でなくなった、まだクローズしていない便。
@@ -378,9 +462,7 @@ async function reassignOrphanTrips() {
        ORDER BY d.start_at ASC`
     );
 
-    if (orphans.rows.length === 0) return { reassigned: 0, closed: 0 };
-
-    const assignedMap = await loadAssignedStartTimes(client);
+    const assignedMap = orphans.rows.length > 0 ? await loadAssignedStartTimes(client) : new Map();
 
     for (const trip of orphans.rows) {
       // 終点まで走り切って終了した便は、再割り当てせずそのまま完了とする。
@@ -461,21 +543,32 @@ async function reassignOrphanTrips() {
       }
     }
 
-    // 便がクローズされた＝新しい実績が確定したので、区間統計を育てる
+    // 便がクローズされた＝新しい実績が確定したので、区間統計を育てる。
+    // closeCandidatelessTrips() のクローズはアーカイブを1件も生まないため、
+    // ここには数えず（＝無駄な再集計を起こさず）別カウンタで返す。
     if (closed > 0) {
       const { updateSegmentStats } = require('./etaPredictor');
       await updateSegmentStats(client);
+    }
+
+    // 再割り当てそのものは終わっているので、ここで失敗しても⑥以降を巻き込まないようにする
+    // （このクローズはアラートのノイズ取りが目的で、運行判定には関与しないため）。
+    try {
+      closedCandidateless = await closeCandidatelessTrips(client);
+    } catch (err) {
+      console.error('[tripAssignment] 候補なしの便のクローズに失敗しました（継続）:', err.message);
     }
   } finally {
     client.release();
   }
 
-  return { reassigned, closed };
+  return { reassigned, closed, closedCandidateless };
 }
 
 module.exports = {
   assignPendingTrips,
   reassignOrphanTrips,
+  countDuePendingTrips,
   findCandidates,
   openAssignment,
   hasSamePeriodConflict,

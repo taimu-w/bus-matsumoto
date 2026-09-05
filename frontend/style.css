@@ -10,6 +10,14 @@
   --focus-ring: #2563eb; /* Tailwind blue-600 相当。フォーカスリングの色を1箇所に集約 */
 }
 
+/* モーダルの表示/非表示はこのクラスの付け外しだけで制御する（app.jsのopenModal/closeModal）。
+   モーダルのルート要素は常にTailwindの"flex"クラスを持つため、素のhidden属性（display:noneの
+   優先度が低く、後から評価される.flex等のユーティリティクラスに負ける）では隠せない。
+   !importantで確実に上書きする。 */
+.modal-hidden {
+  display: none !important;
+}
+
 /* タップ時の灰色ハイライトを消し、ボタン等はactive:scale-95などの
    トランジションで押下フィードバックを表現する（iOS/Android共通の見た目にするため）。 */
 a, button {
@@ -372,4 +380,19 @@ summary.list-none::-webkit-details-marker {
   .spot-carousel-track {
     transition: none;
   }
+}
+
+/* ==========================================================
+   リアルタイム運行状況「基本表示」（realtime-diagram.js）
+   全バス停を縦一列に並べるトランク線。各停留所の丸印（ドット）は
+   行ごとにインラインのTailwindクラス（absolute + left-[9px]）で
+   位置を合わせるため、ここではトランク線本体だけを定義する。
+   ========================================================== */
+.rt-diagram-trunk {
+  position: absolute;
+  left: 15px;
+  top: 0.5rem;
+  bottom: 0.5rem;
+  width: 2px;
+  background: #bfdbfe;
 }

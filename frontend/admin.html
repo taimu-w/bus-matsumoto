@@ -29,7 +29,7 @@
             <input id="username" type="text" class="mt-1 w-full border rounded-lg px-3 py-2" placeholder="admin" />
           </label>
           <label class="block text-sm font-bold">パスワード
-            <input id="password" type="password" class="mt-1 w-full border rounded-lg px-3 py-2" placeholder="admin123" />
+            <input id="password" type="password" class="mt-1 w-full border rounded-lg px-3 py-2" placeholder="••••••••" />
           </label>
           <button id="login-btn" class="w-full bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-lg px-4 py-3">ログイン</button>
         </div>
@@ -109,6 +109,10 @@
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="4.5" rx="1.2"></rect><path d="M5.5 8.5V18a1.5 1.5 0 001.5 1.5h10a1.5 1.5 0 001.5-1.5V8.5"></path><path d="M10 12.5h4"></path></svg>
               <span>運行実績ダウンロード</span>
             </button>
+            <button data-section="realtime-suspension" data-label="リアルタイム休止" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M10 9.5v5M14 9.5v5"></path></svg>
+              <span>リアルタイム休止</span>
+            </button>
           </div>
         </div>
         <div>
@@ -138,13 +142,13 @@
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3" y="6" width="8" height="6" rx="1.3"></rect><rect x="13" y="12" width="8" height="6" rx="1.3"></rect><path d="M11 9h2a2 2 0 012 2v1"></path></svg>
               <span>外部IDマッピング</span>
             </button>
+            <button data-section="display-abbreviations" data-label="表示略称設定" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M4 7h16"></path><path d="M4 12h10"></path><path d="M4 17h7"></path></svg>
+              <span>表示略称設定</span>
+            </button>
             <button data-section="direction-rules" data-label="方向マッピング" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M8 3L4 7l4 4"></path><path d="M4 7h13a3 3 0 013 3v1"></path><path d="M16 21l4-4-4-4"></path><path d="M20 17H7a3 3 0 01-3-3v-1"></path></svg>
               <span>方向マッピング</span>
-            </button>
-            <button data-section="realtime-suspension" data-label="リアルタイム休止" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
-              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M10 9.5v5M14 9.5v5"></path></svg>
-              <span>リアルタイム休止</span>
             </button>
             <button data-section="runtime-settings" data-label="運用パラメータ設定" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.6"></circle><path d="M19.4 13.5a1.65 1.65 0 000-3l1.1-1.9-2.1-2.1-1.9 1.1a1.65 1.65 0 00-3 0L12.6 3.5h-2.9L8.7 5.6a1.65 1.65 0 00-3 0l-1.9-1.1-2.1 2.1 1.1 1.9a1.65 1.65 0 000 3l-1.1 1.9 2.1 2.1 1.9-1.1a1.65 1.65 0 003 0l1 2.1h2.9l1-2.1a1.65 1.65 0 003 0l1.9 1.1 2.1-2.1z"></path></svg>
@@ -228,15 +232,10 @@
             <table class="w-full text-sm">
               <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0 z-10">
                 <tr>
-                  <th rowspan="2" class="text-left px-3 py-2 align-bottom">車両</th>
-                  <th colspan="2" class="text-left px-3 py-2 border-l">直近の平日運行（1日分）</th>
-                  <th colspan="2" class="text-left px-3 py-2 border-l">直近の土休日運行（1日分）</th>
-                </tr>
-                <tr>
-                  <th class="text-left px-3 py-1.5 border-l font-bold">運行日</th>
-                  <th class="text-left px-3 py-1.5 font-bold">便（始発時刻／路線名／行先）</th>
-                  <th class="text-left px-3 py-1.5 border-l font-bold">運行日</th>
-                  <th class="text-left px-3 py-1.5 font-bold">便（始発時刻／路線名／行先）</th>
+                  <th class="text-left px-3 py-2 font-bold">車両</th>
+                  <th class="text-left px-3 py-2 border-l font-bold whitespace-nowrap">曜日区分</th>
+                  <th class="text-left px-3 py-2 border-l font-bold whitespace-nowrap">運行日</th>
+                  <th class="text-left px-3 py-2 border-l font-bold">便（始発時刻／路線名／行先）</th>
                 </tr>
               </thead>
               <tbody id="vehicle-operation-status-tbody"></tbody>
@@ -594,6 +593,7 @@
                   <th class="text-left px-3 py-2">最終成功時刻</th>
                   <th class="text-left px-3 py-2">所要時間</th>
                   <th class="text-left px-3 py-2">直近の成否</th>
+                  <th class="text-left px-3 py-2">スキップ</th>
                   <th class="text-left px-3 py-2">直近エラー</th>
                 </tr>
               </thead>
@@ -788,6 +788,40 @@
           </div>
         </section>
 
+        <!-- 表示略称設定 -->
+        <section id="section-display-abbreviations" class="section hidden space-y-4">
+          <div>
+            <h2 class="text-xl font-bold">表示略称設定</h2>
+            <p class="text-sm text-slate-500">
+              バスマップ・バス停時刻表・接近中のバスパネルで、系統名や行き先の表示が枠からはみ出すときだけ使う略称を登録します。<br>
+              元テキストは、表示される文字列の一部（部分文字列）として一致すれば置き換えられます（例:「バスターミナル」→「BT」）。<br>
+              はみ出さずに全文表示できる場合は、略称を登録していても使われません。
+            </p>
+          </div>
+          <div class="flex gap-2 flex-wrap items-end">
+            <label class="text-sm font-bold">元テキスト
+              <input id="abbrev-original" type="text" class="mt-1 border rounded-lg px-3 py-2" placeholder="バスターミナル" />
+            </label>
+            <label class="text-sm font-bold">略称
+              <input id="abbrev-text" type="text" class="mt-1 border rounded-lg px-3 py-2" placeholder="BT" />
+            </label>
+            <button id="add-abbrev-btn" class="bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-lg px-4 py-2">保存</button>
+          </div>
+          <div class="bg-white rounded-xl border overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-50 text-slate-500">
+                <tr>
+                  <th class="text-left px-3 py-2 font-bold">元テキスト</th>
+                  <th class="text-left px-3 py-2 font-bold">略称</th>
+                  <th class="text-left px-3 py-2 font-bold">更新日時</th>
+                  <th class="text-left px-3 py-2 font-bold"></th>
+                </tr>
+              </thead>
+              <tbody id="display-abbreviations-list"></tbody>
+            </table>
+          </div>
+        </section>
+
         <!-- 方向マッピング -->
         <section id="section-direction-rules" class="section hidden space-y-4">
           <div>
@@ -910,14 +944,15 @@
           <div>
             <h2 class="text-xl font-bold">観光スポット管理</h2>
             <p class="text-sm text-slate-500">
-              1行1件、タブ区切りで貼り付けてください（列順：ID・名称・かな・ローマ字・緯度・経度・URL・営業時間・滞在時間目安・説明・営業時間（英語）・滞在時間目安（英語）・説明（英語）・写真URL・カテゴリ・表示）。<br>
+              1行1件、タブ区切りで貼り付けてください（列順：ID・名称・かな・ローマ字・別称・緯度・経度・URL・営業時間・滞在時間目安・説明・営業時間（英語）・滞在時間目安（英語）・説明（英語）・写真URL・カテゴリ・表示）。<br>
               1列目のIDが観光スポットの識別子です（重複しない任意の文字列。「/」・タブ・改行などの制御文字は不可、64文字以内）。<strong>IDが同じなら名称が変わっても同一スポット</strong>として扱い、名称による名寄せは行いません。IDをキーに全件を洗い替えます（テキストに無いIDの行は削除されます）。ローマ字が空欄の場合はかなから自動生成します。未入力の項目があっても登録できます。英語欄は登録のみ対応しており、利用者画面はまだ英語表示に対応していません。<br>
+              別称は「松本城」に対する「からす城」「国宝」のように、別の呼び名でも経路検索の出発地・目的地やスポット検索の候補に出すための検索補助用の項目です。「,」（カンマ）区切りで複数登録でき、<strong>利用者画面には表示されません</strong>（かな・ローマ字への変換も不要です）。<br>
               写真URLは「,」（カンマ）区切りで複数枚登録できます（利用者画面では先頭から順に横スクロールで表示されます）。<br>
               「表示」欄は空欄のまま、または「観光」「観光スポット」以外を入力すると、バス停ページの周辺観光スポット表示には出ません（学校・病院など、経路検索の目的地としては使いたいが観光スポットではない登録向け）。地点名での経路検索・結果画面での詳細ポップアップ表示は「表示」欄の内容に関わらず従来どおり行えます。
             </p>
           </div>
           <textarea id="spots-textarea" rows="10"
-            placeholder="matsumotojo&#9;松本城&#9;まつもとじょう&#9;Matsumoto-jo&#9;36.2381&#9;137.9686&#9;https://...&#9;8:30〜17:00&#9;1時間程度&#9;国宝五重六階の天守&#9;8:30-17:00&#9;About 1 hour&#9;A castle with a five-story, six-floor keep designated as a national treasure&#9;https://res.cloudinary.com/.../a.jpg,https://res.cloudinary.com/.../b.jpg&#9;史跡&#9;観光"
+            placeholder="matsumotojo&#9;松本城&#9;まつもとじょう&#9;Matsumoto-jo&#9;からす城,国宝&#9;36.2381&#9;137.9686&#9;https://...&#9;8:30〜17:00&#9;1時間程度&#9;国宝五重六階の天守&#9;8:30-17:00&#9;About 1 hour&#9;A castle with a five-story, six-floor keep designated as a national treasure&#9;https://res.cloudinary.com/.../a.jpg,https://res.cloudinary.com/.../b.jpg&#9;史跡&#9;観光"
             class="w-full border rounded-lg px-3 py-2 font-mono text-xs"></textarea>
           <div class="flex items-center gap-3">
             <button id="save-spots-btn" class="bg-green-700 hover:bg-green-800 text-white font-bold rounded-lg px-4 py-3">登録（全件洗い替え）</button>
@@ -1059,30 +1094,35 @@
     </div>
   </div>
 
-  <script src="/admin-core.js"></script>
-  <script src="/admin-dashboard.js"></script>
-  <script src="/admin-vehicle-operation-status.js"></script>
-  <script src="/admin-assignment.js"></script>
-  <script src="/admin-prediction-accuracy.js"></script>
-  <script src="/admin-today-overview.js"></script>
-  <script src="/admin-alerts.js"></script>
-  <script src="/admin-gps-outage.js"></script>
-  <script src="/admin-gtfs-feeds.js"></script>
-  <script src="/admin-location-feeds.js"></script>
-  <script src="/admin-api-stats.js"></script>
-  <script src="/admin-job-monitor.js"></script>
-  <script src="/admin-notices.js"></script>
-  <script src="/admin-busstop-notices.js"></script>
-  <script src="/admin-holidays.js"></script>
-  <script src="/admin-route-mappings.js"></script>
-  <script src="/admin-direction-rules.js"></script>
-  <script src="/admin-runtime-suspension.js"></script>
-  <script src="/admin-runtime-settings.js"></script>
-  <script src="/admin-tourist-spots.js"></script>
-  <script src="/admin-tourist-spot-clicks.js"></script>
-  <script src="/admin-vehicle-labels.js"></script>
-  <script src="/admin-viewers.js"></script>
-  <script src="/admin-operation-records.js"></script>
-  <script src="/admin-router.js"></script>
+  <!-- defer: ビルドなし方針のため1本にバンドルはしないが、直列ダウンロードだけは避ける。
+       defer付きの外部scriptはこの記述順のままDOM解析完了後にまとめて実行されるため、
+       「admin-core.js→各admin-*.js→admin-router.jsの順に読み込む」という暗黙の依存は崩れない
+       （docs/system-review-2026-09.md F-7）。 -->
+  <script src="/admin-core.js" defer></script>
+  <script src="/admin-dashboard.js" defer></script>
+  <script src="/admin-vehicle-operation-status.js" defer></script>
+  <script src="/admin-assignment.js" defer></script>
+  <script src="/admin-prediction-accuracy.js" defer></script>
+  <script src="/admin-today-overview.js" defer></script>
+  <script src="/admin-alerts.js" defer></script>
+  <script src="/admin-gps-outage.js" defer></script>
+  <script src="/admin-gtfs-feeds.js" defer></script>
+  <script src="/admin-location-feeds.js" defer></script>
+  <script src="/admin-api-stats.js" defer></script>
+  <script src="/admin-job-monitor.js" defer></script>
+  <script src="/admin-notices.js" defer></script>
+  <script src="/admin-busstop-notices.js" defer></script>
+  <script src="/admin-holidays.js" defer></script>
+  <script src="/admin-route-mappings.js" defer></script>
+  <script src="/admin-display-abbreviations.js" defer></script>
+  <script src="/admin-direction-rules.js" defer></script>
+  <script src="/admin-runtime-suspension.js" defer></script>
+  <script src="/admin-runtime-settings.js" defer></script>
+  <script src="/admin-tourist-spots.js" defer></script>
+  <script src="/admin-tourist-spot-clicks.js" defer></script>
+  <script src="/admin-vehicle-labels.js" defer></script>
+  <script src="/admin-viewers.js" defer></script>
+  <script src="/admin-operation-records.js" defer></script>
+  <script src="/admin-router.js" defer></script>
 </body>
 </html>

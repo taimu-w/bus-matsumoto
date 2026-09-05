@@ -809,6 +809,100 @@ async function migrate() {
         AND left(btrim(value), 1) <> '{'
     `);
 
+    // ==========================================================
+    // 40. 早発・早着（定刻より早い出発・到着）を残すための符号付き遅延列。
+    //     delay_minutes は0以上に丸めた「遅れ」なので、早発したという事実が
+    //     DBに一切残らず事後検証できなかった。表示・しきい値判定は従来どおり
+    //     delay_minutes を使い、符号付きの値はこの列に併記する。
+    // ==========================================================
+    await client.query(`
+      ALTER TABLE trip_stop_progress
+      ADD COLUMN IF NOT EXISTS signed_delay_minutes INTEGER
+    `);
+    await client.query(`
+      ALTER TABLE trip_vehicle_assignments
+      ADD COLUMN IF NOT EXISTS signed_delay_minutes INTEGER
+    `);
+    await client.query(`
+      ALTER TABLE completed_trip_stop_times
+      ADD COLUMN IF NOT EXISTS signed_delay_minutes INTEGER
+    `);
+
+    // ==========================================================
+    // 41. GTFS ZIPの内容指紋。内容が変わっていないのに毎時 seed() が全マスタを
+    //     書き換えていたため、「前回DBへ取り込んだZIP」を識別できるようにする。
+    // ==========================================================
+    await client.query(`ALTER TABLE feeds ADD COLUMN IF NOT EXISTS content_hash TEXT`);
+    await client.query(`ALTER TABLE feeds ADD COLUMN IF NOT EXISTS last_etag TEXT`);
+    await client.query(`ALTER TABLE feeds ADD COLUMN IF NOT EXISTS last_modified TEXT`);
+
+    // ==========================================================
+    // 42. vehicle_gps_log の重複測位の蓄積防止（既知 M-7）。
+    //     フィード更新間隔がポーリング間隔より長いと同じ測位が繰り返し vehicle_gps_log に
+    //     挿入され、pass()が重複ぶんの距離計算を毎周期走らせていた。
+    //     (vehicle_id, gps_time_ts) にUNIQUE制約を張り、書き込み側（vehicleAssigner.js）は
+    //     ON CONFLICT DO NOTHINGで無視する。
+    //
+    //     制約を張る前に、既存の重複行を「trip_gps_matchesから参照されている行があれば
+    //     それを残す・無ければ最小idを残す」方針で削除する（単純に最小idを残すと、
+    //     たまたま重複の後発側がGPSマッチの根拠として参照されていた場合にCASCADEで
+    //     trip_gps_matches ごと失われるため）。
+    // ==========================================================
+    const gpsLogUniqueIndex = await client.query(`
+      SELECT 1 FROM pg_indexes WHERE indexname = 'ux_vehicle_gps_log_vehicle_time'
+    `);
+
+    if (gpsLogUniqueIndex.rows.length === 0) {
+      // このブロックの間、他セッションからの vehicle_gps_log への書き込み（vehicleAssigner.js の
+      // 60秒間隔ポーリング等）を止めておく。ロック無しだと、直後の重複削除〜索引作成の間に
+      // 別セッションが新しい重複行をINSERTしてしまい、CREATE UNIQUE INDEXが重複キーで
+      // 失敗しうる（SHAREロックはROW EXCLUSIVE=INSERT/UPDATE/DELETEと競合するため、
+      // このトランザクションがCOMMITするまで新規の書き込みをブロックできる）。
+      await client.query('LOCK TABLE vehicle_gps_log IN SHARE MODE');
+
+      const dupGpsGroups = await client.query(`
+        SELECT vehicle_id, gps_time_ts, count(*) AS n
+        FROM vehicle_gps_log
+        GROUP BY vehicle_id, gps_time_ts
+        HAVING count(*) > 1
+      `);
+
+      if (dupGpsGroups.rows.length > 0) {
+        console.log(`[migrate] vehicle_gps_log に (vehicle_id, gps_time_ts) の重複を ${dupGpsGroups.rows.length}組 検出しました。重複を排除します。`);
+        await client.query(`
+          WITH ranked AS (
+            SELECT g.id,
+                   ROW_NUMBER() OVER (
+                     PARTITION BY g.vehicle_id, g.gps_time_ts
+                     ORDER BY (EXISTS (SELECT 1 FROM trip_gps_matches m WHERE m.gps_log_id = g.id)) DESC, g.id ASC
+                   ) AS rn
+            FROM vehicle_gps_log g
+          )
+          DELETE FROM vehicle_gps_log WHERE id IN (SELECT id FROM ranked WHERE rn > 1)
+        `);
+      }
+
+      // 旧・非UNIQUEインデックス（同じ列構成）を先に落としてから貼り直す。
+      await client.query(`DROP INDEX IF EXISTS idx_gps_log_vehicle`);
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_vehicle_gps_log_vehicle_time
+        ON vehicle_gps_log(vehicle_id, gps_time_ts)
+      `);
+      console.log('[migrate] ステップ42完了: vehicle_gps_log にUNIQUE制約を追加し、重複測位の蓄積を防止しました。');
+    }
+
+    // ==========================================================
+    // 43. tourist_spots に aliases（別称、検索補助用）を追加（docs/tourist-spots.md）。
+    //     「松本城」に対する「からす城」「国宝」など、別の呼び名でも経路検索の出発地・
+    //     目的地／スポット検索の候補に出せるようにする。"," 区切りで複数可。利用者画面
+    //     には出さず、候補一致にだけ使う（かな・ローマ字変換はしない）。列順は
+    //     ローマ字と緯度の間（ID・名称・かな・ローマ字・別称・緯度…）。
+    //     新規環境では schema.sql の CREATE TABLE に既に含まれているため実質 no-op。
+    // ==========================================================
+    await client.query(`
+      ALTER TABLE tourist_spots ADD COLUMN IF NOT EXISTS aliases TEXT
+    `);
+
     await client.query('COMMIT');
     console.log('[migrate] マイグレーション完了');
   } catch (err) {
@@ -820,14 +914,16 @@ async function migrate() {
   }
 }
 
-migrate()
-  .then(() => {
-    console.log('[migrate] 完了');
-    process.exit(0);
-  })
-  .catch((err) => {
-    console.error('[migrate] 失敗:', err);
-    process.exit(1);
-  });
+if (require.main === module) {
+  migrate()
+    .then(() => {
+      console.log('[migrate] 完了');
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error('[migrate] 失敗:', err);
+      process.exit(1);
+    });
+}
 
 module.exports = { migrate };

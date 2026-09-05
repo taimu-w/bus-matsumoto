@@ -11,7 +11,7 @@
 - **付近スタックの遡及昇格(`promoteStuckNearbyStops()`、`passInterpolate()`内)**: `付近`のまま離脱（＝到着確定のトリガー）が起きずに残ってしまうことがあります（典型例は終点：バスが到着後そのまま停車し続け、マージン距離だけ離れることが無い）。それより先のバス停が既に`到着済`になっている＝進行が先に進んだ以上とっくに通過しているはず、という場合、記録済みの最小距離の観測値を使って強制的に`到着済`へ昇格させます。実観測データに基づく確定なので`interpolated = FALSE`とし（後述の線形補間とは区別）、後続の線形補間より先に行うことで、その補間が昇格した区間を新しいアンカーとして使えるようにしています。
 - **割り当て終了時の強制昇格(`finishService.js`の`endAssignment()`)**: 上記の遡及昇格はパイプラインの次回実行（`pass()`）まで待つため、割り当てが終了する瞬間にはまだ`付近`のまま残っている場合があります。`endAssignment()`は`state='ended'`にする直前に、記録済みの最小距離の観測時刻を使って同様の強制昇格を行います。GPS途絶時の終点到着救済判定（`finishTrips()`）も、終点が`付近`まで来ていればその観測値をそのまま使い（`interpolated=FALSE`）、`''`のままなら直近の生GPS時刻にフォールバックします（`interpolated=TRUE`）。
 
-`trip_stop_progress`の3列（`nearby_min_distance_meters`/`nearby_min_distance_gps_time`/`nearby_min_distance_gps_time_ts`）は、`tripAssignment.js`の`openAssignment()`のON CONFLICT句のSET句に含めていません。これにより、GTFS再取得（reseed）時にも常に保持されます。`status`/`actual_time`/`delay_minutes`側のCASE式は、既存行が`到着済`・`付近`のどちらでも上書きしません。
+`trip_stop_progress`の3列（`nearby_min_distance_meters`/`nearby_min_distance_gps_time`/`nearby_min_distance_gps_time_ts`）は、`tripAssignment.js`の`openAssignment()`のON CONFLICT句のSET句に含めていません。これにより、GTFS再取得（reseed）時にも常に保持されます。`status`/`actual_time`/`delay_minutes`/`signed_delay_minutes`側のCASE式は、既存行が`到着済`・`付近`のどちらでも上書きしません。
 
 ## `passStepEntry()` — 候補となる付近入りを探す
 
@@ -78,7 +78,7 @@
 
 ## 未到着への差し戻し（`PUT .../stops/:stopId` に空の `actualTime`）
 
-管理画面から到着判定時刻を空にして保存すると、そのバス停を未到着（真の通過バス停なら`通過`、それ以外は`''`）へ戻します。`status` / `actual_time` / `delay_minutes` / `interpolated` / `arrival_method` / `arrival_evidence` / `nearby_min_distance_*`をクリアし、`trip_vehicle_assignments.last_arrived_seq`と便レベルの`delay_minutes`を残った到着済から引き直します。**`trip_gps_matches`は消しません**（消すと直近48時間の生GPSが次回の`pass()`で即座に再判定を誘発するため）。そのため差し戻したバス停は原則そのまま未到着に留まりますが、前後が到着済で1停留所だけ空くと`passInterpolate()`の線形補間で再び埋まり得ます（仕様）。
+管理画面から到着判定時刻を空にして保存すると、そのバス停を未到着（真の通過バス停なら`通過`、それ以外は`''`）へ戻します。`status` / `actual_time` / `delay_minutes` / `signed_delay_minutes` / `interpolated` / `arrival_method` / `arrival_evidence` / `nearby_min_distance_*`をクリアし、`trip_vehicle_assignments.last_arrived_seq`と便レベルの`delay_minutes` / `signed_delay_minutes`を残った到着済から引き直します。**`trip_gps_matches`は消しません**（消すと直近48時間の生GPSが次回の`pass()`で即座に再判定を誘発するため）。そのため差し戻したバス停は原則そのまま未到着に留まりますが、前後が到着済で1停留所だけ空くと`passInterpolate()`の線形補間で再び埋まり得ます（仕様）。
 
 ## 通過バス停の扱い（`tripAssignment.js`の`openAssignment()` / `delayCalc.js`との関係）
 
@@ -90,6 +90,8 @@ GTFSの`stop_times.txt`に載る行には**必ず実際の時刻**（`arrival_ti
 
 乗車のみ・降車のみのバス停（`pickup_type`/`drop_off_type`のどちらか一方だけが1）は、`schedule_stop_times`・`daily_trip_stop_times`の`no_pickup`/`no_drop_off`列（`is_through`と同じ表示用メタデータ）で表し、時刻表表示・リアルタイム表示のどちらでも実時刻を表示しつつ『降車のみ』『乗車のみ』のバッジを付けます。
 
-**GPS通過判定（`passStepEntry()`）は、`通過`ステータスのバス停を候補から除外しません。** `excludedSet`は`status`が`到着済`または`付近`のバス停だけを含むため、`通過`と確定済みのバス停でもGPSが実際にその座標へ近づけば通常どおり候補になり、`付近`→（離脱検知後）`到着済`へと更新されます。真の通過バス停もGTFS上は実座標・実時刻を持つ現実の地点なので、GPSマッチの対象から外す理由がないという設計です。
+**GPS通過判定（`passStepEntry()`）は、`通過`ステータスのバス停を候補から除外しません。** `excludedSet`は`status`が`到着済`または`付近`のバス停だけを含むため、`通過`と確定済みのバス停でもGPSが実際にその座標へ近づけば通常どおり候補になり、`付近`→（離脱検知後）`到着済`へと更新されます。真の通過バス停もGTFS上は実座標・実時刻を持つ現実の地点なので、GPSマッチの対象から外す理由がないという設計です。この判定結果（`arrival_method`・`arrival_evidence`、管理画面「運行ダッシュボード」のバス停別詳細）・`last_arrived_seq`の前進・付近スタックの遡及昇格や線形補間のアンカーとしての利用は、`通過`バス停でも他のバス停と同じに扱います。
+
+一方で、その実績時刻を**ETA予測の学習データ**（`segment_travel_stats`）に混ぜるかどうかは別の判断です。`etaPredictor.js`の`updateSegmentStats()`は、区間の両端（`from`・`to`）のいずれかが`is_through`（真の通過）のバス停なら、その区間を集計対象から除外します（`daily_trip_stop_times.is_through`を`daily_trip_id`+`stop_id`で引き当てて判定。`trip_stop_progress.status`はGPS到着確定で`'通過'`から書き換わってしまいアーカイブ後に区別が残らないため、`completed_trip_stop_times`ではなく当日便側のコピーを参照する）。降車できないバス停でGPSが確定した実績時刻を統計に混ぜない、というだけで、GPS通過判定・進捗管理・管理画面表示には一切影響しません。詳細は[eta-prediction-algorithm.md](eta-prediction-algorithm.md)。
 
 `delayCalc.js`は`scheduled_time`が無いことを理由にステータスを強制上書きしません。バス停のstatus確定は`openAssignment()`が正しく行っている前提です（判定条件の詳細は[vehicle-assignment.md](vehicle-assignment.md)）。

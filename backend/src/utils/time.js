@@ -25,10 +25,30 @@ function getNowTimeInt() {
   return t.hour * 100 + t.minute;
 }
 
+/**
+ * "HH:mm" を {h, m} に変換する。範囲外・書式違い・空値はすべて null を返す。
+ *
+ * 以前は parseInt に丸投げしていたため "23"（コロン無し）や "abc" でも
+ * {h:23, m:NaN} / {h:NaN, m:NaN} を返し、呼び出し側（isNightTime）の比較が
+ * すべて false ＝「常に非深夜」になっていた。不正値は null として明示し、
+ * 呼び出し側が既定値へフォールバックできるようにする。
+ */
 function parseHHMM(str) {
-  // "23:00" -> {h:23, m:0}
-  const [h, m] = String(str).split(':').map((v) => parseInt(v, 10));
+  if (str === null || str === undefined) return null;
+  const matched = /^\s*(\d{1,2}):(\d{1,2})\s*$/.exec(String(str));
+  if (!matched) return null;
+  const h = parseInt(matched[1], 10);
+  const m = parseInt(matched[2], 10);
+  if (h > 23 || m > 59) return null;
   return { h, m };
+}
+
+/**
+ * 深夜帯の境界時刻を「管理画面の上書き値 > 環境変数 > コード既定値」の順に解決する。
+ * 途中の値が不正な書式だった場合はその段を飛ばし、次の候補（最終的にはコード既定値）を使う。
+ */
+function resolveNightBoundary(override, envValue, fallback) {
+  return parseHHMM(override) || parseHHMM(envValue) || parseHHMM(fallback);
 }
 
 /**
@@ -41,10 +61,15 @@ function parseHHMM(str) {
  * その解決済みの値を引数で渡すこと。このファイル自体はDBアクセスを持たない
  * 純粋関数のままにしてある（CLAUDE.mdの「pure function」テスト方針、
  * および他の曜日区分ロジックと同じ「呼び出し側が外部データを渡す」設計に合わせるため）。
+ *
+ * 不正な書式の値（環境変数の打ち間違い等）は無視して既定値(23:00〜05:00)へ落ちる。
+ * 「壊れた設定＝常に非深夜」にすると、深夜帯を止めたい運用者に無言で反対の挙動を
+ * 返してしまうため。管理画面からの入力は config/runtimeSettingsCatalog.js の
+ * validateSettingValue() が HH:mm を強制するので、ここへ不正値が届くのは環境変数経由だけ。
  */
 function isNightTime(nightStartOverride, nightEndOverride) {
-  const nightStart = parseHHMM(nightStartOverride || process.env.NIGHT_START || '23:00');
-  const nightEnd = parseHHMM(nightEndOverride || process.env.NIGHT_END || '05:00');
+  const nightStart = resolveNightBoundary(nightStartOverride, process.env.NIGHT_START, '23:00');
+  const nightEnd = resolveNightBoundary(nightEndOverride, process.env.NIGHT_END, '05:00');
   const startInt = nightStart.h * 100 + nightStart.m;
   const endInt = nightEnd.h * 100 + nightEnd.m;
   const t = getNowTimeInt();
@@ -75,6 +100,40 @@ function formatTimeNoFormat(date) {
   return `${parseInt(h, 10)}:${get('minute')}`;
 }
 
+// 位置情報フィードのGPS時刻として受け付ける書式。
+//   - "YYYY-MM-DD HH:MM(:SS)"（現行フィードの書式。区切りは "-" でも "/" でもよい）
+//   - ISO 8601 の "YYYY-MM-DDTHH:MM:SS"（秒の小数部は無視する）
+//   - 上記に "Z" / "+09:00" / "+0900" のタイムゾーン指定が付いたもの
+// タイムゾーン指定が無い場合はJST(UTC+9・夏時間なし)として解釈する。
+const GPS_TIME_PATTERN =
+  /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[T ](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\.\d+)?\s*(Z|z|[+-]\d{2}:?\d{2})?$/;
+
+/**
+ * 位置情報フィードのGPS時刻文字列を Date に変換する。解釈できなければ null。
+ *
+ * 旧実装は `new Date(str.replace(/-/g, '/') + ' +0900')` の1行で、V8のパーサが
+ * "YYYY/MM/DD HH:MM:SS" を受け付けることに完全に依存していた。フィードがISO 8601
+ * （"2026-09-02T10:00:00+09:00" 等。Tやタイムゾーン指定が入る）へ変わると全行が
+ * Invalid Date になり、位置情報が**1件も入らないまま**フィードは「正常」と記録される。
+ *
+ * ここでは書式を明示的にパターンで受けたうえで、日時としての妥当性（13月・25時など）の
+ * 判定は従来どおりDateのパーサに委ねる。現行フィードの書式に対する結果は旧実装と同じ。
+ */
+function parseGpsTimeToDate(raw) {
+  if (raw === null || raw === undefined) return null;
+  const str = String(raw).trim();
+  if (!str) return null;
+  const matched = GPS_TIME_PATTERN.exec(str);
+  if (!matched) return null;
+
+  const [, year, month, day, hour, minute, second, zone] = matched;
+  let offset = '+0900';
+  if (zone) offset = (zone === 'Z' || zone === 'z') ? '+0000' : zone.replace(':', '');
+
+  const date = new Date(`${year}/${month}/${day} ${hour}:${minute}:${second || '00'} ${offset}`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 /**
  * "H:mm" 文字列を分単位の数値に変換（例: "8:30" -> 510）。不正値はNaN。
  */
@@ -91,10 +150,34 @@ function timeStrToMinutes(timeStr) {
 }
 
 /**
- * 分を "H:mm" 形式へ変換。
+ * 分を "H:mm" 形式へ変換する。24時以降は0時へ折り返す（1500 → "1:00"）。
+ *
+ * 実時刻（GPS由来の実績・ETA予測の到着時刻）を文字列にするための関数。
+ * GTFSの「運行日の0時起点」表記（24時超えをそのまま書く）が必要なところでは
+ * minutesToServiceTimeStr() を使うこと。
  */
 function minutesToTimeStr(minutes) {
   const h = Math.floor(minutes / 60) % 24;
+  const m = ((minutes % 60) + 60) % 60;
+  return `${h}:${String(m).padStart(2, '0')}`;
+}
+
+/**
+ * 分を「運行日の0時起点」の "H:mm" 形式へ変換する。24時以降を折り返さない
+ * （1500 → "25:00"）ため、GTFSの stop_times.txt と同じ表記になる。
+ *
+ * 定刻（schedule_stop_times / daily_trip_stop_times の scheduled_time、
+ * daily_trips.start_time）はGTFSの表記をそのまま持つ列なので、frequencies由来の
+ * 仮想便の定刻もこちらで作る。minutesToTimeStr() を使うと、同じ運行日の同じ時刻が
+ * 素の便では "25:00"・仮想便では "1:00" と2通りに割れ、便詳細URLの departure_time
+ * 突合（realtimeTripLookup.js の findLiveAssignment）が外れる。
+ *
+ * 1440分未満の値では minutesToTimeStr() と完全に同じ文字列を返す。
+ * 負の値・非数は運行日表記として意味を持たないため minutesToTimeStr() に委ねる。
+ */
+function minutesToServiceTimeStr(minutes) {
+  if (!Number.isFinite(minutes) || minutes < 0) return minutesToTimeStr(minutes);
+  const h = Math.floor(minutes / 60);
   const m = ((minutes % 60) + 60) % 60;
   return `${h}:${String(m).padStart(2, '0')}`;
 }
@@ -149,20 +232,22 @@ function getDayOfWeek(date = new Date()) {
 }
 
 /**
- * 定刻(scheduledStr)と実績/予測時刻(actualStr)から遅延分数を算出する。
+ * 定刻(scheduledStr)と実績/予測時刻(actualStr)の差を、符号付きの分数で返す。
+ * 正＝遅れ、負＝定刻より早い（早発・早着）、0＝定刻どおり。
  *
- * 修正前は「actual - scheduled が負ならそのまま +24h(1440分)する」という
- * 単純な日跨ぎ対策になっていたため、たとえば定刻より5分早く出発しただけの
- * ケースでも diff=-5 → 1435分遅れ、という意味不明な表示になってしまっていた。
+ * 「actual - scheduled が負ならそのまま +24h(1440分)する」という単純な日跨ぎ対策では、
+ * 定刻より5分早く出発しただけで diff=-5 → 1435分遅れになってしまう。そのため
+ * 「半日(720分)を超える」極端な差分のときだけ日跨ぎとみなして補正し、
+ * 数分程度のズレは早発・早着としてそのまま符号付きで返す。
  *
- * この路線は 6:05〜22:26 の間で運行が完結しており、実運用で日付を跨ぐことは
- * 基本的に無い。したがって「半日(720分)を超える」ような極端な差分のときだけ
- * 日跨ぎとみなして補正し、数分程度の早着・早発は単純に「遅れなし(0分)」として
- * 扱う。結果が負の場合（＝定刻より早い）は遅延ではないため 0 に丸める。
+ * この符号付きの値は「定刻より早く出た／着いた」という運行事故を残すための唯一の経路
+ * （computeDelayMinutes() が0に丸めた値をDBへ入れると、あとから復元できない）。
+ * 保存先は trip_stop_progress.signed_delay_minutes /
+ * trip_vehicle_assignments.signed_delay_minutes / completed_trip_stop_times.signed_delay_minutes。
  *
- * @returns {number|null} 遅延分数（0以上）。時刻が不正な場合はnull。
+ * @returns {number|null} 符号付きの差分（分）。時刻が不正な場合はnull。
  */
-function computeDelayMinutes(scheduledStr, actualStr) {
+function computeSignedDelayMinutes(scheduledStr, actualStr) {
   const s = timeStrToMinutes(scheduledStr);
   const a = timeStrToMinutes(actualStr);
   if (Number.isNaN(s) || Number.isNaN(a)) return null;
@@ -171,7 +256,21 @@ function computeDelayMinutes(scheduledStr, actualStr) {
   if (diff < -720) diff += 24 * 60; // 深夜便が日付を跨いだ場合のみ補正
   else if (diff > 720) diff -= 24 * 60;
 
-  return Math.max(0, diff);
+  return diff;
+}
+
+/**
+ * 利用者・運行監視に見せる「遅れ分数」。computeSignedDelayMinutes() の結果を0で下限を切る。
+ *
+ * 早発・早着を「遅れ0分」として扱うのは公開画面・遅延アラートの仕様
+ * （「3分早い」を遅れとして出さない）。早いこと自体を知りたい場合は
+ * computeSignedDelayMinutes() を使うこと。
+ *
+ * @returns {number|null} 遅延分数（0以上）。時刻が不正な場合はnull。
+ */
+function computeDelayMinutes(scheduledStr, actualStr) {
+  const diff = computeSignedDelayMinutes(scheduledStr, actualStr);
+  return diff === null ? null : Math.max(0, diff);
 }
 
 module.exports = {
@@ -180,11 +279,14 @@ module.exports = {
   isNightTime,
   formatNowNoFormat,
   formatTimeNoFormat,
+  parseGpsTimeToDate,
   timeStrToMinutes,
   minutesToTimeStr,
+  minutesToServiceTimeStr,
   getServiceDateString,
   serviceDateTimeToDate,
   getDayType,
   getDayOfWeek,
-  computeDelayMinutes
+  computeDelayMinutes,
+  computeSignedDelayMinutes
 };

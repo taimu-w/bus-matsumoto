@@ -1,0 +1,14 @@
+{
+  "name": "バスタイム | 松本市バス リアルタイム運行状況",
+  "short_name": "バスタイム",
+  "description": "松本市内のバスのリアルタイム運行状況・経路検索・時刻表・バス停情報をまとめて確認できます。",
+  "lang": "ja",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f0f4f8",
+  "theme_color": "#1e40af",
+  "icons": [
+    { "src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

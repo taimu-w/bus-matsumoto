@@ -6,6 +6,14 @@ const { readFrequenciesByTripId } = require('../services/gtfsFrequencies');
 const { getEnabledGtfsFeeds, getAllFeedsForDb, validateFeedConfig } = require('../config/feeds');
 const { getNationalHolidays } = require('../utils/japaneseHolidays');
 
+// seed() 全体を直列化するためのトランザクションレベルアドバイザリロックのキー（G-2）。
+// 毎時パイプライン（gtfsFeedManager.updateAllGtfsFeeds）と管理画面の手動再取得
+// （POST /api/admin/gtfs-feeds/:feedId/refetch）は別接続からそれぞれ seed() を呼ぶ。
+// ロックなしで同時に走ると stops / schedule_trips / schedule_stop_times への
+// 大量UPSERTが競合し、ロック取得順の違いでデッドロックしうる（片方がROLLBACKし、
+// そのGTFS更新が黙って失敗する）。他の用途とキーが衝突しないよう、この排他制御専用の値。
+const SEED_ADVISORY_LOCK_KEY = 913472201;
+
 // 外部ID（位置情報CSVの系統ID）→ GTFS route_id の初期値。
 // 新規DB（route_external_idsが空）のときだけ投入する（seedRouteExternalIds参照）。
 // 管理画面での追加・変更・削除を上書きしないよう、2回目以降の起動では何もしない。
@@ -297,6 +305,93 @@ async function seedRoutesStatic(client) {
 }
 
 /**
+ * `schedule_trips` の既存行を、GTFSの `trip_id` を頼りに今回の並び順（trip_index）へ
+ * 整列させる。**下の UPSERT より前に必ず呼ぶこと。**
+ *
+ * `schedule_trips` の一意キー `(route_id, direction_id, service_id, trip_index)` の
+ * `trip_index` は trips.txt 内の並び順そのもので、行の同一性を表していない。
+ * このまま `ON CONFLICT ... DO UPDATE` すると、ダイヤ改正で便が1本増減しただけで
+ * 以降の便が全部1つずつずれ、**既存行の中身が別の便のもので上書きされる**。
+ * 行のIDは `daily_trips.schedule_trip_id` から参照されているため、走行中・生成済みの
+ * 当日便が別の便の時刻表を指すことになり、利用者に誤った定刻が出る。
+ *
+ * そこでUPSERTの前に、
+ *   1. グループ内の全行を一度 `trip_index = -id`（必ず負・必ず一意）へ退避し、
+ *   2. 今回のGTFSにも存在する便（`gtfs_trip_id` 一致）を行き先のtrip_indexへ、
+ *   3. 今回のGTFSから消えた便を、今回の便数より後ろの空き番号へ、
+ * それぞれ割り当て直す。これでUPSERTは必ず「同じ `gtfs_trip_id` の行」に当たる。
+ *
+ * 消えた便の行は**削除しない**（`completed_trips.trip_id` がCASCADEなしで参照しており、
+ * 削除するとアーカイブ済みの運行実績ごと巻き添えになるため）。後ろへ退避するだけで、
+ * 表示順（`ORDER BY trip_index`）でも現行の便より後ろに並ぶ。
+ *
+ * 並びに変化が無ければ1行も書かずに戻る（GTFSに実質的な変更が無い回のコスト対策）。
+ */
+async function alignTripIndexesByGtfsTripId(client, routeId, directionId, serviceId, orderedGtfsTripIds) {
+  const existing = (
+    await client.query(
+      `SELECT id, trip_index, gtfs_trip_id FROM schedule_trips
+        WHERE route_id = $1 AND direction_id = $2 AND service_id = $3
+        ORDER BY trip_index ASC, id ASC`,
+      [routeId, directionId, serviceId]
+    )
+  ).rows;
+  if (existing.length === 0) return;
+
+  const desiredIndexByGtfsTripId = new Map();
+  orderedGtfsTripIds.forEach((gtfsTripId, index) => {
+    if (gtfsTripId && !desiredIndexByGtfsTripId.has(gtfsTripId)) {
+      desiredIndexByGtfsTripId.set(gtfsTripId, index);
+    }
+  });
+
+  // 同じ gtfs_trip_id を持つ行が複数ある場合（過去のズレの残骸）は、
+  // trip_index の小さい行＝現行のseedが書き続けてきた行を残す。
+  const claimedByIndex = new Map();
+  const leftovers = [];
+  for (const row of existing) {
+    const desired = row.gtfs_trip_id ? desiredIndexByGtfsTripId.get(row.gtfs_trip_id) : undefined;
+    if (desired === undefined || claimedByIndex.has(desired)) {
+      leftovers.push(row);
+      continue;
+    }
+    claimedByIndex.set(desired, row);
+  }
+
+  const finalIndexById = new Map();
+  for (const [index, row] of claimedByIndex.entries()) finalIndexById.set(row.id, index);
+  let parkIndex = orderedGtfsTripIds.length;
+  for (const row of leftovers) {
+    finalIndexById.set(row.id, parkIndex);
+    parkIndex += 1;
+  }
+
+  const moving = existing.filter((row) => finalIndexById.get(row.id) !== row.trip_index);
+  if (moving.length === 0) return;
+
+  // 1. いったん全行を負のtrip_indexへ退避（`-id` は必ず一意で、正の行き先とも衝突しない）
+  await client.query(
+    `UPDATE schedule_trips SET trip_index = -id
+      WHERE route_id = $1 AND direction_id = $2 AND service_id = $3`,
+    [routeId, directionId, serviceId]
+  );
+
+  // 2. 確定した並びへ一括で戻す
+  const ids = existing.map((row) => row.id);
+  await client.query(
+    `UPDATE schedule_trips st SET trip_index = t.new_index
+       FROM unnest($1::int[], $2::int[]) AS t(id, new_index)
+      WHERE st.id = t.id`,
+    [ids, ids.map((id) => finalIndexById.get(id))]
+  );
+
+  console.log(
+    `[seed] schedule_trips の並びを gtfs_trip_id 基準で整列しました: ` +
+      `route=${routeId} direction=${directionId} service=${serviceId} (${moving.length}行)`
+  );
+}
+
+/**
  * 指定フィードの停留所・時刻表を登録する。
  */
 async function seedStopsAndTimetable(client, routesById, feedId) {
@@ -306,14 +401,26 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
   );
 
   const trips = readCsv('trips.txt', feedId);
+  // (route_id, direction_id, service_id) ごとの便のグループ。
+  // キーは JSON.stringify（区切り文字を使わない）で作り、値の側に3つの構成要素を
+  // そのまま持たせる。"${route_id}_${direction}_${service_id}" のような文字列キーを
+  // split('_') で分解する作りだと、route_id / service_id にアンダースコアが含まれる
+  // フィード（GTFSのIDは任意文字列）でグループが別の便へずれる。
   const tripsByRouteDirectionService = new Map();
   for (const trip of trips) {
     const directionId = Number.parseInt(trip.direction_id || '0', 10);
     // service_idにフィードIDプレフィックスを付ける（全フィードで一意にするため）
     const qualifiedServiceId = feedId ? `${feedId}:${trip.service_id}` : trip.service_id;
-    const key = `${trip.route_id}_${directionId}_${qualifiedServiceId}`;
-    if (!tripsByRouteDirectionService.has(key)) tripsByRouteDirectionService.set(key, []);
-    tripsByRouteDirectionService.get(key).push({ ...trip, directionId, service_id: qualifiedServiceId });
+    const key = JSON.stringify([trip.route_id, directionId, qualifiedServiceId]);
+    if (!tripsByRouteDirectionService.has(key)) {
+      tripsByRouteDirectionService.set(key, {
+        routeId: trip.route_id,
+        directionId,
+        serviceId: qualifiedServiceId,
+        trips: []
+      });
+    }
+    tripsByRouteDirectionService.get(key).trips.push({ ...trip, directionId, service_id: qualifiedServiceId });
   }
 
   const stopTimes = readCsv('stop_times.txt', feedId);
@@ -330,19 +437,22 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
   let totalStops = 0;
   let totalTrips = 0;
   let totalFrequencies = 0;
+  // G-4: reseedで不要になった行の掃除件数（運用者が挙動を確認できるよう末尾のログに含める）。
+  let totalOrphanStopTimesRemoved = 0;
+  let totalOrphanStopsRemoved = 0;
 
   for (const [routeId, routeName] of routesById.entries()) {
     // routeIdからfeedIdプレフィックスを除去して元のroute_idを取得
     const originalRouteId = unqualifyRouteId(routeId, feedId);
-    // この路線の全方向・全service_idの便を取得
+    // この路線の全方向・全service_idの便を取得（Mapの挿入順＝trips.txtの登場順を保つ）
     const directionServiceTrips = [];
-    for (const [key, trips] of tripsByRouteDirectionService.entries()) {
-      if (key.startsWith(`${originalRouteId}_`)) {
-        const parts = key.split('_');
-        const directionId = Number.parseInt(parts[1], 10);
-        const serviceId = parts.slice(2).join('_'); // service_idに"_"が含まれる可能性があるため
-        directionServiceTrips.push({ directionId, serviceId, trips });
-      }
+    for (const group of tripsByRouteDirectionService.values()) {
+      if (group.routeId !== originalRouteId) continue;
+      directionServiceTrips.push({
+        directionId: group.directionId,
+        serviceId: group.serviceId,
+        trips: group.trips
+      });
     }
 
     if (directionServiceTrips.length === 0) continue;
@@ -427,6 +537,15 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
 
       // ==== schedule_trips / schedule_stop_times構築（service_idグループごと）====
       for (const { serviceId, trips: routeTrips } of serviceGroups) {
+        // UPSERTの前に、既存行を gtfs_trip_id を頼りに今回の並び順へ整列させる（下記参照）。
+        await alignTripIndexesByGtfsTripId(
+          client,
+          routeId,
+          directionId,
+          serviceId,
+          routeTrips.map((t) => t.trip_id)
+        );
+
         const routeTripIds = [];
         for (const [tripIndex, trip] of routeTrips.entries()) {
           const firstStop = sortByStopSequence(stopTimesByTrip.get(trip.trip_id) || [])[0];
@@ -471,6 +590,11 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
 
         for (const [tripIndex, trip] of routeTrips.entries()) {
           const tripStopRows = sortByStopSequence(stopTimesByTrip.get(trip.trip_id) || []);
+          // G-4: この便で今回実際に使われた stop_id を集めておき、ループの最後で
+          // 「今回使われなかった (trip_id, stop_id) 行」を削除する（停車パターンが変わって
+          // 通らなくなったバス停の残骸が schedule_stop_times に残り続け、
+          // dailyTripBuilder が幽霊バス停を当日便へ引き継ぐのを防ぐ）。
+          const currentStopIdsForTrip = [];
 
           // occurrenceKeyの算出は上のstops構築ループと同じ並び・同じロジックで行う必要がある
           // （同じ便の同じ通過には必ず同じoccurrenceKeyが付くようにするため）。
@@ -506,16 +630,55 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
                      stop_headsign = EXCLUDED.stop_headsign`,
               [routeTripIds[tripIndex], stopRowId, localSeq, scheduledTime, isThrough, noPickup, noDropOff, stopHeadsign]
             );
+            currentStopIdsForTrip.push(stopRowId);
           }
+
+          // G-4: schedule_stop_times は (trip_id, stop_id) の UPSERT のみで、この便が
+          // 今回通らなくなったバス停の行を消す経路が無かった。trip_id は
+          // schedule_stop_times からしか参照されない（他テーブルは stops.id 側を参照する）ため、
+          // ここで削除しても他の実績・進行中データを巻き込まない。
+          const orphanStopTimesResult = await client.query(
+            `DELETE FROM schedule_stop_times WHERE trip_id = $1 AND NOT (stop_id = ANY($2::int[]))`,
+            [routeTripIds[tripIndex], currentStopIdsForTrip]
+          );
+          totalOrphanStopTimesRemoved += orphanStopTimesResult.rowCount;
         }
       }
+
+      // G-4: 今回のGTFSで使われなくなった stops 行（バス停が削除された、または occurrence が
+      // 変わって別行に置き換わった）を掃除する。ただし stops.id は daily_trip_stop_times /
+      // trip_stop_progress / trip_gps_matches / completed_trip_stop_times / segment_travel_stats /
+      // daily_trips(start_stop_id) からも（CASCADEなしで）参照されているため、これらのいずれかに
+      // 現に参照されている行は消さない（NOT EXISTS）。今回の便が1件も使わなくなった、かつ
+      // どこからも参照が残っていない行だけが削除対象になるので、進行中の当日便・実績・
+      // 区間統計を巻き込んでFK違反でseed()全体を失敗させることはない。
+      const currentStopIdsForDirection = Array.from(stopRowIdByOccurrence.values());
+      const orphanStopsResult = await client.query(
+        `DELETE FROM stops s
+         WHERE s.route_id = $1 AND s.direction_id = $2
+           AND NOT (s.id = ANY($3::int[]))
+           AND NOT EXISTS (SELECT 1 FROM schedule_stop_times x WHERE x.stop_id = s.id)
+           AND NOT EXISTS (SELECT 1 FROM daily_trip_stop_times x WHERE x.stop_id = s.id)
+           AND NOT EXISTS (SELECT 1 FROM trip_stop_progress x WHERE x.stop_id = s.id)
+           AND NOT EXISTS (SELECT 1 FROM trip_gps_matches x WHERE x.stop_id = s.id)
+           AND NOT EXISTS (SELECT 1 FROM completed_trip_stop_times x WHERE x.stop_id = s.id)
+           AND NOT EXISTS (
+             SELECT 1 FROM segment_travel_stats x WHERE x.from_stop_id = s.id OR x.to_stop_id = s.id
+           )
+           AND NOT EXISTS (SELECT 1 FROM daily_trips x WHERE x.start_stop_id = s.id)`,
+        [routeId, directionId, currentStopIdsForDirection]
+      );
+      totalOrphanStopsRemoved += orphanStopsResult.rowCount;
     }
   }
 
   console.log(
     `[seed] feed=${feedId} GTFS 停留所 ${totalStops} 件・時刻表 ${totalTrips} 便` +
     (totalFrequencies > 0 ? `・frequencies ${totalFrequencies} 件` : '') +
-    'を登録しました。'
+    (totalOrphanStopTimesRemoved > 0 ? `・停車パターンの残骸 ${totalOrphanStopTimesRemoved} 件` : '') +
+    (totalOrphanStopsRemoved > 0 ? `・不要になったバス停 ${totalOrphanStopsRemoved} 件` : '') +
+    'を登録しました。' +
+    (totalOrphanStopTimesRemoved > 0 || totalOrphanStopsRemoved > 0 ? '（掃除も実施）' : '')
   );
 }
 
@@ -566,6 +729,15 @@ async function seed() {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // もう一方の呼び出し経路がseed()実行中なら、ここで待たされる。先行するseed()が
+    // COMMIT/ROLLBACKした時点で pg_advisory_xact_lock はトランザクション終了に伴い
+    // 自動的に解放されるため、明示的なunlockは不要（seed()自身は必ずCOMMIT/ROLLBACKで
+    // 終わるため解放漏れも起きない）。lock_timeoutは、先行のseed()が何らかの理由で
+    // 長時間戻らない場合に無期限待ちでコネクションプールを圧迫しないための保険で、
+    // 通常（先行者がいない）は即座に取得できるため既存の所要時間に影響しない。
+    await client.query("SET LOCAL lock_timeout = '30s'");
+    await client.query('SELECT pg_advisory_xact_lock($1)', [SEED_ADVISORY_LOCK_KEY]);
 
     // 稼働状態を記録するための行を用意する（構成そのものはコード側が正）
     await ensureFeedRows(client);

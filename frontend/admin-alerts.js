@@ -6,7 +6,8 @@
     unassignedTrip: '未割当便',
     severeDelay: '大幅遅延',
     etaComputeFailure: '予測計算失敗',
-    gtfsFetchFailure: 'GTFS取得失敗'
+    gtfsFetchFailure: 'GTFS取得失敗',
+    pipelineSkipped: 'パイプライン停止気味'
   };
 
   function alertDetail(a) {
@@ -23,6 +24,8 @@
         return `${escapeHtml(a.startTime || '')}発 車両${escapeHtml(a.carId)} 最終計算: ${fmtDateTime(a.lastComputedAt)}`;
       case 'gtfsFetchFailure':
         return `${escapeHtml(a.feedName)}: ${escapeHtml(a.lastError || '')}`;
+      case 'pipelineSkipped':
+        return `${escapeHtml(a.jobLabel)} が ${a.consecutiveSkips}回連続でスキップ（前回の実行が長引いています）。最終スキップ: ${fmtDateTime(a.lastSkippedAt)}`;
       default:
         return '';
     }

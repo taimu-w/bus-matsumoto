@@ -10,11 +10,15 @@ const EXTERNAL_ROUTE_ID_ALIASES = {
 
 /**
  * route_id を解決する。
- * システム設定など、routeIdが省略可能なケースではデフォルト値（横田信大循環線）を使用する。
+ * routeId省略時に特定路線（旧・単一路線時代の横田信大循環線）へ黙って決め打ちすることはしない
+ * （docs/system-review-2026-09.md A-2）。省略時はnullを返すので、路線が特定できないと
+ * 意味を成さない呼び出し元（バス停・時刻表・運行状況など）はnullを400などで弾くこと。
+ * 逆にお知らせ設定のように「routeId無し＝全路線共通」で構わない呼び出し元は、
+ * このnullをそのまま許容してよい。
  */
 function resolveRouteId(routeId) {
   if (!routeId) {
-    return 'guruttomatsumotobus1:11';
+    return null;
   }
   return EXTERNAL_ROUTE_ID_ALIASES[routeId] || routeId;
 }

@@ -14,6 +14,9 @@ const { kanaToRomaji, capitalizeRomaji, normalizeSearchText } = require('../util
 const DEFAULT_NEARBY_RADIUS_METERS = 500; // バス停統合しきい値400mを参考にした初期値
 const DEFAULT_NEARBY_LIMIT = 5;
 
+// 緯度1度あたりのおおよその距離（赤道上・極付近を問わず一定）。
+const METERS_PER_DEGREE_LAT = 111320;
+
 // 公式サイトリンクのタップ数集計（tourist_spot_link_clicks）の保持日数。
 // 「最大1年間」のルックバックが常に成立するよう13か月弱を確保する（visitorTracker.js と
 // 同じくモジュール定数で管理。1時間掃除タイマー scheduler.js から purgeOldLinkClicks が呼ぶ）。
@@ -22,6 +25,17 @@ const LINK_CLICK_MAX_RANGE_DAYS = 366; // 集計期間の上限（うるう年�
 
 /** 写真URL列（"," 区切りで複数可）を配列へ分解する。空要素・前後空白は落とす。 */
 function splitPhotoUrls(value) {
+  return String(value || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * 別称列（"," 区切りで複数可）を配列へ分解する。空要素・前後空白は落とす。
+ * 検索補助用のため、かな・ローマ字への変換はしない（入力された文字列でそのまま一致させる）。
+ */
+function splitAliases(value) {
   return String(value || '')
     .split(',')
     .map((s) => s.trim())
@@ -61,11 +75,38 @@ function isVisibleOnBusStopPage(row) {
 }
 
 /**
+ * 中心(lat,lon)から半径radiusMetersの円を内包する緯度経度の矩形（BBox）を返す。
+ * 経度方向の1度あたり距離は緯度に応じて縮むため、対象緯度のcosで補正する
+ * （呼び出し側の全件取得を「BBox内の候補」まで絞り込むための下限側フィルタ。
+ * 矩形は円を必ず内包するので、正確な距離判定（haversine）は従来どおりJS側で行う）。
+ */
+function boundingBoxDegrees(lat, lon, radiusMeters) {
+  const latDelta = radiusMeters / METERS_PER_DEGREE_LAT;
+  const cosLat = Math.max(Math.cos((lat * Math.PI) / 180), 0.01);
+  const lonDelta = radiusMeters / (METERS_PER_DEGREE_LAT * cosLat);
+  return {
+    minLat: lat - latDelta,
+    maxLat: lat + latDelta,
+    minLon: lon - lonDelta,
+    maxLon: lon + lonDelta
+  };
+}
+
+/**
  * バス停ページ用の近接検索。isVisibleOnBusStopPageのみ対象、半径内・距離昇順で最大limit件。
  * 各要素に最寄りバス停までの徒歩距離の概算（distanceMeters・walkMinutes）を付与する。
+ *
+ * バス停ページ表示のたびに全件を取得していたため（P-7）、まず緯度経度のBBoxで
+ * DB側から候補を絞り込む。BBoxは指定半径の円を必ず内包する矩形なので、
+ * 正確な距離判定（haversine）・並び替え・件数の絞り込みは従来どおりJS側で行い、
+ * 結果は全件走査していたときと変わらない。
  */
 async function findNearbySpots(lat, lon, { radiusMeters = DEFAULT_NEARBY_RADIUS_METERS, limit = DEFAULT_NEARBY_LIMIT } = {}) {
-  const result = await pool.query('SELECT * FROM tourist_spots');
+  const box = boundingBoxDegrees(lat, lon, radiusMeters);
+  const result = await pool.query(
+    'SELECT * FROM tourist_spots WHERE lat BETWEEN $1 AND $2 AND lng BETWEEN $3 AND $4',
+    [box.minLat, box.maxLat, box.minLon, box.maxLon]
+  );
   const candidates = [];
   for (const row of result.rows) {
     if (!isVisibleOnBusStopPage(row)) continue;
@@ -82,18 +123,37 @@ async function findNearbySpots(lat, lon, { radiusMeters = DEFAULT_NEARBY_RADIUS_
   }));
 }
 
+/** id一覧から完全な行をまとめて取得し、id→行のMapで返す（内部ヘルパー）。 */
+async function getSpotsByIds(ids) {
+  if (ids.length === 0) return new Map();
+  const result = await pool.query('SELECT * FROM tourist_spots WHERE id = ANY($1::text[])', [ids]);
+  return new Map(result.rows.map((row) => [row.id, row]));
+}
+
 /**
- * 経路検索・地点名検索の候補用。name/kana/romajiの部分一致（normalizeSearchTextで正規化）。
+ * 経路検索・地点名検索の候補用。name/kana/romaji/別称の部分一致（normalizeSearchTextで正規化）。
  * 前方一致を優先し、次に部分一致（gtfsTimetable.searchStops()と同じ考え方）。
+ * 別称（aliases）は「からす城」「国宝」のような検索補助用の呼び名で、"," 区切りの各トークンを
+ * 個別に正規化して一致判定に加える（かな・ローマ字変換はしない）。別称は候補一致にだけ使い、
+ * serializeRow には含めない＝利用者画面・APIレスポンスには出さない。
+ * 一致の度合いは各要素へ matchScore（2=前方一致・1=部分一致）として持たせる
+ * （spotSearch.js の自由文字列解決が、別称でしか一致しないスポットを取りこぼさないため）。
+ *
+ * サジェストのキーストロークごとに全列（写真URL・説明文等）を転送していたため（P-7）、
+ * まずスコアリングに必要な列だけを取得して絞り込み、上位limit件が確定してから
+ * その分だけ完全な行を取得する。スコアリングのロジック・結果の並び順は変えていない。
  */
 async function searchTouristSpots(query, limit = 10) {
   const normalizedQuery = normalizeSearchText(query);
   if (!normalizedQuery) return [];
 
-  const result = await pool.query('SELECT * FROM tourist_spots');
+  const result = await pool.query('SELECT id, name, kana, romaji, aliases FROM tourist_spots');
   const scored = [];
   for (const row of result.rows) {
-    const fields = [row.name, row.kana, row.romaji].filter(Boolean).map(normalizeSearchText);
+    const fields = [row.name, row.kana, row.romaji]
+      .concat(splitAliases(row.aliases))
+      .filter(Boolean)
+      .map(normalizeSearchText);
     let score = -1;
     for (const field of fields) {
       if (!field) continue;
@@ -103,10 +163,19 @@ async function searchTouristSpots(query, limit = 10) {
         score = Math.max(score, 1);
       }
     }
-    if (score >= 0) scored.push({ row, score });
+    if (score >= 0) scored.push({ id: row.id, name: row.name, score });
   }
-  scored.sort((a, b) => b.score - a.score || a.row.name.localeCompare(b.row.name, 'ja'));
-  return scored.slice(0, limit).map(({ row }) => serializeRow(row));
+  scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name, 'ja'));
+  const top = scored.slice(0, limit);
+  if (top.length === 0) return [];
+
+  const rowsById = await getSpotsByIds(top.map((entry) => entry.id));
+  return top
+    .map((entry) => {
+      const row = rowsById.get(entry.id);
+      return row ? { ...serializeRow(row), matchScore: entry.score } : null;
+    })
+    .filter(Boolean);
 }
 
 /** 観光スポットのID（識別子）を正規化する（前後空白を落とすだけ）。 */
@@ -145,7 +214,7 @@ async function listTouristSpots() {
 function splitLine(line) {
   const cols = line.split('\t');
   const [
-    id, name, kana, romaji, latStr, lngStr, url, hours, stayDuration, description,
+    id, name, kana, romaji, aliases, latStr, lngStr, url, hours, stayDuration, description,
     hoursEn, stayDurationEn, descriptionEn, photoUrls, category, displayTag
   ] = cols;
   return {
@@ -154,6 +223,8 @@ function splitLine(line) {
     name: (name || '').trim(),
     kana: (kana || '').trim(),
     romaji: (romaji || '').trim(),
+    // 別称は "," 区切りで複数可。ここでは生文字列のまま受け、parseTouristSpotsText で分解・正規化する。
+    aliasesRaw: (aliases || '').trim(),
     latStr: (latStr || '').trim(),
     lngStr: (lngStr || '').trim(),
     url: (url || '').trim(),
@@ -175,11 +246,13 @@ function isHttpsUrl(value) {
 }
 
 /**
- * タブ区切りテキスト（1行1件、16列）をパース・バリデーションする純粋関数（DBアクセスなし）。
+ * タブ区切りテキスト（1行1件、17列）をパース・バリデーションする純粋関数（DBアクセスなし）。
  * 1列目のIDが観光スポットの識別子（空欄不可・重複不可）。名称による名寄せはしない
  * （同名の別スポットを登録できる。同一スポットの判定はIDの一致だけで行う）。
  * ローマ字が空欄でkanaが入力されていれば自動生成する。
- * 写真URL（14列目）は "," 区切りで複数枚指定でき、各要素が https:// 始まりかを検証する。
+ * 別称（5列目）は「からす城」「国宝」のような検索補助用の呼び名で、"," 区切りで複数可。
+ * 前後空白・空要素を落として連結保存する（かな・ローマ字変換はしない。利用者画面には出さない）。
+ * 写真URL（15列目）は "," 区切りで複数枚指定でき、各要素が https:// 始まりかを検証する。
  * 正規化後（前後空白・空要素を除去し "," で連結した文字列）を photoUrls として持つ。
  * 英語版の営業時間・滞在時間目安・説明（hoursEn/stayDurationEn/descriptionEn）は
  * 利用者画面の英語表示には未使用（項目の登録のみに対応。将来対応時のための先行追加）。
@@ -201,8 +274,8 @@ function parseTouristSpotsText(text) {
 
     const parsed = splitLine(rawLine);
 
-    if (parsed.colCount > 16) {
-      errors.push({ line: lineNo, reason: '列数が多すぎます（16列を超えています）。' });
+    if (parsed.colCount > 17) {
+      errors.push({ line: lineNo, reason: '列数が多すぎます（17列を超えています）。' });
       return;
     }
     if (!parsed.id) {
@@ -253,6 +326,7 @@ function parseTouristSpotsText(text) {
       name: parsed.name,
       kana: parsed.kana || null,
       romaji: romaji || null,
+      aliases: splitAliases(parsed.aliasesRaw).join(',') || null,
       lat,
       lng,
       url: parsed.url || null,
@@ -292,14 +366,15 @@ async function replaceAllTouristSpots(text) {
     for (const spot of parsed.spots) {
       await client.query(
         `INSERT INTO tourist_spots (
-           id, name, kana, romaji, lat, lng, url, hours, stay_duration, description,
+           id, name, kana, romaji, aliases, lat, lng, url, hours, stay_duration, description,
            hours_en, stay_duration_en, description_en, photo_urls, category, display_tag, updated_at
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
          ON CONFLICT (id) DO UPDATE SET
            name = EXCLUDED.name,
            kana = EXCLUDED.kana,
            romaji = EXCLUDED.romaji,
+           aliases = EXCLUDED.aliases,
            lat = EXCLUDED.lat,
            lng = EXCLUDED.lng,
            url = EXCLUDED.url,
@@ -314,7 +389,7 @@ async function replaceAllTouristSpots(text) {
            display_tag = EXCLUDED.display_tag,
            updated_at = now()`,
         [
-          spot.id, spot.name, spot.kana, spot.romaji, spot.lat, spot.lng, spot.url, spot.hours, spot.stayDuration, spot.description,
+          spot.id, spot.name, spot.kana, spot.romaji, spot.aliases, spot.lat, spot.lng, spot.url, spot.hours, spot.stayDuration, spot.description,
           spot.hoursEn, spot.stayDurationEn, spot.descriptionEn, spot.photoUrls, spot.category, spot.displayTag
         ]
       );

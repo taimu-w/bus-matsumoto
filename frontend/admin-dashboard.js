@@ -691,6 +691,18 @@
     return `${n}分遅れ`;
   }
 
+  // 早発・早着（定刻より早い到着判定）のバッジ。
+  // delayMinutes は0で下限を切った値なので「定刻通り」としか出せない。
+  // signedDelayMinutes（符号付き）が負のときだけ、その事実を別バッジで補う。
+  // 符号付き列の導入前に確定した行は null なので何も出さない。
+  function earlyArrivalBadgeHtml(signedDelayMinutes) {
+    if (signedDelayMinutes === null || signedDelayMinutes === undefined) return '';
+    const n = Number(signedDelayMinutes);
+    if (!Number.isFinite(n) || n >= 0) return '';
+    return `<span class="text-[11px] px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 font-bold" ` +
+      `title="定刻より早い到着判定です（早発は乗り遅れの原因になります）">定刻より${Math.abs(n)}分早い</span>`;
+  }
+
   // 到着済のときの「判定方法と根拠」ブロック。
   function renderArrivalEvidenceHtml(arrival) {
     if (!arrival) return '';
@@ -907,6 +919,7 @@
             <span class="text-sm text-slate-500">定刻 ${escapeHtml(data.scheduledTime || '—')}</span>
             <span class="text-lg font-black text-green-700">到着判定 ${escapeHtml(data.actualTime || '—')}</span>
             <span class="text-sm font-bold ${Number(data.delayMinutes) >= 5 ? 'text-red-600' : 'text-slate-600'}">${signedDelayLabel(data.delayMinutes) || '—'}</span>
+            ${earlyArrivalBadgeHtml(data.signedDelayMinutes)}
             ${data.interpolated ? '<span class="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-bold">補間値</span>' : ''}
           </div>
           ${renderArrivalEvidenceHtml(data.arrival)}

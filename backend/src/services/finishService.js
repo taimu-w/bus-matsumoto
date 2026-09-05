@@ -118,7 +118,7 @@ async function endAssignment(client, assignmentId, reason) {
  */
 async function archiveAssignment(client, assignment, reason, isOfficial) {
   const progressRows = await client.query(
-    `SELECT stop_id, seq_order, scheduled_time, actual_time, delay_minutes
+    `SELECT stop_id, seq_order, scheduled_time, actual_time, delay_minutes, signed_delay_minutes
      FROM trip_stop_progress WHERE assignment_id = $1 ORDER BY seq_order ASC`,
     [assignment.assignment_id]
   );
@@ -152,8 +152,9 @@ async function archiveAssignment(client, assignment, reason, isOfficial) {
     const actualMinutes = r.actual_time ? timeStrToMinutes(r.actual_time) : null;
     await client.query(
       `INSERT INTO completed_trip_stop_times
-         (completed_trip_id, stop_id, seq_order, scheduled_time, actual_time, actual_minutes, delay_minutes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (completed_trip_id, stop_id, seq_order, scheduled_time, actual_time, actual_minutes,
+          delay_minutes, signed_delay_minutes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (completed_trip_id, stop_id) DO NOTHING`,
       [
         completedTripId,
@@ -162,7 +163,8 @@ async function archiveAssignment(client, assignment, reason, isOfficial) {
         r.scheduled_time,
         r.actual_time,
         Number.isNaN(actualMinutes) ? null : actualMinutes,
-        r.delay_minutes
+        r.delay_minutes,
+        r.signed_delay_minutes
       ]
     );
   }

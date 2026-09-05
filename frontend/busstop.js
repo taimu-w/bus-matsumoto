@@ -485,6 +485,7 @@
     `;
 
     bindStopViewEvents(data, platform);
+    if (window.TextAbbrev) window.TextAbbrev.fitAll(root());
     loadApproaching(data, seq, platform);
     manageApproachingPolling(data, seq, platform);
     loadNearbySpots(data, seq);
@@ -619,7 +620,7 @@
                 const fg = chipTextColor(h.color, h.textColor);
                 return `<div class="flex items-center gap-2 py-1">
                     <span class="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0" style="background:${esc(bg)};color:${esc(fg)}">${esc(h.routeShortName || h.routeName)}</span>
-                    <span class="text-sm font-bold text-gray-800 truncate">${esc(h.headsign || '行先表示なし')}</span>
+                    <span class="text-sm font-bold text-gray-800 truncate" data-abbrev-fit>${esc(h.headsign || '行先表示なし')}</span>
                   </div>`;
               })
               .join('')
@@ -940,7 +941,7 @@
             <div class="flex items-center justify-between gap-2">
               <div class="flex items-center gap-2 min-w-0">
                 <span class="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0" style="background:${esc(bg)};color:${esc(fg)}">${esc(bus.routeName)}</span>
-                <span class="text-sm font-bold text-gray-800 truncate">${esc(bus.headsign || '行先表示なし')}行</span>
+                <span class="text-sm font-bold text-gray-800 truncate" data-abbrev-fit>${esc(bus.headsign || '行先表示なし')}行</span>
               </div>
               ${badge}
             </div>
@@ -954,6 +955,8 @@
           </${tag}>`;
       })
       .join('');
+
+    if (window.TextAbbrev) window.TextAbbrev.fitAll(container);
   }
 
   /* ---------- 周辺の観光スポット（観光スポット情報_仕様書） ---------- */

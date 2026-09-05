@@ -7,7 +7,7 @@ const { isNightTime } = require('../utils/time');
 const { fetchLocation } = require('../services/locationFetcher');
 const { sortCarId } = require('../services/vehicleAssigner');
 const { ensureDailyTrips } = require('../services/dailyTripBuilder');
-const { assignPendingTrips, reassignOrphanTrips } = require('../services/tripAssignment');
+const { assignPendingTrips, reassignOrphanTrips, countDuePendingTrips } = require('../services/tripAssignment');
 const { pass } = require('../services/passDetection');
 const { delayCalc } = require('../services/delayCalc');
 const { updateAllGtfsFeeds } = require('../services/gtfsFeedManager');
@@ -23,9 +23,15 @@ async function runPipeline() {
   await refreshRuntimeSettingsCache();
   await refreshDirectionRulesCache();
 
-  // 深夜帯はGPSの取り込みと運行処理を止めるが、当日便の生成と車両割り当ては止めない。
-  // 最も早い便は5:40発で、深夜帯が明ける前に始発時刻が来るため
-  // （深夜帯にスキップすると当日便が未生成のまま始発時刻を過ぎてしまう）。
+  // 深夜帯はGPSの取り込み（②）以降の運行処理を止める。①当日便の生成だけは止めない
+  // （深夜帯にスキップすると当日便が未生成のまま始発時刻を過ぎてしまうため）。
+  //
+  // ただし「始発時刻が来ているのにまだ割り当て判定を受けていない便」がある間は止めない。
+  // 車両割り当て（④）はGPS取り込み（②③）の結果を前提にしているので、深夜帯だからと
+  // 一律に抜けると、その時間帯にかかる便の割り当てが**黙って**行われないまま
+  // pending → 運行日終了で消えてしまう。既定値（深夜帯 23:00〜05:00・最早便 5:40発・
+  // 最終停車 22:45）ではこの条件に当てはまる便は存在せず、挙動は従来と同じ。
+  // NIGHT_END を早朝便の始発より後ろへ動かした場合などに効く安全弁である。
   const night = isNightTime(getRuntimeSetting('NIGHT_START'), getRuntimeSetting('NIGHT_END'));
 
   try {
@@ -40,8 +46,15 @@ async function runPipeline() {
     await jobMonitor.track('pipeline.ensureDailyTrips', ensureDailyTrips);
 
     if (night) {
-      console.log('[pipeline] 深夜帯のため運行処理をスキップします（当日便の生成のみ実施）。');
-      return;
+      const duePending = await countDuePendingTrips();
+      if (duePending === 0) {
+        console.log('[pipeline] 深夜帯のため運行処理をスキップします（当日便の生成のみ実施）。');
+        return;
+      }
+      console.warn(
+        `[pipeline] 深夜帯ですが、始発時刻が到来した未割り当ての便が ${duePending} 件あるため運行処理を継続します。` +
+        `（深夜帯の設定 NIGHT_START/NIGHT_END が運行時間帯に食い込んでいる可能性があります）`
+      );
     }
 
     await jobMonitor.track('pipeline.fetchLocation', fetchLocation);             // ② 位置情報の取得

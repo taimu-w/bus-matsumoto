@@ -6,7 +6,7 @@ const { getAccuracyReport } = require('../services/predictionAccuracy');
 const { getDelayMesh } = require('../services/delayMesh');
 const { searchStops } = require('../services/routeSearch');
 const { searchJourneys, searchRouteSearchStops } = require('../services/gtfsRouteSearch');
-const { getServiceDateString, computeDelayMinutes } = require('../utils/time');
+const { getServiceDateString, computeDelayMinutes, computeSignedDelayMinutes } = require('../utils/time');
 const { getActiveServiceIds } = require('../services/gtfsCalendar');
 const { getCachedServiceStatus } = require('../services/serviceStatusScraper');
 const {
@@ -16,18 +16,21 @@ const {
   getStopSummariesByKeys,
   getStopTimetable,
   getTripDetail,
-  resolvePlatformRef
+  resolvePlatformRef,
+  resolvePlatformByFeedStop
 } = require('../services/gtfsTimetable');
 const {
   unqualifyRouteId,
   qualifyRouteId,
   getGtfsDir,
   downloadAndExtractGtfsFeed,
+  commitFeedFingerprint,
   MANAGED_GTFS_FILES
 } = require('../services/gtfsFeedManager');
 const {
   findLiveAssignment,
   buildBusEntry,
+  buildBusEntriesBatch,
   getAssignmentDetailForAdmin,
   getStopArrivalDetailForAdmin,
   getGpsOutageDetailForAdmin,
@@ -42,6 +45,7 @@ const spotSearch = require('../services/spotSearch');
 const busstopNotices = require('../services/busstopNotices');
 const { invalidateHolidayCache } = require('../services/holidayCalendar');
 const { invalidateRouteExternalIdCache } = require('../services/routeExternalIdMapping');
+const { loadAbbreviations, invalidateDisplayAbbreviationsCache } = require('../services/displayAbbreviations');
 const { invalidateDirectionRulesCache } = require('../services/directionRules');
 const {
   getRealtimeSuspension,
@@ -329,7 +333,23 @@ router.get('/routes', async (req, res) => {
   }
 });
 
+// GET /api/display-abbreviations -> 表示テキスト（系統名・行き先）の略称辞書
+// 公開API（バスマップ・バス停時刻表・接近中のバスパネルが直接読む。認証不要）。
+// original文字数の降順（フロントエンドでの部分文字列置換の優先順位に使う）。
+router.get('/display-abbreviations', async (req, res) => {
+  try {
+    const abbreviations = await loadAbbreviations();
+    res.json({ abbreviations });
+  } catch (err) {
+    console.error('[api] /display-abbreviations エラー:', err);
+    res.status(500).json({ error: '表示略称の取得に失敗しました。' });
+  }
+});
+
 // GET /api/settings -> お知らせ・重要なお知らせ（GASの「設定 システム」シート相当）
+// お知らせは全路線共通のため、routeIdは省略可能（ホーム画面のloadNotices()は付けずに呼ぶ）。
+// routeId省略時はresolveRouteId()がnullを返し、loadSystemSettings()内のroutes参照だけが
+// 該当なしになる（route_nameの表示はsystem_settingsの値へフォールバックする＝挙動は変わらない）。
 router.get('/settings', async (req, res) => {
   try {
     const routeId = resolveRouteId(req.query.routeId);
@@ -444,6 +464,73 @@ router.delete('/admin/route-mappings/:externalId', requireAdminAuth, async (req,
   } catch (err) {
     console.error('[api] /admin/route-mappings 削除エラー:', err);
     res.status(500).json({ error: '外部IDマッピングの削除に失敗しました。' });
+  }
+});
+
+// 表示略称辞書（系統名・行き先の一部文字列 -> 略称）の管理画面用CRUD。
+// 一覧は /api/display-abbreviations と同じテーブルを参照するが、
+// こちらは認証必須かつ updated_at も返す。
+
+// GET /api/admin/display-abbreviations -> 略称辞書の一覧
+router.get('/admin/display-abbreviations', requireAdminAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT original, abbreviation, updated_at
+       FROM display_abbreviations
+       ORDER BY original ASC`
+    );
+    res.json({
+      abbreviations: result.rows.map((row) => ({
+        original: row.original,
+        abbreviation: row.abbreviation,
+        updatedAt: row.updated_at
+      }))
+    });
+  } catch (err) {
+    console.error('[api] /admin/display-abbreviations 取得エラー:', err);
+    res.status(500).json({ error: '表示略称の取得に失敗しました。' });
+  }
+});
+
+// POST /api/admin/display-abbreviations -> 追加・更新（originalキーのUPSERT）
+router.post('/admin/display-abbreviations', requireAdminAuth, async (req, res) => {
+  const { original, abbreviation } = req.body || {};
+  const trimmedOriginal = typeof original === 'string' ? original.trim() : '';
+  const trimmedAbbreviation = typeof abbreviation === 'string' ? abbreviation.trim() : '';
+
+  if (!trimmedOriginal) {
+    return res.status(400).json({ error: '元テキストを入力してください。' });
+  }
+  if (!trimmedAbbreviation) {
+    return res.status(400).json({ error: '略称を入力してください。' });
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO display_abbreviations (original, abbreviation, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (original) DO UPDATE
+         SET abbreviation = EXCLUDED.abbreviation, updated_at = now()`,
+      [trimmedOriginal, trimmedAbbreviation]
+    );
+    invalidateDisplayAbbreviationsCache();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/display-abbreviations 保存エラー:', err);
+    res.status(500).json({ error: '表示略称の保存に失敗しました。' });
+  }
+});
+
+// DELETE /api/admin/display-abbreviations/:original -> 1件削除
+router.delete('/admin/display-abbreviations/:original', requireAdminAuth, async (req, res) => {
+  const { original } = req.params;
+  try {
+    await pool.query('DELETE FROM display_abbreviations WHERE original = $1', [original]);
+    invalidateDisplayAbbreviationsCache();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/display-abbreviations 削除エラー:', err);
+    res.status(500).json({ error: '表示略称の削除に失敗しました。' });
   }
 });
 
@@ -1162,6 +1249,9 @@ router.delete('/admin/busstop-notices/:id', requireAdminAuth, async (req, res) =
 router.get('/stops', async (req, res) => {
   try {
     const routeId = resolveRouteId(req.query.routeId);
+    if (!routeId) {
+      return res.status(400).json({ error: 'routeIdを指定してください。' });
+    }
     const result = await pool.query(
       `SELECT id, direction_id, seq_order, name, name_kana, name_en, lat, lon, notice, timetable_link
        FROM stops
@@ -1181,13 +1271,19 @@ router.get('/stops', async (req, res) => {
 router.get('/timetable', async (req, res) => {
   try {
     const routeId = resolveRouteId(req.query.routeId);
+    if (!routeId) {
+      return res.status(400).json({ error: 'routeIdを指定してください。' });
+    }
     const serviceDate = getServiceDateString();
 
     const trips = await pool.query(
-      `SELECT id, start_time, direction_id, headsign, origin
-       FROM daily_trips
-       WHERE route_id = $1 AND service_date = $2
-       ORDER BY direction_id ASC, start_at ASC, id ASC`,
+      `SELECT d.id, d.start_time, d.direction_id, d.headsign, d.origin,
+              st.gtfs_trip_id, r.feed_id
+       FROM daily_trips d
+       JOIN schedule_trips st ON st.id = d.schedule_trip_id
+       LEFT JOIN routes r ON r.id = d.route_id
+       WHERE d.route_id = $1 AND d.service_date = $2
+       ORDER BY d.direction_id ASC, d.start_at ASC, d.id ASC`,
       [routeId, serviceDate]
     );
 
@@ -1197,8 +1293,8 @@ router.get('/timetable', async (req, res) => {
     }
 
     const times = await pool.query(
-      `SELECT dst.daily_trip_id, dst.seq_order, s.name AS stop_name, dst.scheduled_time,
-              dst.is_through, dst.no_pickup, dst.no_drop_off
+      `SELECT dst.daily_trip_id, dst.seq_order, s.id AS stop_id, s.gtfs_stop_id, s.name AS stop_name, dst.scheduled_time,
+              dst.is_through, dst.no_pickup, dst.no_drop_off, dst.stop_headsign
        FROM daily_trip_stop_times dst
        JOIN stops s ON s.id = dst.stop_id
        JOIN daily_trips d ON d.id = dst.daily_trip_id
@@ -1215,6 +1311,11 @@ router.get('/timetable', async (req, res) => {
         directionId: t.direction_id,
         headsign: t.headsign || null,
         startTime: t.start_time,
+        // 「リアルタイム非対応」便から便詳細ページ（時刻表表示）へ遷移するためのGTFS識別子
+        feedId: t.feed_id || null,
+        gtfsRouteId: t.feed_id ? unqualifyRouteId(routeId, t.feed_id) : null,
+        gtfsTripId: t.gtfs_trip_id || null,
+        departureUrlTime: startTimeToUrlHhmm(t.start_time),
         stops: []
       });
     }
@@ -1224,13 +1325,18 @@ router.get('/timetable', async (req, res) => {
       if (entry) {
         entry.stops.push({
           seqOrder: r.seq_order,
+          stopId: r.stop_id,
+          // 標柱単位で識別されたバス停詳細ページへの橋渡し（/api/busstop/resolve-by-feed-stop）に使う
+          // 生のGTFS stop_id。feedIdは便（trip）単位のentry.feedIdと組み合わせて使う。
+          gtfsStopId: r.gtfs_stop_id,
           stopName: r.stop_name,
           // GTFSのstop_times.txtに載る行には必ず実時刻があるため、is_through（真の通過）
           // でも時刻を隠さない。表示上どう扱うかはフロント側の判断に委ねる。
           scheduledTime: r.scheduled_time,
           isThrough: r.is_through,
           noPickup: r.no_pickup,
-          noDropOff: r.no_drop_off
+          noDropOff: r.no_drop_off,
+          stopHeadsign: r.stop_headsign
         });
       }
     }
@@ -1262,18 +1368,20 @@ async function readTimetableFromSchedule(routeId) {
   }
 
   const trips = await pool.query(
-    `SELECT id, trip_index, first_stop_time, direction_id, headsign
-     FROM schedule_trips
-     WHERE route_id = $1 AND service_id = ANY($2::text[])
-     ORDER BY direction_id ASC, trip_index ASC`,
+    `SELECT st.id, st.trip_index, st.first_stop_time, st.direction_id, st.headsign,
+            st.gtfs_trip_id, r.feed_id
+     FROM schedule_trips st
+     LEFT JOIN routes r ON r.id = st.route_id
+     WHERE st.route_id = $1 AND st.service_id = ANY($2::text[])
+     ORDER BY st.direction_id ASC, st.trip_index ASC`,
     [routeId, activeServiceIds]
   );
   // 順序はst.stop_sequence（便自身の中での0始まりの連番）を使う。s.seq_orderは
   // 路線内の表示順専用（service_idグループ横断の共有値）であり、枝分かれ・逆回りの
   // ある便ではこの便自身の実際の停車順と一致しないため使わない。
   const times = await pool.query(
-    `SELECT st.trip_id, st.stop_sequence AS seq_order, s.name AS stop_name, st.scheduled_time,
-            st.is_through, st.no_pickup, st.no_drop_off
+    `SELECT st.trip_id, st.stop_sequence AS seq_order, s.id AS stop_id, s.gtfs_stop_id, s.name AS stop_name, st.scheduled_time,
+            st.is_through, st.no_pickup, st.no_drop_off, st.stop_headsign
      FROM schedule_stop_times st
      JOIN stops s ON s.id = st.stop_id
      JOIN schedule_trips stp ON stp.id = st.trip_id
@@ -1290,6 +1398,10 @@ async function readTimetableFromSchedule(routeId) {
       directionId: t.direction_id,
       headsign: t.headsign || null,
       startTime: t.first_stop_time,
+      feedId: t.feed_id || null,
+      gtfsRouteId: t.feed_id ? unqualifyRouteId(routeId, t.feed_id) : null,
+      gtfsTripId: t.gtfs_trip_id || null,
+      departureUrlTime: startTimeToUrlHhmm(t.first_stop_time),
       stops: []
     });
   }
@@ -1298,11 +1410,14 @@ async function readTimetableFromSchedule(routeId) {
     if (entry) {
       entry.stops.push({
         seqOrder: r.seq_order,
+        stopId: r.stop_id,
+        gtfsStopId: r.gtfs_stop_id,
         stopName: r.stop_name,
         scheduledTime: r.scheduled_time,
         isThrough: r.is_through,
         noPickup: r.no_pickup,
-        noDropOff: r.no_drop_off
+        noDropOff: r.no_drop_off,
+        stopHeadsign: r.stop_headsign
       });
     }
   }
@@ -1316,6 +1431,9 @@ async function readTimetableFromSchedule(routeId) {
 router.get('/buses', async (req, res) => {
   try {
     const routeId = resolveRouteId(req.query.routeId);
+    if (!routeId) {
+      return res.status(400).json({ error: 'routeIdを指定してください。' });
+    }
 
     // 管理画面「リアルタイム休止」でこの路線のリアルタイム表示を止めている場合は、
     // 担当車両の有無にかかわらずバスを返さない（利用者向けリアルタイム運行状況画面用。
@@ -1346,20 +1464,19 @@ router.get('/buses', async (req, res) => {
        ORDER BY d.start_at ASC, d.id ASC`,
       [routeId, serviceDate]
     );
-    console.log(`[api /buses] routeId=${routeId}, allGps=${includeAllGps}, trips=${trips.rows.length}`);
 
-    const buses = [];
-
-    for (const t of trips.rows) {
-      const entry = await buildBusEntry(t, routeId, settings.routeName || '横田信大循環線');
+    const routeName = settings.routeName || '横田信大循環線';
+    const busEntries = await buildBusEntriesBatch(trips.rows, routeId, routeName);
+    const buses = trips.rows.map((t, i) => {
+      const entry = busEntries[i];
       // 便詳細ページ（/timetable/trips/{gtfs_id}/{route_id}/{trip_id}/{departure_time}）への
       // 遷移URLをフロントで組み立てるためのGTFS識別子
       entry.feedId = t.feed_id || null;
       entry.gtfsRouteId = t.feed_id ? unqualifyRouteId(routeId, t.feed_id) : null;
       entry.gtfsTripId = t.gtfs_trip_id || null;
       entry.departureUrlTime = startTimeToUrlHhmm(t.start_time);
-      buses.push(entry);
-    }
+      return entry;
+    });
 
     // マップ・管理用途: 便に紐づいていない車両も位置だけ返す
     if (includeAllGps) {
@@ -1779,13 +1896,15 @@ router.put('/admin/assignments/:assignmentId/stops/:stopId', requireAdminAuth, a
     if (!progress) return res.status(404).json({ error: '指定のバス停が見つかりませんでした。' });
 
     const delayMinutes = isRevert ? null : computeDelayMinutes(progress.scheduled_time, actualTime);
+    // 0に丸める前の符号付きの値も残す（負＝手動確定した時刻が定刻より早い）。
+    const signedDelayMinutes = isRevert ? null : computeSignedDelayMinutes(progress.scheduled_time, actualTime);
 
     if (isRevert) {
       // 未到着へ差し戻し。真の通過バス停は '通過'、それ以外は '' に戻す。
       const revertStatus = progress.is_through ? '通過' : '';
       await pool.query(
         `UPDATE trip_stop_progress
-         SET status = $3, actual_time = NULL, delay_minutes = NULL, interpolated = FALSE,
+         SET status = $3, actual_time = NULL, delay_minutes = NULL, signed_delay_minutes = NULL, interpolated = FALSE,
              arrival_method = NULL, arrival_evidence = NULL,
              nearby_min_distance_meters = NULL, nearby_min_distance_gps_time = NULL, nearby_min_distance_gps_time_ts = NULL
          WHERE assignment_id = $1 AND stop_id = $2`,
@@ -1802,12 +1921,12 @@ router.put('/admin/assignments/:assignmentId/stops/:stopId', requireAdminAuth, a
     } else {
       await pool.query(
         `UPDATE trip_stop_progress
-         SET status = '到着済', actual_time = $1, delay_minutes = $2, interpolated = FALSE,
+         SET status = '到着済', actual_time = $1, delay_minutes = $2, signed_delay_minutes = $3, interpolated = FALSE,
              arrival_method = 'manual',
              arrival_evidence = jsonb_build_object('note', '管理画面で手動確定', 'editedAt', now()),
              nearby_min_distance_meters = NULL, nearby_min_distance_gps_time = NULL, nearby_min_distance_gps_time_ts = NULL
-         WHERE assignment_id = $3 AND stop_id = $4`,
-        [actualTime, delayMinutes, assignmentId, stopId]
+         WHERE assignment_id = $4 AND stop_id = $5`,
+        [actualTime, delayMinutes, signedDelayMinutes, assignmentId, stopId]
       );
       await pool.query(
         `UPDATE trip_vehicle_assignments SET last_arrived_seq = GREATEST(last_arrived_seq, $1) WHERE id = $2`,
@@ -1818,20 +1937,24 @@ router.put('/admin/assignments/:assignmentId/stops/:stopId', requireAdminAuth, a
     // 便レベルのdelay_minutesを、delayCalc.jsと同じ規則（seq_order昇順で最後にnon-nullな値）で再計算する。
     // 差し戻しで到着済が1つも残らない場合は 0（列の既定値）に戻す。
     const latestRes = await pool.query(
-      `SELECT delay_minutes FROM trip_stop_progress
+      `SELECT delay_minutes, signed_delay_minutes FROM trip_stop_progress
        WHERE assignment_id = $1 AND delay_minutes IS NOT NULL
        ORDER BY seq_order DESC LIMIT 1`,
       [assignmentId]
     );
-    await pool.query(`UPDATE trip_vehicle_assignments SET delay_minutes = $1 WHERE id = $2`, [
-      latestRes.rows[0] ? latestRes.rows[0].delay_minutes : 0,
-      assignmentId
-    ]);
+    await pool.query(
+      `UPDATE trip_vehicle_assignments SET delay_minutes = $1, signed_delay_minutes = $2 WHERE id = $3`,
+      [
+        latestRes.rows[0] ? latestRes.rows[0].delay_minutes : 0,
+        latestRes.rows[0] ? latestRes.rows[0].signed_delay_minutes ?? null : null,
+        assignmentId
+      ]
+    );
 
     if (isRevert) {
       res.json({ ok: true, stopId, reverted: true });
     } else {
-      res.json({ ok: true, stopId, actualTime, delayMinutes, reverted: false });
+      res.json({ ok: true, stopId, actualTime, delayMinutes, signedDelayMinutes, reverted: false });
     }
   } catch (err) {
     console.error('[api] PUT /admin/assignments/:assignmentId/stops/:stopId エラー:', err);
@@ -2154,6 +2277,29 @@ router.get('/admin/alerts', requireAdminAuth, async (req, res) => {
       });
     }
 
+    // パイプライン／終了バッチ／掃除バッチが多重実行ガードでスキップされ続けている
+    // （＝前回の処理が長引いて戻ってこない）場合の異常アラート（D-1）。
+    // DBは見ず、jobMonitorのプロセス内カウンタ（scheduler.jsのrecordSkip呼び出し）を参照するだけ。
+    const SKIP_ALERT_JOBS = [
+      { name: 'scheduler.pipeline', label: 'メインパイプライン' },
+      { name: 'scheduler.finishTrips', label: '運行終了バッチ' },
+      { name: 'scheduler.cleanup', label: 'データ掃除バッチ' }
+    ];
+    for (const job of SKIP_ALERT_JOBS) {
+      const status = jobMonitor.getJobStatus(job.name);
+      if (status && status.consecutiveSkips >= jobMonitor.SKIP_ALERT_THRESHOLD) {
+        alerts.push({
+          type: 'pipelineSkipped',
+          severity: 'critical',
+          job: job.name,
+          jobLabel: job.label,
+          consecutiveSkips: status.consecutiveSkips,
+          lastSkippedAt: status.lastSkippedAt,
+          key: buildAlertKey('pipelineSkipped', job.name, status.skipStreakStartedAt)
+        });
+      }
+    }
+
     // 現存する異常のキー以外の確認済み記録はガベージコレクトする。
     // これにより、いったん解消してから再発した異常は改めて表示される。
     const liveKeys = alerts.map((a) => a.key);
@@ -2257,9 +2403,12 @@ router.post('/admin/gtfs-feeds/:feedId/refetch', requireAdminAuth, async (req, r
 
   const client = await pool.connect();
   try {
-    const success = await jobMonitor.track('pipeline.gtfsManualRefetch', () =>
-      downloadAndExtractGtfsFeed(client, feed)
+    // 手動再取得は「とにかく取り直したい」操作なので、内容不変でも必ず展開・再投入する
+    // （force）。毎時のパイプライン側だけが内容不変のスキップ判定を使う。
+    const result = await jobMonitor.track('pipeline.gtfsManualRefetch', () =>
+      downloadAndExtractGtfsFeed(client, feed, { force: true })
     );
+    const success = result.ok;
 
     if (success) {
       try {
@@ -2268,6 +2417,11 @@ router.post('/admin/gtfs-feeds/:feedId/refetch', requireAdminAuth, async (req, r
         require('../services/dailyTripBuilder').invalidateDailyTripCache();
         require('../services/gtfsTimetable').invalidateTimetableIndex();
         require('../services/gtfsFare').invalidateFareIndex();
+        // 指紋の確定はseed()成功後（失敗した回の指紋を残すと毎時の更新が
+        // 「内容不変」と誤判定してDBが古いまま固定される）。
+        if (result.fingerprint) {
+          await commitFeedFingerprint(pool, feed.id, result.fingerprint);
+        }
       } catch (postErr) {
         console.error('[api] /admin/gtfs-feeds/:feedId/refetch 事後処理エラー:', postErr.message);
       }
@@ -2468,7 +2622,8 @@ router.get('/admin/operation-records/export', requireAdminAuth, async (req, res)
     const result = await pool.query(
       `SELECT ct.id AS completed_trip_id, ct.route_id, r.name AS route_name, ct.car_id, ct.start_time,
               ct.is_official, ct.day_of_week, ct.day_type, ct.finish_reason, ct.finished_at,
-              cts.seq_order, s.name AS stop_name, cts.scheduled_time, cts.actual_time, cts.delay_minutes
+              cts.seq_order, s.name AS stop_name, cts.scheduled_time, cts.actual_time,
+              cts.delay_minutes, cts.signed_delay_minutes
        FROM completed_trips ct
        JOIN routes r ON r.id = ct.route_id
        LEFT JOIN completed_trip_stop_times cts ON cts.completed_trip_id = ct.id
@@ -2476,15 +2631,31 @@ router.get('/admin/operation-records/export', requireAdminAuth, async (req, res)
        WHERE (ct.finished_at AT TIME ZONE 'Asia/Tokyo')::date BETWEEN $1::date AND $2::date
          ${routeFilter}
        ORDER BY ct.finished_at ASC, ct.id ASC, cts.seq_order ASC
-       LIMIT 200000`,
+       LIMIT 200001`,
       params
     );
 
-    const header = ['完了トリップID', '路線ID', '路線名', '車両ID', '便始発時刻', '実績種別', '曜日番号', '曜日区分', '終了理由', '終了確定日時(JST)', '停留所順', '停留所名', '定刻', '実績時刻', '遅延分'];
+    // 上限+1件だけ取得して打ち切りの有無を判定する（実際に出力するのは既存どおり上限まで）。
+    const EXPORT_ROW_LIMIT = 200000;
+    const truncated = result.rows.length > EXPORT_ROW_LIMIT;
+    if (truncated) result.rows.length = EXPORT_ROW_LIMIT;
+
+    // 「遅延分」は0以上に丸めた値（公開画面と同じ）。「遅延分(符号付き)」は負なら早発・早着。
+    // 符号付き列の導入前に確定した実績は空欄になる。
+    const header = ['完了トリップID', '路線ID', '路線名', '車両ID', '便始発時刻', '実績種別', '曜日番号', '曜日区分', '終了理由', '終了確定日時(JST)', '停留所順', '停留所名', '定刻', '実績時刻', '遅延分', '遅延分(符号付き)'];
+    // CSV数式インジェクション(CSV Formula Injection)対策。
+    // Excel/LibreOffice等は `=` `+` `-` `@` や制御文字(TAB/CR)で始まるセルを数式として
+    // 解釈・実行しうる。この表にはバス停名・行先・終了理由などGTFS由来の外部文字列が
+    // そのまま入るため、該当するセルはシングルクォートを前置して無害化する。
+    // ただし「遅延分(符号付き)」のような純粋な数値（先頭の `-` が負号のもの）まで
+    // 前置するとExcel上で文字列になり集計できなくなるため、数値だけは対象外にする。
+    // 単体の `\r` も行区切りとして誤解釈されうるので引用符で囲む対象に含める。
     const csvEscape = (v) => {
       if (v === null || v === undefined) return '';
-      const s = String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      let s = String(v);
+      const isPlainNumber = /^-?\d+(\.\d+)?$/.test(s);
+      if (!isPlainNumber && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+      return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
     const lines = [header.map(csvEscape).join(',')];
     for (const row of result.rows) {
@@ -2503,13 +2674,22 @@ router.get('/admin/operation-records/export', requireAdminAuth, async (req, res)
         row.stop_name,
         row.scheduled_time,
         row.actual_time,
-        row.delay_minutes
+        row.delay_minutes,
+        row.signed_delay_minutes
       ].map(csvEscape).join(','));
+    }
+    // 打ち切りが起きたことを黙って伝えない: プログラムからはヘッダーで、
+    // 人が開いたときはファイル末尾の注記行で気づけるようにする。
+    if (truncated) {
+      lines.push(csvEscape(
+        `※ ${EXPORT_ROW_LIMIT.toLocaleString('ja-JP')}行の上限に達したため、これ以降のデータは含まれていません。期間や路線を絞って再度ダウンロードしてください。`
+      ));
     }
     const csv = '﻿' + lines.join('\r\n'); // ExcelでのUTF-8誤認識を防ぐBOM付き
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="operation-records_${from}_${to}.csv"`);
+    res.setHeader('X-Export-Truncated', truncated ? 'true' : 'false');
     res.send(csv);
   } catch (err) {
     console.error('[api] /admin/operation-records/export エラー:', err);
@@ -2688,6 +2868,24 @@ router.get('/busstop/by-keys', async (req, res) => {
   } catch (err) {
     console.error('[api] /busstop/by-keys エラー:', err);
     res.status(500).json({ error: 'バス停情報の取得に失敗しました。' });
+  }
+});
+
+// GET /api/busstop/resolve-by-feed-stop?feedId=...&stopId=... -> リアルタイムDB側のバス停識別子
+// （feedId + 生のGTFS stop_id。/api/timetable・/api/buses が返すstopIdの由来）から、
+// 標柱単位で識別されたバス停詳細ページ（/busstop/{stopKey}?platform={platformKey}）のURLを組み立てる
+// ためのキーを解決する。リアルタイム運行状況画面（カード表示・基本表示共通）のバス停タップから使う。
+router.get('/busstop/resolve-by-feed-stop', async (req, res) => {
+  try {
+    const feedId = String(req.query.feedId || '').trim();
+    const stopId = String(req.query.stopId || '').trim();
+    if (!feedId || !stopId) return res.status(400).json({ error: 'feedId・stopIdを指定してください。' });
+    const result = await resolvePlatformByFeedStop(feedId, stopId);
+    if (!result) return res.status(404).json({ error: '対応するバス停が見つかりませんでした。' });
+    res.json(result);
+  } catch (err) {
+    console.error('[api] /busstop/resolve-by-feed-stop エラー:', err);
+    res.status(500).json({ error: 'バス停情報の解決に失敗しました。' });
   }
 });
 

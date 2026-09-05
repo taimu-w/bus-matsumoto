@@ -3,7 +3,12 @@
 // 回帰テスト。コンテナがUTCで動く場合を process.env.TZ='UTC' で再現する。
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { getDayOfWeek, formatDate } = require('../src/services/gtfsCalendar');
+const {
+  getDayOfWeek,
+  formatDate,
+  getActiveServiceIds,
+  getActiveServiceIdsWithStatus
+} = require('../src/services/gtfsCalendar');
 
 function withTz(tz, fn) {
   const orig = process.env.TZ;
@@ -35,6 +40,22 @@ test('getDayOfWeek: サーバがJSTでない他タイムゾーン（America/New_
     assert.equal(getDayOfWeek(d), 1);
     assert.equal(formatDate(d), '20260817');
   });
+});
+
+// 「service_idが1件も無い」の2つの意味（本当に運行なし／カレンダーを読めなかった）を
+// 呼び出し側が区別できることの回帰テスト。区別できないと dailyTripBuilder が
+// 読み込み失敗を「今日は運行なし」として確定させ、当日便0件のまま固定される。
+test('getActiveServiceIdsWithStatus: カレンダーを読めないフィードは失敗として報告する', async () => {
+  const result = await getActiveServiceIdsWithStatus(new Date('2026-08-17T12:00:00+09:00'), 'no-such-feed');
+  assert.deepEqual(result.serviceIds, []);
+  assert.equal(result.complete, false);
+  assert.deepEqual(result.failedFeedIds, ['no-such-feed']);
+});
+
+test('getActiveServiceIds: 従来どおり配列だけを返す（読み込み失敗時は空配列）', async () => {
+  const ids = await getActiveServiceIds(new Date('2026-08-17T12:00:00+09:00'), 'no-such-feed');
+  assert.ok(Array.isArray(ids));
+  assert.equal(ids.length, 0);
 });
 
 test('getDayOfWeek: 曜日番号の対応（日=0〜土=6、JST基準）', () => {

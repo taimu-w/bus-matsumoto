@@ -32,6 +32,13 @@ CREATE TABLE IF NOT EXISTS feeds (
   last_fetched_at TIMESTAMPTZ,
   last_status   TEXT,
   last_error    TEXT,
+  -- GTFS ZIPの「前回DBへ取り込んだ内容」の指紋。毎時のダウンロードで内容が同一だと
+  -- 分かった場合は展開もseed()もスキップする（内容不変でのマスタ全書き換えを防ぐ）。
+  -- 3列とも「seed()が成功した後」にだけ書く。ダウンロード直後に書くと、seed()が
+  -- 失敗した回の指紋が残って次回以降ずっとスキップされ、DBが古いまま固定される。
+  content_hash  TEXT,                             -- ZIP本体のSHA-256
+  last_etag     TEXT,                             -- 条件付きGETのIf-None-Match用
+  last_modified TEXT,                             -- 条件付きGETのIf-Modified-Since用
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -214,6 +221,10 @@ CREATE TABLE IF NOT EXISTS tourist_spots (
   name            TEXT NOT NULL,
   kana            TEXT,
   romaji          TEXT,
+  -- 別称（検索補助用）。「松本城」に対する「からす城」「国宝」など、別の呼び名でも
+  -- 候補に出せるようにする。"," 区切りで複数可。利用者画面には出さず、経路検索の
+  -- 出発地・目的地／スポット検索の候補一致にだけ使う（かな・ローマ字変換はしない）。
+  aliases         TEXT,
   lat             DOUBLE PRECISION NOT NULL,
   lng             DOUBLE PRECISION NOT NULL,
   url             TEXT,
@@ -295,6 +306,20 @@ CREATE TABLE IF NOT EXISTS busstop_notices (
 CREATE INDEX IF NOT EXISTS idx_busstop_notices_platform ON busstop_notices (feed_id, stop_id);
 CREATE INDEX IF NOT EXISTS idx_busstop_notices_stop_key ON busstop_notices (stop_key);
 
+-- 表示テキスト（系統名・行き先）の略称辞書。original を部分文字列として含む表示テキストが
+-- 表示領域からはみ出すときだけ、フロントエンドが abbreviation に置き換える（はみ出さない
+-- ときは略称を使わず、そのまま全文表示する）。管理画面「表示略称設定」
+-- （GET/POST/DELETE /api/admin/display-abbreviations）から編集する。
+-- 判定・置換はフロントエンド側（frontend/text-abbrev.js）が行い、バックエンドは
+-- 辞書の保管とGET /api/display-abbreviations（利用者向け画面からの公開読み出し）のみ担う。
+-- サービス層は backend/src/services/displayAbbreviations.js（TTL付きメモリキャッシュ。
+-- 管理画面からの変更時に invalidateDisplayAbbreviationsCache() で破棄）。
+CREATE TABLE IF NOT EXISTS display_abbreviations (
+  original      TEXT PRIMARY KEY,
+  abbreviation  TEXT NOT NULL,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- 観測されている物理車両。便との紐付けは trip_vehicle_assignments が持つ。
 -- 運行終了しても行は削除せず status='inactive' にする（1台が複数便に関与するため）。
 CREATE TABLE IF NOT EXISTS vehicles (
@@ -375,7 +400,13 @@ CREATE TABLE IF NOT EXISTS vehicle_gps_log (
   lat               DOUBLE PRECISION NOT NULL,
   lon               DOUBLE PRECISION NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_gps_log_vehicle ON vehicle_gps_log(vehicle_id, gps_time_ts);
+-- (vehicle_id, gps_time_ts) は一意（既知 M-7: 同一測位の重複蓄積防止）。
+-- 書き込み側（vehicleAssigner.js）は ON CONFLICT DO NOTHING で無視する。
+-- ⚠️ この索引は意図的にここへ書かない。CREATE TABLEと違い CREATE INDEX は
+-- テーブルが既存でも毎回実行されるため、ここに書くと「既存DBに残る重複行を
+-- migrate.jsのステップ42が削除する前」に索引作成が走ってしまい、
+-- 重複データが残る既存環境で毎回失敗する。新規DB・既存DBのどちらも
+-- migrate.js（重複削除→索引作成の順を保証する）側で作成する。
 
 -- ==========================================================
 -- 便起点の車両割り当て（GTFS便を先に生成し、車両を後から割り当てる）
@@ -439,7 +470,13 @@ CREATE TABLE IF NOT EXISTS trip_vehicle_assignments (
   ended_at           TIMESTAMPTZ,
   end_reason         TEXT,
   last_arrived_seq   INTEGER NOT NULL DEFAULT -1,
-  delay_minutes      INTEGER NOT NULL DEFAULT 0,
+  -- delay_minutes は利用者・遅延アラートに見せる遅れ（0以上に丸めた値）。
+  -- signed_delay_minutes は同じ差分を符号付きで持つ（負＝定刻より早い＝早発・早着）。
+  -- 早発は乗り遅れを生む運行事故なので、0に丸めた値だけを残すと事後に検証できない。
+  -- 表示・しきい値判定は必ず delay_minutes 側を使うこと（utils/time.js の
+  -- computeDelayMinutes / computeSignedDelayMinutes に対応）。
+  delay_minutes        INTEGER NOT NULL DEFAULT 0,
+  signed_delay_minutes INTEGER,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (daily_trip_id, vehicle_id)
 );
@@ -463,7 +500,10 @@ CREATE TABLE IF NOT EXISTS trip_stop_progress (
   scheduled_time TEXT,
   status         TEXT NOT NULL DEFAULT '',      -- '' | '通過' | '付近' | '到着済'
   actual_time    TEXT,
+  -- delay_minutes は0以上に丸めた遅れ、signed_delay_minutes は符号付き（負＝早発・早着）。
+  -- 詳細は trip_vehicle_assignments.delay_minutes のコメントを参照。
   delay_minutes  INTEGER,
+  signed_delay_minutes INTEGER,
   interpolated   BOOLEAN NOT NULL DEFAULT FALSE,
   nearby_min_distance_meters      DOUBLE PRECISION,
   nearby_min_distance_gps_time    TEXT,
@@ -533,7 +573,10 @@ CREATE TABLE IF NOT EXISTS completed_trip_stop_times (
   scheduled_time      TEXT,
   actual_time         TEXT,
   actual_minutes      INTEGER,     -- 0:00起点の分数（時刻演算・集計用）
+  -- delay_minutes は0以上に丸めた遅れ、signed_delay_minutes は符号付き（負＝早発・早着）。
+  -- 詳細は trip_vehicle_assignments.delay_minutes のコメントを参照。
   delay_minutes       INTEGER,
+  signed_delay_minutes INTEGER,
   PRIMARY KEY (completed_trip_id, stop_id)
 );
 

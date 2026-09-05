@@ -96,13 +96,28 @@
     return relativeLuminance(rgb) > 0.5 ? '#111827' : '#ffffff';
   }
 
-  /** 路線カラーのチップ（クリックでその路線のリアルタイム時刻表へ）。 */
+  /** 路線カラーのチップ（クリックでその路線のリアルタイム時刻表へ）。バス停ごとの路線一覧で使う。 */
   function routeChipButton(route) {
     const bg = parseHexColor(route.color) ? `#${route.color.replace('#', '')}` : '#e2e8f0';
     const fg = chipTextColor(route.color, route.textColor);
     return `<button type="button" data-role="ss-route" data-feed="${esc(route.feedId)}" data-route="${esc(route.routeId)}"
                    class="text-[11px] font-bold px-2.5 py-1 rounded-full shrink-0 active:scale-95 transition-transform"
                    style="background:${esc(bg)};color:${esc(fg)}">${esc(route.shortName || route.name)}</button>`;
+  }
+
+  /** 路線を1行1件で並べる行ボタン（左端に路線カラーの帯）。
+   *  リアルタイム運行状況の路線選択画面（app.js の renderRouteList）と同じ見た目にして、
+   *  「この周辺を通る路線」一覧をカラフルなチップの密集から読みやすい縦リストにする。
+   *  淡い路線カラーが白背景に埋もれないよう、帯の縁に薄い暗色の輪郭（inset box-shadow）を重ねる。 */
+  function routeRowButton(route) {
+    const accent = parseHexColor(route.color) ? `#${route.color.replace('#', '')}` : '#93c5fd';
+    return `
+      <button type="button" data-role="ss-route" data-feed="${esc(route.feedId)}" data-route="${esc(route.routeId)}"
+              class="w-full flex items-center gap-3 text-left bg-white rounded-xl border-2 border-gray-100 hover:border-emerald-400 active:scale-[0.99] transition-all p-3"
+              style="border-left:6px solid ${esc(accent)};box-shadow:inset 3px 0 0 rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.05)">
+        <span class="font-bold text-gray-900 truncate">${esc(route.name || route.shortName)}</span>
+        <svg class="w-4 h-4 text-gray-300 shrink-0 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>
+      </button>`;
   }
 
   /* ---------- 観光スポット公式サイトリンクのタップ計測（busstop.js / routesearch.js と同じ） ---------- */
@@ -507,7 +522,7 @@
       ? `
         <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-100 p-4 mb-4">
           <p class="text-xs font-bold text-gray-500 mb-2">この周辺を通る路線（タップでリアルタイム時刻表）</p>
-          <div class="flex flex-wrap gap-1.5">${result.routes.map(routeChipButton).join('')}</div>
+          <div class="space-y-2">${result.routes.map(routeRowButton).join('')}</div>
         </div>`
       : '';
 

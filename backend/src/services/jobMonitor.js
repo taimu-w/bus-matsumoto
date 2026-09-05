@@ -9,6 +9,10 @@
  */
 const HISTORY_LIMIT = 20;
 
+// 何回連続でスキップされたら「実質的にポーリング間隔が伸びている」とみなして
+// 警告ログ・異常アラート（/api/admin/alerts の pipelineSkipped）に出すか。
+const SKIP_ALERT_THRESHOLD = 3;
+
 const JOB_NAMES = [
   'pipeline.gtfsUpdate',
   'pipeline.ensureDailyTrips',
@@ -20,6 +24,10 @@ const JOB_NAMES = [
   'pipeline.delayCalc',
   'pipeline.computeArrivals',
   'pipeline.gtfsManualRefetch',
+  // scheduler.pipeline は runPipeline() 1回分（全ステップ）をまとめて計測する、
+  // 個々のステップ（pipeline.*）とは別のジョブ。多重実行ガードでのスキップは
+  // このジョブに対して recordSkip() される。
+  'scheduler.pipeline',
   'scheduler.finishTrips',
   'scheduler.cleanup'
 ];
@@ -32,7 +40,15 @@ function emptyJobState() {
     lastOk: null,
     lastError: null,
     lastMeta: null,
-    history: []
+    history: [],
+    // スキップ（前回の実行が長引いていて今回の周期が実行されなかった回数）の記録。
+    // track() が呼ばれる＝実際に実行された、なので開始時に連続スキップ数をリセットする。
+    skipCount: 0,
+    consecutiveSkips: 0,
+    lastSkippedAt: null,
+    // 連続スキップが始まった時刻。異常アラートのkeyに使い、スキップが続く間は
+    // 同じ異常インスタンスとして扱う（解消してから再発したら新しいkeyになる）。
+    skipStreakStartedAt: null
   };
 }
 
@@ -71,6 +87,9 @@ function sanitizeMeta(value) {
  */
 async function track(name, fn) {
   const state = getOrCreate(name);
+  // 実際に実行されたので、連続スキップの記録は途切れる。
+  state.consecutiveSkips = 0;
+  state.skipStreakStartedAt = null;
   const startedAt = new Date();
   state.lastStartedAt = startedAt;
   const startMs = Date.now();
@@ -107,6 +126,30 @@ async function track(name, fn) {
   }
 }
 
+/**
+ * 多重実行ガード（pipelineRunning等）で今回の周期がスキップされたことを記録する。
+ * 「1回スキップ」自体は前回処理が長引いただけで正常な範囲だが、これがN回連続すると
+ * 実質的なポーリング間隔が伸び続けている（＝処理が詰まって戻ってこない）兆候なので、
+ * SKIP_ALERT_THRESHOLD到達時に警告ログを出す。異常アラートへの反映は呼び出し側
+ * （/api/admin/alerts）が getJobStatus().consecutiveSkips を見て行う。
+ */
+function recordSkip(name) {
+  const state = getOrCreate(name);
+  state.skipCount += 1;
+  if (state.consecutiveSkips === 0) {
+    state.skipStreakStartedAt = new Date();
+  }
+  state.consecutiveSkips += 1;
+  state.lastSkippedAt = new Date();
+  if (state.consecutiveSkips >= SKIP_ALERT_THRESHOLD) {
+    console.warn(
+      `[jobMonitor] ${name} が ${state.consecutiveSkips} 回連続でスキップされました` +
+      `（前回の実行が完了しないまま次の周期に入っています。実質的なポーリング間隔が伸びています）。`
+    );
+  }
+  return state.consecutiveSkips;
+}
+
 function getJobsStatus() {
   return Array.from(jobs.entries()).map(([name, state]) => ({
     name,
@@ -116,7 +159,10 @@ function getJobsStatus() {
     lastOk: state.lastOk,
     lastError: state.lastError,
     lastMeta: state.lastMeta,
-    history: state.history
+    history: state.history,
+    skipCount: state.skipCount,
+    consecutiveSkips: state.consecutiveSkips,
+    lastSkippedAt: state.lastSkippedAt
   }));
 }
 
@@ -136,8 +182,12 @@ function getJobStatus(name) {
     lastOk: state.lastOk,
     lastError: state.lastError,
     lastMeta: state.lastMeta,
-    history: state.history
+    history: state.history,
+    skipCount: state.skipCount,
+    consecutiveSkips: state.consecutiveSkips,
+    lastSkippedAt: state.lastSkippedAt,
+    skipStreakStartedAt: state.skipStreakStartedAt
   };
 }
 
-module.exports = { track, getJobsStatus, getJobStatus, JOB_NAMES };
+module.exports = { track, recordSkip, getJobsStatus, getJobStatus, JOB_NAMES, SKIP_ALERT_THRESHOLD };

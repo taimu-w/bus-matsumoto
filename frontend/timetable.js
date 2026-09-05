@@ -508,6 +508,7 @@
     `;
 
     bindStopViewEvents(data, date, platform);
+    if (window.TextAbbrev) window.TextAbbrev.fitAll(root());
   }
 
   /** 表示モード切替（標柱が複数ある場合のみ表示する。仕様書 3.4 A） */
@@ -570,7 +571,7 @@
                 const fg = chipTextColor(h.color, h.textColor);
                 return `<div class="flex items-center gap-2 py-1">
                     <span class="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0" style="background:${esc(bg)};color:${esc(fg)}">${esc(h.routeShortName || h.routeName)}</span>
-                    <span class="text-sm font-bold text-gray-800 truncate">${esc(h.headsign || '行先表示なし')}</span>
+                    <span class="text-sm font-bold text-gray-800 truncate" data-abbrev-fit>${esc(h.headsign || '行先表示なし')}</span>
                   </div>`;
               })
               .join('')
@@ -725,7 +726,7 @@
                  title="${esc(`${departure.time} ${departure.routeName} ${departure.headsign || ''}`)}">
                 ${style.needsBadge ? `<span class="tt-min-dot" style="background:${esc(style.hex)}"></span>` : ''}
                 <span class="tt-min-num" style="color:${esc(style.numberColor)}">${String(departure.minute).padStart(2, '0')}</span>
-                ${sub ? `<span class="tt-min-sub">${esc(platformBadge + sub)}</span>` : ''}
+                ${sub ? `<span class="tt-min-sub" data-abbrev-fit>${esc(platformBadge + sub)}</span>` : ''}
               </a>`;
           })
           .join('');
@@ -841,6 +842,7 @@
     if (!section) return;
     section.innerHTML = `${renderLegend(data)}${renderTimetableGrid(data, date, platform)}`;
     bindLegendFilterEvents(data, date, platform);
+    if (window.TextAbbrev) window.TextAbbrev.fitAll(section);
   }
 
   /** 凡例の「路線で絞り込む」ボタンと「すべて表示」ボタンのイベント。 */

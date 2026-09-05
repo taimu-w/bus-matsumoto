@@ -7,6 +7,12 @@
 <meta name="description" content="バスタイム（松本市バスなび）：松本市内のバスのリアルタイム運行状況・経路検索・時刻表・バス停情報をまとめて確認できます。">
 <meta name="theme-color" content="#1e40af">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%231e40af'/%3E%3Cpath fill='%23fff' d='M18,11H6V6h12M16.5,17A1.5,1.5 0 0,1 15,15.5A1.5,1.5 0 0,1 16.5,14A1.5,1.5 0 0,1 18,15.5A1.5,1.5 0 0,1 16.5,17M7.5,17A1.5,1.5 0 0,1 6,15.5A1.5,1.5 0 0,1 7.5,14A1.5,1.5 0 0,1 9,15.5A1.5,1.5 0 0,1 7.5,17M4,16c0,0.88 0.39,1.67 1,2.22V20a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1h8v1a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1.78c0.61-0.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8,0.5-8,4V16Z'/%3E%3C/svg%3E">
+<!-- PWA: ホーム画面追加・オフラインシェル（docs/system-review-2026-09.md F-4）。
+     Service Worker本体の登録・キャッシュ方針はapp.js/sw.jsを参照。 -->
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icons/icon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="バスタイム">
 <!-- Tailwind・LeafletはCDNではなくfrontend/vendor/に同梱したものを配信する。
      CDNが汚染された場合に任意のJSが利用者に実行されるリスクと、unpkg障害で地図が丸ごと
      壊れるリスクを断つため（docs/system-review-2026-09.md S-6）。
@@ -33,7 +39,7 @@
       <label class="bg-white text-blue-800 rounded-lg shadow-md px-2 py-1 flex items-center gap-2 text-xs font-bold" style="display:none;">
         <span>路線</span>
         <select id="route-select" class="bg-transparent outline-none text-blue-800 font-bold">
-          <option value="11">横田信大循環線</option>
+          <option value="guruttomatsumotobus1:11">横田信大循環線</option>
         </select>
       </label>
       <button id="refresh-btn" class="bg-white text-blue-800 p-2 rounded-lg hover:bg-blue-50 transition shadow-md flex items-center gap-1">
@@ -241,7 +247,20 @@
       <span id="selected-route-name" class="text-sm font-bold text-gray-600 truncate"></span>
       <span id="selected-route-fav" class="shrink-0"></span>
     </div>
-    <div class="mb-8">
+    <!-- 本日の運行が無い／終了した場合はリアルタイム・時刻表の各セクションを出さず、
+         この1行だけを表示する（app.jsのrenderDayStatus）。 -->
+    <p id="realtime-day-status" class="text-sm font-bold text-gray-500 bg-gray-50 border-2 border-gray-100 rounded-xl px-4 py-6 text-center" style="display:none;"></p>
+
+    <!-- 表示モード切替（カード表示／基本表示）。選択状態はlocalStorageに保存し全路線で共通（app.js）。 -->
+    <div class="flex items-center justify-end mb-4">
+      <button id="realtime-display-mode-toggle" class="bg-white text-blue-800 rounded-lg shadow-md px-2 py-2 flex items-center gap-1.5 text-xs font-bold" title="表示形式を切り替えます">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        <span>表示：</span>
+        <span id="realtime-display-mode-label">カード表示</span>
+      </button>
+    </div>
+
+    <div id="section-realtime-live" class="mb-8">
       <h2 class="text-xl font-bold text-blue-900 flex items-center mb-4">
         <span class="w-2 h-6 bg-green-500 rounded-full mr-2 shadow-sm"></span>
         リアルタイム運行中
@@ -255,8 +274,24 @@
       </div>
     </div>
 
+    <!-- リアルタイム非対応セクション：本来なら運行中のはずの便がGPS未検知・GPS途絶等で
+         リアルタイム追跡できていない場合に、時刻表どおりの参考情報として表示する。
+         該当便が無ければセクションごと非表示にする（app.jsのrenderUnsupportedBuses）。 -->
+    <div id="section-realtime-unsupported" class="mb-8" style="display:none;">
+      <h2 class="text-xl font-bold text-gray-600 flex items-center mb-4">
+        <span class="w-2 h-6 bg-gray-400 rounded-full mr-2 shadow-sm"></span>
+        リアルタイム非対応（時刻表通りに表示）
+      </h2>
+      <div id="realtime-unsupported-buses" class="space-y-4"></div>
+    </div>
+
+    <!-- 表示モード「基本表示」セクション：全バス停を縦一列に並べ、各便をバスアイコンで表示する。
+         中身はすべてrealtime-diagram.jsのRealtimeDiagramView.render()が描画する
+         （timetable-root等と同じ「空の入れ物」方式）。 -->
+    <div id="section-realtime-diagram" class="mb-8" style="display:none;"></div>
+
     <!-- 時刻表（参考）セクション -->
-    <div class="mb-8">
+    <div id="section-schedule" class="mb-8">
       <h2 class="text-xl font-bold text-gray-500 flex items-center mb-4">
         <span class="w-2 h-6 bg-gray-400 rounded-full mr-2 shadow-sm"></span>
         時刻表（参考）
@@ -320,7 +355,7 @@
 </nav>
 
 <!-- 重要モーダル -->
-<div id="important-modal" class="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center px-4" style="display:none;">
+<div id="important-modal" class="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center px-4 modal-hidden">
   <div class="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
     <div class="bg-red-600 p-4 text-white font-bold text-lg flex items-center">
       重要なお知らせ
@@ -333,7 +368,7 @@
 </div>
 
 <!-- 通常のお知らせ詳細モーダル（トップ画面で題名をタップすると開く） -->
-<div id="notice-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center px-4" style="display:none;">
+<div id="notice-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center px-4 modal-hidden">
   <div class="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
     <div class="bg-blue-800 p-4 text-white font-bold text-lg flex items-start gap-2">
       <span class="shrink-0 mt-0.5">📢</span>
@@ -347,7 +382,7 @@
 </div>
 
 <!-- ダイヤ改正の注意喚起（時刻表・経路検索で、選択日がGTFSデータの有効期間外のとき開く） -->
-<div id="gtfs-expiry-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center px-4" style="display:none;">
+<div id="gtfs-expiry-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center px-4 modal-hidden">
   <div class="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
     <div class="bg-amber-500 p-4 text-white font-bold text-lg flex items-center gap-2">
       <span aria-hidden="true">⚠️</span>
@@ -360,8 +395,25 @@
   </div>
 </div>
 
+<!-- リアルタイム非対応の便カードをタップした際の確認モーダル（app.js） -->
+<div id="realtime-unsupported-confirm-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center px-4 modal-hidden">
+  <div class="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
+    <div class="bg-gray-700 p-4 text-white font-bold text-lg flex items-center gap-2">
+      <span aria-hidden="true">🕒</span>
+      時刻表表示の確認
+    </div>
+    <div class="p-6 text-base text-gray-900 leading-relaxed">
+      この便はリアルタイムの情報ではなく時刻表通りに表示しています。各停留所の通過時刻を閲覧しますか？
+    </div>
+    <div class="p-4 border-t bg-gray-50 flex gap-3">
+      <button data-close="realtime-unsupported-confirm-modal" class="flex-1 bg-gray-200 text-gray-800 py-3.5 rounded-xl text-base font-bold">キャンセル</button>
+      <button id="realtime-unsupported-confirm-btn" class="flex-1 bg-blue-700 text-white py-3.5 rounded-xl text-base font-bold">閲覧する</button>
+    </div>
+  </div>
+</div>
+
 <!-- 地図ポップアップ（OpenStreetMap。便詳細ページのリアルタイム表示から使う。外部サイトへは遷移しない） -->
-<div id="tt-map-popup-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4" style="display:none;">
+<div id="tt-map-popup-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4 modal-hidden">
   <div class="bg-white rounded-t-3xl sm:rounded-2xl w-full max-w-md shadow-2xl p-4">
     <div class="flex justify-between items-start mb-3">
       <div>
@@ -377,7 +429,7 @@
 </div>
 
 <!-- バス停検索：マップで見るモーダル（OpenStreetMap。busstop.jsから使う。外部サイトへは遷移しない） -->
-<div id="bs-map-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4" style="display:none;">
+<div id="bs-map-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4 modal-hidden">
   <div class="bg-white rounded-t-3xl sm:rounded-2xl w-full max-w-md shadow-2xl p-4">
     <div class="flex justify-between items-start mb-3">
       <h3 class="text-lg font-bold text-teal-900">マップで見る</h3>
@@ -390,7 +442,7 @@
 </div>
 
 <!-- バス停検索：乗り場選択ポップアップ（Googleマップ用。標柱が複数ある「すべての乗り場」表示から使う） -->
-<div id="bs-platform-picker-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4" style="display:none;">
+<div id="bs-platform-picker-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4 modal-hidden">
   <div class="bg-white rounded-t-3xl sm:rounded-2xl w-full max-w-md shadow-2xl p-4 max-h-[85vh] overflow-y-auto">
     <div class="flex justify-between items-start mb-3">
       <div>
@@ -406,7 +458,7 @@
 </div>
 
 <!-- 経路検索：観光スポット情報ポップアップ（routesearch.jsから使う。観光スポット情報_仕様書） -->
-<div id="rs-spot-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4" style="display:none;">
+<div id="rs-spot-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4 modal-hidden">
   <div class="bg-white rounded-t-3xl sm:rounded-2xl w-full max-w-md shadow-2xl max-h-[85vh] overflow-y-auto">
     <div class="flex justify-between items-start p-4 pb-0">
       <p class="text-xs text-emerald-600 font-bold">観光スポット</p>
@@ -436,16 +488,19 @@
 </div>
 
 
-<!-- favorites.js・spot-photos.js・timetable.js・stopmap.js・busstop.js・routesearch.js・spotsearch.js・onboarding.js は app.js より先に読み込む（app.js の初回ルーティングから参照するため）。
-     spot-photos.js は busstop.js・routesearch.js・spotsearch.js が観光スポットの写真描画に使う共通モジュールなので、それらより先に置く。 -->
+<!-- favorites.js・spot-photos.js・timetable.js・stopmap.js・busstop.js・routesearch.js・spotsearch.js・onboarding.js・realtime-diagram.js は app.js より先に読み込む（app.js の初回ルーティングから参照するため）。
+     spot-photos.js は busstop.js・routesearch.js・spotsearch.js が観光スポットの写真描画に使う共通モジュールなので、それらより先に置く。
+     text-abbrev.js は系統名・行き先の表示略称を扱う共通モジュールで、busstop.js・timetable.js・app.js が使うためそれらより先に置く。 -->
 <script src="/favorites.js"></script>
 <script src="/spot-photos.js"></script>
+<script src="/text-abbrev.js"></script>
 <script src="/timetable.js"></script>
 <script src="/stopmap.js"></script>
 <script src="/busstop.js"></script>
 <script src="/routesearch.js"></script>
 <script src="/spotsearch.js"></script>
 <script src="/onboarding.js"></script>
+<script src="/realtime-diagram.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

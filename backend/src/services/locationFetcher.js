@@ -10,7 +10,7 @@
 //   一時期コード管理化したが、厳格な検証を維持したままDB管理・管理画面編集に戻した）
 const fetch = require('cross-fetch');
 const pool = require('../config/db');
-const { formatNowNoFormat, formatTimeNoFormat } = require('../utils/time');
+const { formatNowNoFormat, formatTimeNoFormat, parseGpsTimeToDate } = require('../utils/time');
 const { resolveDirectionId } = require('./directionRules');
 const { getEnabledLocationFeeds, getGtfsFeedIdsFor } = require('../config/feeds');
 const { getExternalIdsForFeeds } = require('./routeExternalIdMapping');
@@ -43,11 +43,22 @@ function parseCsv(text) {
     .map(parseCsvLine);
 }
 
+// GPS時刻が現在時刻より未来でも、これ以内なら受け入れる許容幅（秒）。
+// フィード側サーバーとこちらの時計のズレを吸収するためのもので、
+// 「フィードが未来の時刻を出している」異常を見逃さない程度に小さく取る。
+const FUTURE_TOLERANCE_SEC = 60;
+
+// 路線が一致した行のうち、これ以上の割合が時刻の書式エラーで捨てられたら
+// フィードの書式が変わったとみなし、feeds.last_status を 'error' にする。
+// 「1件も入らないのに正常と表示される」状態を無くすのが目的なので、
+// 一部の行が壊れている程度（既定 50% 未満）では従来どおり 'ok' のままにする。
+const INVALID_TIME_FORMAT_ERROR_RATIO = 0.5;
+
 /**
  * 単一の位置情報フィードを取得してvehicle_positions_rawに追記する。
  * 失敗してもthrowせず、feedsテーブルにエラー情報を記録して0件を返す。
  */
-async function fetchLocationFeed(client, feed, freshnessMin, now, timeLimit, nowLabel) {
+async function fetchLocationFeed(client, feed, freshnessMin, nowLabel) {
   const feedId = feed.id;
   const url = feed.url;
 
@@ -125,10 +136,22 @@ async function fetchLocationFeed(client, feed, freshnessMin, now, timeLimit, now
     return { inserted: 0, feedId };
   }
 
+  // GPS時刻の鮮度・未来判定に使う「現在時刻」は、このフィードの本文を読み終えた時点で取る。
+  // 全フィード共通の1個のタイムスタンプを使い回すと、フィード取得（各最大30秒）が
+  // 進むほど基準時刻が過去にずれ、後続フィードの正常なデータが「未来」判定で捨てられていく。
+  const now = new Date();
+  const timeLimit = new Date(now.getTime() - freshnessMin * 60 * 1000);
+  const futureLimit = new Date(now.getTime() + FUTURE_TOLERANCE_SEC * 1000);
+
   // 車両IDごとに最新のGPS時刻のものだけを残す
   const latestByCar = new Map();
   let skippedNoRouteMatch = 0;
-  let skippedStaleOrInvalidTime = 0;
+  let skippedStaleOrInvalidTime = 0; // 下3つの合計（管理画面の既存表示「時刻異常」の値）
+  let skippedInvalidTimeFormat = 0;  // 時刻として解釈できなかった
+  let skippedStaleTime = 0;          // 鮮度（GPS_FRESHNESS_MIN）より古い
+  let skippedFutureTime = 0;         // 現在時刻より未来（許容幅を超える）
+  let sampleInvalidTime = null;      // 書式エラーの実例（原因調査用に1件だけ残す）
+  let routeMatched = 0;
   let skippedInvalidLatLon = 0;
   for (const row of rows) {
     if (row.length < 4) continue;
@@ -145,10 +168,23 @@ async function fetchLocationFeed(client, feed, freshnessMin, now, timeLimit, now
       continue;
     }
 
+    routeMatched++;
     const carId = row[0].trim();
     const gpsTimeStr = row[1].trim();
-    const gpsDate = new Date(gpsTimeStr.replace(/-/g, '/') + ' +0900');
-    if (Number.isNaN(gpsDate.getTime()) || gpsDate < timeLimit || gpsDate > now) {
+    const gpsDate = parseGpsTimeToDate(gpsTimeStr);
+    if (gpsDate === null) {
+      skippedInvalidTimeFormat++;
+      skippedStaleOrInvalidTime++;
+      if (sampleInvalidTime === null) sampleInvalidTime = gpsTimeStr.slice(0, 40);
+      continue;
+    }
+    if (gpsDate < timeLimit) {
+      skippedStaleTime++;
+      skippedStaleOrInvalidTime++;
+      continue;
+    }
+    if (gpsDate > futureLimit) {
+      skippedFutureTime++;
       skippedStaleOrInvalidTime++;
       continue;
     }
@@ -175,21 +211,6 @@ async function fetchLocationFeed(client, feed, freshnessMin, now, timeLimit, now
   }
 
   const entries = Array.from(latestByCar.values());
-  if (entries.length === 0) {
-    console.log(`[locationFetcher] feed=${feedId} 有効なバスデータがありませんでした。`);
-    await client.query(
-      `UPDATE feeds SET last_fetched_at = now(), last_status = 'ok', last_error = NULL WHERE id = $1`,
-      [feedId]
-    );
-    return {
-      inserted: 0,
-      feedId,
-      scanned: rows.length,
-      skippedNoRouteMatch,
-      skippedStaleOrInvalidTime,
-      skippedInvalidLatLon
-    };
-  }
 
   let inserted = 0;
   for (const e of entries) {
@@ -216,18 +237,46 @@ async function fetchLocationFeed(client, feed, freshnessMin, now, timeLimit, now
     inserted++;
   }
 
+  // 路線が一致した行の大半が「時刻として解釈できない」なら、フィードの書式が変わったとみなす。
+  // 旧実装はこの状況（例: 配信がISO 8601化して全行が捨てられる）でも last_status='ok' のままで、
+  // 唯一の痕跡が管理画面の「時刻異常」カウンタだけだった。ここでエラーとして残す。
+  const timeFormatError =
+    skippedInvalidTimeFormat > 0 &&
+    skippedInvalidTimeFormat >= routeMatched * INVALID_TIME_FORMAT_ERROR_RATIO
+      ? `GPS時刻の書式を解釈できません（${skippedInvalidTimeFormat}/${routeMatched}行）。例: ${sampleInvalidTime}`
+      : null;
+
   await client.query(
-    `UPDATE feeds SET last_fetched_at = now(), last_status = 'ok', last_error = NULL WHERE id = $1`,
-    [feedId]
+    `UPDATE feeds SET last_fetched_at = now(), last_status = $2, last_error = $3 WHERE id = $1`,
+    [feedId, timeFormatError ? 'error' : 'ok', timeFormatError]
   );
 
-  console.log(`[locationFetcher] feed=${feedId} 位置情報を ${inserted} 件追記しました。`);
+  if (timeFormatError) {
+    console.error(`[locationFetcher] feed=${feedId} ${timeFormatError}`);
+  }
+  if (skippedFutureTime > 0) {
+    console.warn(
+      `[locationFetcher] feed=${feedId} 現在時刻より未来のGPS時刻を ${skippedFutureTime} 件破棄しました` +
+      `（許容幅${FUTURE_TOLERANCE_SEC}秒）。フィード側の時刻がずれている可能性があります。`
+    );
+  }
+  if (entries.length === 0) {
+    console.log(`[locationFetcher] feed=${feedId} 有効なバスデータがありませんでした。`);
+  } else {
+    console.log(`[locationFetcher] feed=${feedId} 位置情報を ${inserted} 件追記しました。`);
+  }
+
   return {
     inserted,
     feedId,
     scanned: rows.length,
+    routeMatched,
     skippedNoRouteMatch,
     skippedStaleOrInvalidTime,
+    skippedInvalidTimeFormat,
+    skippedStaleTime,
+    skippedFutureTime,
+    sampleInvalidTime,
     skippedInvalidLatLon
   };
 }
@@ -243,8 +292,9 @@ async function fetchLocation() {
     return { inserted: 0, feeds: [] };
   }
 
-  const now = new Date();
-  const timeLimit = new Date(now.getTime() - freshnessMin * 60 * 1000);
+  // received_time（受信時刻の表示用ラベル）はこのポーリング全体で1つに揃える。
+  // GPS時刻の鮮度・未来判定に使う基準時刻はフィードごとに取り直すため、ここでは作らない
+  // （フィード取得が長引くほど基準が古くなり、正常なデータが「未来」判定で捨てられていた）。
   const nowLabel = formatNowNoFormat();
 
   // 各フィードを独立して処理（1つの失敗が他に影響しない）
@@ -253,14 +303,7 @@ async function fetchLocation() {
   for (const feed of locationFeeds) {
     const feedClient = await pool.connect();
     try {
-      const result = await fetchLocationFeed(
-        feedClient,
-        feed,
-        freshnessMin,
-        now,
-        timeLimit,
-        nowLabel
-      );
+      const result = await fetchLocationFeed(feedClient, feed, freshnessMin, nowLabel);
       results.push(result);
       totalInserted += result.inserted;
     } catch (err) {

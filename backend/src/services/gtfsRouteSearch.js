@@ -1624,6 +1624,39 @@ function attachSpotWalkLegs(ranked, origin, destination) {
   }
 }
 
+/**
+ * 連続する徒歩レグを1本にまとめる（表示用）。
+ *
+ * 探索そのものは徒歩の連鎖（徒歩→徒歩）を禁止しているが、スポットを出発地／目的地にすると
+ * attachSpotWalkLegs() が「スポット⇔実際に乗降するバス停」の徒歩を先頭／末尾へ足すため、
+ * 探索が返した乗り継ぎの徒歩と隣り合って徒歩が2連続で並ぶことがある
+ * （例：清水で降車 → 徒歩で蚕糸公園 → 徒歩で県ケ丘高校）。区間として分けて出す意味が無く
+ * 不自然なので、距離と分数を単純に足し合わせて1本の徒歩として見せる。
+ *
+ * ⚠️ 端点間の直線距離で引き直さないこと。実際には途中のバス停を経由して歩くため、
+ * 引き直すと実際より短い距離・分数になる。時刻も足し直さず、先頭の発時刻と末尾の着時刻を
+ * そのまま使う（前後のバス区間との連続性を保つため）。
+ */
+function mergeConsecutiveWalkLegs(journeys) {
+  for (const journey of journeys) {
+    const merged = [];
+    for (const leg of journey.legs) {
+      const previous = merged[merged.length - 1];
+      if (leg.type === 'walk' && previous && previous.type === 'walk') {
+        previous.toStop = leg.toStop;
+        previous.walkMinutes += leg.walkMinutes;
+        previous.distanceMeters = (previous.distanceMeters || 0) + (leg.distanceMeters || 0);
+        previous.arrivalSeconds = leg.arrivalSeconds;
+        previous.arrivalTime = leg.arrivalTime;
+        previous.arrivalDayOffset = leg.arrivalDayOffset;
+        continue;
+      }
+      merged.push(leg);
+    }
+    journey.legs = merged;
+  }
+}
+
 function serializeEndpoint(group) {
   return {
     stopKey: group.groupKey,
@@ -1860,6 +1893,9 @@ async function searchJourneys(options = {}) {
   // スポット起点/終点の場合、スポット⇔バス停の徒歩レグを経路自体に組み込む。
   // actualFromKey/actualToKeyは組み込み前（=実際に乗降するバス停）を指すのでこの後に呼ぶ。
   attachSpotWalkLegs(ranked, origin, destination);
+  // スポットの徒歩レグと乗り継ぎの徒歩レグが隣り合った場合は1本にまとめる。
+  // 運賃・リアルタイム・乗換リスクの判定はすべて済んでいるので、ここでまとめても影響しない。
+  mergeConsecutiveWalkLegs(ranked);
 
   return {
     found: true,
@@ -2042,6 +2078,8 @@ async function searchRouteSearchStops(query, limit = 20) {
 module.exports = {
   searchJourneys,
   searchRouteSearchStops,
+  // 回帰テスト用（DB・GTFSインデックスに依存しない純ロジック）
+  mergeConsecutiveWalkLegs,
   // 調査・将来の再利用向け
   getSearchIndex
 };

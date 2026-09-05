@@ -41,10 +41,10 @@ function urlDepartureTimeToMinutes(value) {
  * 割り当て（trip_vehicle_assignments, role='assigned' state='active'）を探す。
  * 見つからなければ null（＝現在リアルタイム運行していない）。
  *
- * 注意: frequencies.txt由来の仮想便で、始発時刻が24時を跨ぐ場合
- * （dailyTripBuilder.js の minutesToTimeStr が 24時で折り返す）は
- * URL側（折り返さない表記）とマッチしないことがある。この路線の運行時間帯
- * （早朝〜23時台）では実質発生しないため、対応を割愛している。
+ * daily_trips.start_time は素の便・frequencies由来の仮想便のどちらも
+ * 「運行日の0時起点」表記（24時超えを折り返さない "25:00"）で入っている
+ * （dailyTripBuilder.js が minutesToServiceTimeStr を使う）。URL側の
+ * departure_time も同じ表記なので、24時を跨ぐ便でも突合が成立する。
  */
 async function findLiveAssignment(feedId, routeId, tripId, departureTime) {
   const qualifiedRouteId = qualifyRouteId(routeId, feedId);
@@ -82,6 +82,20 @@ async function findLiveAssignment(feedId, routeId, tripId, departureTime) {
 }
 
 /**
+ * 「今この便がどこ行きか」を表すstop_headsignを1つ選ぶ（/api/buses-for-mapの
+ * バスマップアイコンと同じ考え方）。その地点（直近到着済みの停留所。まだ到着が
+ * 無ければ始発停留所）のstop_headsignを使う。seq_order昇順の行配列を渡すこと。
+ */
+function resolveCurrentHeadsign(orderedStopRows) {
+  if (orderedStopRows.length === 0) return null;
+  let current = null;
+  for (const r of orderedStopRows) {
+    if (r.status === '到着済') current = r.stop_headsign;
+  }
+  return current !== null ? current : orderedStopRows[0].stop_headsign;
+}
+
+/**
  * 1便分のリアルタイム詳細（停車進捗・遅延・到着予測・車両位置）を組み立てる。
  * /api/buses の1件分と同じ形。findLiveAssignment() の結果行を渡す。
  */
@@ -98,12 +112,14 @@ async function buildBusEntry(t, routeId, routeName) {
             s.lat,
             s.lon,
             s.notice,
-            s.timetable_link
+            s.timetable_link,
+            dts.stop_headsign
      FROM trip_stop_progress p
      JOIN stops s ON s.id = p.stop_id
+     LEFT JOIN daily_trip_stop_times dts ON dts.daily_trip_id = $2 AND dts.stop_id = p.stop_id
      WHERE p.assignment_id = $1
      ORDER BY p.seq_order ASC`,
-    [t.assignment_id]
+    [t.assignment_id, t.daily_trip_id]
   );
 
   const latestGpsResult = await pool.query(
@@ -144,12 +160,116 @@ async function buildBusEntry(t, routeId, routeName) {
     routeId,
     routeName,
     headsign: t.headsign || null,
+    currentHeadsign: resolveCurrentHeadsign(stopRows.rows) || t.headsign || null,
     isRealtime: true,
     delayMinutes: t.delay_minutes,
     lat: latestGps ? latestGps.lat : null,
     lng: latestGps ? latestGps.lon : null,
     stops
   };
+}
+
+/**
+ * /api/buses のホットパス専用: buildBusEntry() を件数ぶん直列に呼ぶと1台につき3クエリ
+ * （停車進捗・最新GPS・到着予測）を発行してしまう（N+1）。20秒間隔で全クライアントが
+ * ポーリングするため、台数×クライアント数に比例してDB負荷が伸びていた。
+ * 同じ3種類のクエリを assignment_id / vehicle_id の配列でまとめて1回ずつ発行し、
+ * JS側でグルーピングしてから buildBusEntry() と同じ形の配列を組み立てる
+ * （1台だけを引く他の呼び出し元は N=1 なのでこの問題がなく、buildBusEntry() のまま）。
+ * 戻り値は trips と同じ順序・同じ長さの配列。
+ */
+async function buildBusEntriesBatch(trips, routeId, routeName) {
+  if (trips.length === 0) return [];
+
+  const assignmentIds = trips.map((t) => t.assignment_id);
+  const vehicleIds = trips.map((t) => t.vehicle_id);
+
+  const [stopRowsResult, latestGpsResult, predictionsResult] = await Promise.all([
+    pool.query(
+      `SELECT p.assignment_id, p.stop_id, p.seq_order, p.scheduled_time, p.status,
+              p.actual_time, p.delay_minutes, p.interpolated,
+              s.name, s.lat, s.lon, s.notice, s.timetable_link, dts.stop_headsign
+       FROM trip_stop_progress p
+       JOIN stops s ON s.id = p.stop_id
+       JOIN trip_vehicle_assignments a2 ON a2.id = p.assignment_id
+       LEFT JOIN daily_trip_stop_times dts ON dts.daily_trip_id = a2.daily_trip_id AND dts.stop_id = p.stop_id
+       WHERE p.assignment_id = ANY($1::int[])
+       ORDER BY p.assignment_id ASC, p.seq_order ASC`,
+      [assignmentIds]
+    ),
+    pool.query(
+      `SELECT DISTINCT ON (vehicle_id) vehicle_id, lat, lon
+       FROM vehicle_gps_log
+       WHERE vehicle_id = ANY($1::int[])
+       ORDER BY vehicle_id, gps_time_ts DESC, id DESC`,
+      [vehicleIds]
+    ),
+    pool.query(
+      `SELECT assignment_id, stop_id, seq_order, predicted_time, predicted_delay_minutes, source
+       FROM trip_arrival_predictions
+       WHERE assignment_id = ANY($1::int[])
+       ORDER BY assignment_id ASC, seq_order ASC`,
+      [assignmentIds]
+    )
+  ]);
+
+  const stopRowsByAssignment = new Map();
+  for (const r of stopRowsResult.rows) {
+    if (!stopRowsByAssignment.has(r.assignment_id)) stopRowsByAssignment.set(r.assignment_id, []);
+    stopRowsByAssignment.get(r.assignment_id).push(r);
+  }
+
+  const latestGpsByVehicle = new Map(latestGpsResult.rows.map((r) => [r.vehicle_id, r]));
+
+  const predictionsByAssignment = new Map();
+  for (const p of predictionsResult.rows) {
+    if (!predictionsByAssignment.has(p.assignment_id)) predictionsByAssignment.set(p.assignment_id, new Map());
+    predictionsByAssignment.get(p.assignment_id).set(p.seq_order, {
+      predictedTime: p.predicted_time,
+      predictedDelayMinutes: p.predicted_delay_minutes
+    });
+  }
+
+  return trips.map((t) => {
+    const stopRows = stopRowsByAssignment.get(t.assignment_id) || [];
+    const predictionBySeq = predictionsByAssignment.get(t.assignment_id) || new Map();
+    const latestGps = latestGpsByVehicle.get(t.vehicle_id) || null;
+
+    const stops = stopRows.map((r) => {
+      const pred = predictionBySeq.get(r.seq_order);
+      return {
+        stopId: r.stop_id,
+        seqOrder: r.seq_order,
+        name: r.name,
+        lat: r.lat,
+        lng: r.lon,
+        notice: r.notice,
+        timetableLink: r.timetable_link,
+        scheduledTime: r.scheduled_time,
+        status: r.status,
+        actualTime: r.actual_time,
+        delayMinutes: r.delay_minutes,
+        interpolated: r.interpolated,
+        predictedTime: pred ? pred.predictedTime : r.scheduled_time,
+        predictedDelayMinutes: pred ? pred.predictedDelayMinutes : 0
+      };
+    });
+
+    return {
+      id: t.car_id,
+      tripId: t.daily_trip_id,
+      startTime: t.start_time,
+      routeId,
+      routeName,
+      headsign: t.headsign || null,
+      currentHeadsign: resolveCurrentHeadsign(stopRows) || t.headsign || null,
+      isRealtime: true,
+      delayMinutes: t.delay_minutes,
+      lat: latestGps ? latestGps.lat : null,
+      lng: latestGps ? latestGps.lon : null,
+      stops
+    };
+  });
 }
 
 /**
@@ -238,7 +358,7 @@ async function getAssignmentDetailForAdmin(assignmentId) {
 async function getStopArrivalDetailForAdmin(assignmentId, stopId) {
   const stopRes = await pool.query(
     `SELECT p.stop_id, p.seq_order, p.scheduled_time, p.status, p.actual_time,
-            p.delay_minutes, p.interpolated, p.arrival_method, p.arrival_evidence,
+            p.delay_minutes, p.signed_delay_minutes, p.interpolated, p.arrival_method, p.arrival_evidence,
             p.nearby_min_distance_meters, p.nearby_min_distance_gps_time,
             s.name
      FROM trip_stop_progress p
@@ -357,6 +477,9 @@ async function getStopArrivalDetailForAdmin(assignmentId, stopId) {
     status: row.status,
     actualTime: row.actual_time,
     delayMinutes: row.delay_minutes,
+    // 符号付きの差分（負＝定刻より早い）。delayMinutes は0で下限を切っているため、
+    // 早発・早着はこちらでしか分からない。導入前に確定した行では null。
+    signedDelayMinutes: row.signed_delay_minutes ?? null,
     interpolated: row.interpolated,
     arrival,
     currentPrediction,
@@ -506,6 +629,7 @@ async function getGpsOutageDetailForAdmin(assignmentId) {
 module.exports = {
   findLiveAssignment,
   buildBusEntry,
+  buildBusEntriesBatch,
   getAssignmentDetailForAdmin,
   getStopArrivalDetailForAdmin,
   getGpsOutageDetailForAdmin,

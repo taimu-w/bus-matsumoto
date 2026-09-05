@@ -9,7 +9,7 @@
 | サーバー側セッション | 管理画面（`admin.html`） | `POST /api/admin/session`で発行される`bt_admin_session` Cookie（httpOnly・SameSite=Strict・既定12時間の絶対期限）。ブラウザ側には資格情報もトークンも残らない。Cookie認証のリクエストは`Origin`ヘッダーが自ホストと一致することも要求する（CSRFの多層防御） |
 | Basic認証ヘッダー | curl・監視ツールなど | `Authorization: Basic base64(user:pass)`。従来からある経路で、消すと既存の手順書が黙って壊れるため残してある |
 
-資格情報は`ADMIN_USERNAME`/`ADMIN_PASSWORD`環境変数（既定`admin`/`admin123`）で、比較は`crypto.timingSafeEqual`による定数時間比較です。認証に**失敗**した回数はIPごとに数えられ、`ADMIN_AUTH_MAX_FAILURES`（既定10回）を超えると`ADMIN_AUTH_WINDOW_MIN`（既定15分）だけ429を返します（総当たり対策）。数えるのは「資格情報を提示して外したとき」だけなので、期限切れセッションのポーリングや未ログインの素のアクセスでは増えません。
+資格情報は`ADMIN_USERNAME`/`ADMIN_PASSWORD`環境変数（既定ユーザー名は`admin`。`ADMIN_PASSWORD`が未設定だと起動のたびに変わるランダム値になり、起動ログに1回だけ出ます）で、比較は`crypto.timingSafeEqual`による定数時間比較です。認証に**失敗**した回数はIPごとに数えられ、`ADMIN_AUTH_MAX_FAILURES`（既定10回）を超えると`ADMIN_AUTH_WINDOW_MIN`（既定15分）だけ429を返します（総当たり対策）。数えるのは「資格情報を提示して外したとき」だけなので、期限切れセッションのポーリングや未ログインの素のアクセスでは増えません。
 
 セッションはプロセス内メモリなので、**サーバーの再起動・デプロイで全て失効します**（＝再ログインが必要）。管理画面は401を受け取るとログイン画面へ戻ります。
 
@@ -90,13 +90,13 @@
 | GET | `/api/admin/alerts` | 異常アラート（`staleGps`＝車両単位のGPS途絶／`gpsLostTrip`＝GPS途絶で打ち切られた便・未割当便・大幅遅延・予測計算失敗・GTFS取得失敗）。`staleGps`は6分の途絶タイムアウトで`vehicles.status='inactive'`になると消えるが、`gpsLostTrip`は`trip_vehicle_assignments.end_reason='GPS更新停止'`をアンカーにするため復旧後も当日中は残る |
 | GET | `/api/admin/gtfs-feeds` | GTFSフィード監視（最終取得時刻・ファイル件数・エラー内容） |
 | POST | `/api/admin/gtfs-feeds/:feedId/refetch` | GTFSフィードの手動再取得 |
-| GET | `/api/admin/location-feeds` | 位置情報フィード監視（最終受信時刻・受信件数・形式異常） |
+| GET | `/api/admin/location-feeds` | 位置情報フィード監視（最終受信時刻・受信件数・破棄内訳）。破棄は「路線不一致／時刻異常（書式・古い・未来の内訳つき）／座標異常」に分かれ、時刻の書式エラーは実例を1件添える。路線が一致した行の50%以上が書式エラーなら `lastStatus="error"` になる |
 | GET | `/api/admin/api-stats` | API稼働監視（応答時間・エラー率・アクセス数・失敗したエンドポイント） |
 | GET | `/api/admin/job-monitor` | ジョブ監視（各パイプライン工程の最終成功時刻・所要時間・失敗履歴） |
 | GET | `/api/admin/eta-route-overview` | 「当日の状況」の路線別サマリ（`?date=YYYY-MM-DD`）。路線ごとの稼働中車両数・平均ペース補正（本便／今日の前便実績／周辺道路実績／総合）・平均/最大予測遅延 |
 | GET | `/api/admin/delay-mesh` | 「当日の状況」の地図メッシュ（`?cellMeters=100..2000`、既定300）。直近60分の区間実績（他路線含む）を格子に集約し、セルごとの平均ペース比率を返す（`services/delayMesh.js`） |
 | GET | `/api/admin/prediction-accuracy` | 予測精度の集計（`?days=7&routeId=...&thresholdMinutes=3&leadBucket=...&stopsBeforeBucket=...`） |
-| GET | `/api/admin/operation-records/export` | 運行実績のエクスポート（`?from=YYYY-MM-DD&to=YYYY-MM-DD&routeId=...`） |
+| GET | `/api/admin/operation-records/export` | 運行実績のエクスポート（`?from=YYYY-MM-DD&to=YYYY-MM-DD&routeId=...`）。CSVの「遅延分」は0以上に丸めた値、末尾の「遅延分(符号付き)」は負なら早発・早着（符号付き列の導入前に確定した実績は空欄） |
 
 ### `GET /api/admin/prediction-accuracy` の集計方針
 
@@ -107,3 +107,9 @@
 応答には集計値のほかに`totalSampleCount`（絞り込み前の総サンプル数）・`generatedAt`・`computeMs`・`cached`が含まれます。同一条件の結果は`POLL_INTERVAL_SECONDS`と同じ長さ（既定60秒）だけメモリにキャッシュされます。ログに行が増えるのはパイプラインが走ったときだけなので、絞り込み条件を切り替えて見比べる操作が即応になります。
 
 > ルート定義を追加する際は、`router`が`/api`配下にマウント済みであることに注意してください（パス先頭に`/api`を重ねない）。
+
+## 運用エンドポイント（`server.js`・`/api` の外）
+
+| メソッド | パス | 概要 |
+|---|---|---|
+| GET | `/healthz` | ヘルスチェック（`services/healthCheck.js`）。`{ status, healthy, uptimeSec, checks:{ db, pipeline, gtfs } }` を返す。正常時`200`、**DB不通またはメインパイプラインが詰まっているとき`503`**。GTFS鮮度は情報のみで`healthy`判定には使わない。認証なし・レートリミットなし・閲覧数にも数えない（`httpsRedirect`より手前にあるため`FORCE_HTTPS=true`でも平文`localhost`から到達できる）。`docker-compose.yml`の`backend` healthcheckが使う。しきい値は`HEALTHZ_PIPELINE_STALE_SEC`/`HEALTHZ_GTFS_STALE_SEC`/`HEALTHZ_DB_TIMEOUT_MS`（README §8） |

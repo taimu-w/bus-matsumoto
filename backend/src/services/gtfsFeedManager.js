@@ -2,10 +2,12 @@
 // 複数のGTFS ZIPフィードを自動ダウンロードし、フィードIDごとのディレクトリに展開する。
 // 各フィードは独立して管理され、1つのフィードの失敗が他に影響しない。
 // 対象フィードの一覧は config/feeds.js（コード上の定数）から取得する。
-// feeds テーブルへの書き込みは last_fetched_at / last_status / last_error の
-// 稼働状態のみで、構成そのものはDBに持たない。
+// feeds テーブルへの書き込みは last_fetched_at / last_status / last_error の稼働状態と、
+// content_hash / last_etag / last_modified（前回DBへ取り込んだZIPの指紋）だけで、
+// 構成そのものはDBに持たない。
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const fetch = require('cross-fetch');
 const AdmZip = require('adm-zip');
 const pool = require('../config/db');
@@ -85,10 +87,39 @@ function unqualifyRouteId(qualifiedRouteId, feedId) {
 }
 
 /**
- * 単一のGTFSフィードをダウンロードして展開する。
- * 失敗してもthrowせず、feedsテーブルにエラー情報を記録してfalseを返す。
+ * 前回DBへ取り込んだZIPの指紋（content_hash / last_etag / last_modified）を
+ * feeds テーブルへ確定させる。
+ *
+ * **必ず seed() が成功した後に呼ぶこと。** ダウンロード直後に書いてしまうと、
+ * seed() が失敗した回の指紋が残り、以降ずっと「内容不変」と判定されてDBが
+ * 古いまま固定される（次回以降のリトライ経路が消える）。
  */
-async function downloadAndExtractGtfsFeed(client, feed) {
+async function commitFeedFingerprint(dbClient, feedId, fingerprint) {
+  if (!fingerprint) return;
+  await dbClient.query(
+    `UPDATE feeds SET content_hash = $2, last_etag = $3, last_modified = $4 WHERE id = $1`,
+    [feedId, fingerprint.contentHash, fingerprint.etag, fingerprint.lastModified]
+  );
+}
+
+/**
+ * 単一のGTFSフィードをダウンロードして展開する。
+ * 失敗してもthrowせず、feedsテーブルにエラー情報を記録して `ok: false` を返す。
+ *
+ * 内容が前回取り込んだZIPと同一（HTTP 304、またはSHA-256一致）で、かつ必須ファイルが
+ * ディスク上に揃っている場合は展開自体をスキップし、`{ ok: true, changed: false }` を
+ * 返す。呼び出し側はこれを見て seed()（＝全マスタの書き換え）を省ける。
+ *
+ * @param {object} client - PostgreSQLクライアント
+ * @param {object} feed - config/feeds.js のフィード定義
+ * @param {{force?: boolean}} [options] - force=true で内容不変の判定を行わず必ず展開する
+ *   （管理画面の手動再取得など、「とにかく取り直したい」経路用）
+ * @returns {Promise<{ok: boolean, changed: boolean, fingerprint: object|null}>}
+ *   fingerprint は展開に成功した場合だけ入る。seed() 成功後に
+ *   commitFeedFingerprint() へ渡すこと。
+ */
+async function downloadAndExtractGtfsFeed(client, feed, options = {}) {
+  const force = options.force === true;
   const feedId = feed.id;
   const feedDir = getGtfsDir(feedId);
   const tmpZipPath = path.join(feedDir, `.tmp_${feedId}.zip`);
@@ -97,13 +128,45 @@ async function downloadAndExtractGtfsFeed(client, feed) {
     // フィードディレクトリを作成
     fs.mkdirSync(feedDir, { recursive: true });
 
+    // 内容不変のスキップ判定は「必須ファイルがディスク上に揃っている」ときだけ許す。
+    // ファイルが欠けている状態（コンテナ再作成直後など）でスキップすると、
+    // 時刻表インデックスの構築が復旧できないまま固定される。
+    const filesPresent = REQUIRED_GTFS_FILES.every((f) => fs.existsSync(path.join(feedDir, f)));
+    const canSkipUnchanged = !force && filesPresent;
+
+    let previous = { content_hash: null, last_etag: null, last_modified: null };
+    if (canSkipUnchanged) {
+      const prevRes = await client.query(
+        `SELECT content_hash, last_etag, last_modified FROM feeds WHERE id = $1`,
+        [feedId]
+      );
+      if (prevRes.rows.length > 0) previous = prevRes.rows[0];
+    }
+
     console.log(`[gtfsFeedManager] GTFSダウンロード開始: ${feed.name} (${feed.url})`);
+
+    // 条件付きGET。配信元が対応していれば本体の転送自体が起きない。
+    const requestHeaders = {};
+    if (canSkipUnchanged && previous.last_etag) requestHeaders['If-None-Match'] = previous.last_etag;
+    if (canSkipUnchanged && previous.last_modified) {
+      requestHeaders['If-Modified-Since'] = previous.last_modified;
+    }
 
     // ダウンロード
     const response = await fetch(feed.url.trim(), {
       redirect: 'follow',
-      timeout: 60000 // 60秒タイムアウト
+      timeout: 60000, // 60秒タイムアウト
+      headers: requestHeaders
     });
+
+    if (response.status === 304) {
+      console.log(`[gtfsFeedManager] 内容に変更なし（304）。展開・DB再投入をスキップ: ${feed.name} (${feedId})`);
+      await client.query(
+        `UPDATE feeds SET last_fetched_at = now(), last_status = 'ok', last_error = NULL WHERE id = $1`,
+        [feedId]
+      );
+      return { ok: true, changed: false, fingerprint: null };
+    }
 
     if ([429, 502, 503].includes(response.status) || response.status >= 500) {
       const msg = `サーバー負荷または障害。ステータス: ${response.status}`;
@@ -112,7 +175,7 @@ async function downloadAndExtractGtfsFeed(client, feed) {
         `UPDATE feeds SET last_fetched_at = now(), last_status = 'error', last_error = $2 WHERE id = $1`,
         [feedId, msg]
       );
-      return false;
+      return { ok: false, changed: false, fingerprint: null };
     }
     if (response.status !== 200) {
       const msg = `予期しないステータスコード: ${response.status}`;
@@ -121,7 +184,7 @@ async function downloadAndExtractGtfsFeed(client, feed) {
         `UPDATE feeds SET last_fetched_at = now(), last_status = 'error', last_error = $2 WHERE id = $1`,
         [feedId, msg]
       );
-      return false;
+      return { ok: false, changed: false, fingerprint: null };
     }
 
     const buffer = Buffer.from(await response.arrayBuffer());
@@ -132,7 +195,28 @@ async function downloadAndExtractGtfsFeed(client, feed) {
         `UPDATE feeds SET last_fetched_at = now(), last_status = 'error', last_error = $2 WHERE id = $1`,
         [feedId, msg]
       );
-      return false;
+      return { ok: false, changed: false, fingerprint: null };
+    }
+
+    // 今回ダウンロードしたZIPの指紋。展開に成功したら呼び出し側へ返し、
+    // seed() が成功した後に commitFeedFingerprint() で確定させる。
+    const fingerprint = {
+      contentHash: crypto.createHash('sha256').update(buffer).digest('hex'),
+      etag: response.headers.get('etag') || null,
+      lastModified: response.headers.get('last-modified') || null
+    };
+
+    // 配信元が条件付きGETに対応していない場合でも、ここで内容が同一と分かれば
+    // 展開・DB再投入を省ける（ダウンロードは走るが、全マスタの書き換えは起きない）。
+    if (canSkipUnchanged && previous.content_hash && previous.content_hash === fingerprint.contentHash) {
+      console.log(`[gtfsFeedManager] 内容に変更なし（ハッシュ一致）。展開・DB再投入をスキップ: ${feed.name} (${feedId})`);
+      await client.query(
+        `UPDATE feeds SET last_fetched_at = now(), last_status = 'ok', last_error = NULL,
+                          last_etag = $2, last_modified = $3
+          WHERE id = $1`,
+        [feedId, fingerprint.etag, fingerprint.lastModified]
+      );
+      return { ok: true, changed: false, fingerprint: null };
     }
 
     // 一時ZIPファイルとして保存
@@ -153,7 +237,7 @@ async function downloadAndExtractGtfsFeed(client, feed) {
         `UPDATE feeds SET last_fetched_at = now(), last_status = 'error', last_error = $2 WHERE id = $1`,
         [feedId, msg]
       );
-      return false;
+      return { ok: false, changed: false, fingerprint: null };
     }
 
     // 一時ディレクトリに展開してから、成功した場合のみ現在のディレクトリと置き換える
@@ -204,7 +288,7 @@ async function downloadAndExtractGtfsFeed(client, feed) {
     );
 
     console.log(`[gtfsFeedManager] GTFS更新完了: ${feed.name} (${feedId})`);
-    return true;
+    return { ok: true, changed: true, fingerprint };
   } catch (err) {
     const msg = `GTFS展開エラー: ${err.message}`;
     console.error(`[gtfsFeedManager] ${msg} feed=${feedId}`);
@@ -222,7 +306,7 @@ async function downloadAndExtractGtfsFeed(client, feed) {
     } catch (cleanupErr) {
       // 無視
     }
-    return false;
+    return { ok: false, changed: false, fingerprint: null };
   }
 }
 
@@ -238,7 +322,13 @@ async function ensureGtfsFilesPresent(client, feed) {
   if (!missing) return false;
 
   console.log(`[gtfsFeedManager] GTFSファイル欠損を検知、再取得します: ${feed.name} (${feed.id})`);
-  await downloadAndExtractGtfsFeed(client, feed);
+  // 欠損の復旧なので内容不変の判定は挟まず必ず展開する（force）。
+  // ここは seed() のトランザクション内から呼ばれるため、指紋の確定も同じ
+  // トランザクションで行ってよい（seed()がROLLBACKすれば指紋も戻る）。
+  const result = await downloadAndExtractGtfsFeed(client, feed, { force: true });
+  if (result.ok && result.fingerprint) {
+    await commitFeedFingerprint(client, feed.id, result.fingerprint);
+  }
   return true;
 }
 
@@ -246,7 +336,10 @@ async function ensureGtfsFilesPresent(client, feed) {
  * 全GTFSフィードを更新する。
  * 各フィードは独立して処理され、1つの失敗が他に影響しない。
  * GTFS_UPDATE_INTERVAL_MIN（分）で更新間隔を制御する。0以下の場合は毎回更新する。
- * @returns {{updated: number, failed: number, skipped: boolean}}
+ *
+ * 内容が前回取り込んだZIPと同一だったフィードは `unchanged` に数え、`updated` には
+ * 入れない。1件も内容が変わっていなければ seed()（全マスタの書き換え）は走らない。
+ * @returns {{updated: number, unchanged: number, failed: number, skipped: boolean}}
  */
 async function updateAllGtfsFeeds() {
   const updateIntervalMin = getRuntimeSetting('GTFS_UPDATE_INTERVAL_MIN');
@@ -256,26 +349,37 @@ async function updateAllGtfsFeeds() {
   if (updateIntervalMin > 0 && lastGtfsUpdateAt > 0) {
     const elapsedMin = (now - lastGtfsUpdateAt) / 60000;
     if (elapsedMin < updateIntervalMin) {
-      return { updated: 0, failed: 0, skipped: true };
+      return { updated: 0, unchanged: 0, failed: 0, skipped: true };
     }
+  }
+
+  // 有効なGTFSフィードが1件も無ければ、DB接続を取らずにここで抜ける。
+  // このとき lastGtfsUpdateAt を進めておかないと、次回以降も更新間隔チェックが
+  // 素通りし（lastGtfsUpdateAt === 0 のまま）、全フィードを enabled:false にした
+  // 運用でポーリングのたびに pool.connect() とログ出力だけが空回りする（既知 L-9）。
+  const feeds = getEnabledGtfsFeeds();
+  if (feeds.length === 0) {
+    lastGtfsUpdateAt = now;
+    console.log('[gtfsFeedManager] 有効なGTFSフィードがありません。');
+    return { updated: 0, unchanged: 0, failed: 0, skipped: false };
   }
 
   const client = await pool.connect();
   let updated = 0;
+  let unchanged = 0;
   let failed = 0;
+  // 展開に成功したフィードの指紋。seed() が成功した後にまとめて確定させる。
+  const pendingFingerprints = [];
   try {
-    const feeds = getEnabledGtfsFeeds();
-    if (feeds.length === 0) {
-      console.log('[gtfsFeedManager] 有効なGTFSフィードがありません。');
-      return { updated: 0, failed: 0 };
-    }
-
     for (const feed of feeds) {
-      const success = await downloadAndExtractGtfsFeed(client, feed);
-      if (success) {
-        updated++;
-      } else {
+      const result = await downloadAndExtractGtfsFeed(client, feed);
+      if (!result.ok) {
         failed++;
+      } else if (result.changed) {
+        updated++;
+        if (result.fingerprint) pendingFingerprints.push({ feedId: feed.id, fingerprint: result.fingerprint });
+      } else {
+        unchanged++;
       }
     }
   } catch (err) {
@@ -285,9 +389,10 @@ async function updateAllGtfsFeeds() {
     client.release();
   }
 
-  // ファイル更新に成功したフィードが1件でもあれば、DB側のGTFS由来マスタ
+  // 内容が実際に変わったフィードが1件でもあれば、DB側のGTFS由来マスタ
   // （stops/schedule_trips/schedule_stop_times等）をseed.jsで再投入して同期する。
   // これを怠るとファイルだけ新しくなりDBが古いままになる。
+  // 逆に1件も変わっていなければ、全マスタのUPDATEは無駄なので走らせない。
   if (updated > 0) {
     try {
       const seed = require('../db/seed');
@@ -300,20 +405,29 @@ async function updateAllGtfsFeeds() {
       // 運賃インデックス（経路検索の運賃表示）も同じくGTFSファイル由来。
       require('./gtfsFare').invalidateFareIndex();
       console.log('[gtfsFeedManager] GTFS更新に伴いDBへ再投入しました。');
+
+      // 指紋の確定は seed() 成功後。ここより手前で書くと、seed() が失敗した回の
+      // 指紋が残り、以降ずっと「内容不変」と判定されてDBが古いまま固定される。
+      for (const { feedId, fingerprint } of pendingFingerprints) {
+        await commitFeedFingerprint(pool, feedId, fingerprint);
+      }
     } catch (err) {
       console.error('[gtfsFeedManager] DB再投入エラー:', err.message);
     }
   }
 
   lastGtfsUpdateAt = now;
-  console.log(`[gtfsFeedManager] GTFSフィード更新結果: ${updated}件成功 / ${failed}件失敗`);
-  return { updated, failed, skipped: false };
+  console.log(
+    `[gtfsFeedManager] GTFSフィード更新結果: ${updated}件更新 / ${unchanged}件変更なし / ${failed}件失敗`
+  );
+  return { updated, unchanged, failed, skipped: false };
 }
 
 module.exports = {
   getGtfsDir,
   updateAllGtfsFeeds,
   downloadAndExtractGtfsFeed,
+  commitFeedFingerprint,
   ensureGtfsFilesPresent,
   qualifyRouteId,
   unqualifyRouteId,

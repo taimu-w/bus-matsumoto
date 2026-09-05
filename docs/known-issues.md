@@ -33,18 +33,29 @@ GPS途絶しきい値（`GPS_STALE_TIMEOUT_MIN`、既定6分）が他のGPS鮮�
 **修正案**: 新しい展開先を別名ディレクトリに作り、ディレクトリごと1回のrenameで切り替える。あるいは
 差し替え中はインデックス構築を待たせ、待機中は既存インデックスを返す。
 
-### H-6 GTFSの内容が変わっていなくても毎時 seed() が全マスタを書き換える
+### H-6 GTFSから消えた便の schedule_trips 行が残り、実在しない便が当日便に混ざる
 
-*GTFS更新 / DB整合性* — `gtfsFeedManager.js`（`if (updated > 0) await seed()`）、`seed.js`
+*GTFS更新 / DB整合性* — `seed.js`（`alignTripIndexesByGtfsTripId()`）、`dailyTripBuilder.js`（`loadScheduleTrips`）
 
-ダウンロード成功＝内容変更とみなしており、ETag / Last-Modified / 内容ハッシュの比較が無い。同じZIPでも
-毎時 seed() が走り、全 stops・全 stop_times を UPDATE する。`schedule_trips` の一意キーに含まれる
-`trip_index` は trips.txt 内の並び順依存なので、ダイヤ改正で便が1本増減すると以降の便が全部ずれ、
-`ON CONFLICT` で既存行が別の便の内容に更新される。GTFSから消えた `schedule_trips` は削除されない。
+reseed は GTFS から消えた `schedule_trips` の行を**削除しない**。`completed_trips.trip_id` が
+CASCADE無しの外部キーでこの行を参照しており、削除するとアーカイブ済みの運行実績を巻き添えにするため、
+`alignTripIndexesByGtfsTripId()` は消えた便を `trip_index` の後ろへ退避するだけにしている。
+その `service_id` が現役のままだと `dailyTripBuilder` がこの行からも当日便を生成し、実在しない便が
+時刻表・運行状況に出る。
 
-**修正案**: ZIPのSHA-256を`feeds`に記録し、変化があったときだけ展開・seedする。`schedule_trips`の
-一意キーを`(route_id, gtfs_trip_id)`へ移す。seed()のトランザクション境界をフィード単位に分け、
-ダウンロードをトランザクション外へ出す。
+**修正案**: `completed_trips.trip_id` を `ON DELETE SET NULL` にしたうえで、消えた便を DELETE する。
+あるいは `schedule_trips` に「今回のGTFSに存在するか」のフラグを持たせ、`dailyTripBuilder` 側で除外する。
+
+同じ項目に含まれていた次の3点は対応済み（[system-review-2026-09.md](system-review-2026-09.md) G-1）。
+
+- **内容不変でも毎時 seed() が全マスタを書き換える** → `feeds.content_hash`（ZIPのSHA-256）と
+  条件付きGET（ETag / Last-Modified）で内容不変を判定し、変わったフィードが1件も無ければ
+  展開も `seed()` も行わない。指紋の確定は `seed()` 成功後（`commitFeedFingerprint()`）。
+- **`trip_index` の位置依存キーでダイヤ改正時に便がずれる** → UPSERTの前に
+  `alignTripIndexesByGtfsTripId()` が既存行を `gtfs_trip_id` 基準で今回の並びへ整列させるため、
+  UPSERTは必ず同じ便の行に当たる。
+- **毎デプロイでフル再ダウンロード＋seed()** → 指紋をプロセス内変数ではなくDBに持つため、
+  再起動直後の初回実行でも内容が同じなら `seed()` は走らない。
 
 ---
 
@@ -83,60 +94,37 @@ GPS途絶しきい値（`GPS_STALE_TIMEOUT_MIN`、既定6分）が他のGPS鮮�
 **修正案**: 固定値ではなく便ごとの時刻表所要時間 + 余裕（例: 所要 × 1.5 + 30分）で上限を決める。
 最低限、既定値を180分へ引き上げる。
 
-### M-4 早発・早着がすべて「遅延0分」に丸められ、運行の乱れとして検知できない
+### M-4 早発を検知して管理画面のアラートに出す仕組みが無い
 
-*遅延計算 / 統計データ* — `utils/time.js`（`computeDelayMinutes()`の`Math.max(0, diff)`）
+*遅延計算 / 管理画面* — `utils/time.js`（`computeSignedDelayMinutes()`）、`frontend/admin-alerts.js`
 
-負値＝日跨ぎ誤補正の再発防止という意図的な仕様だが、副作用として「定刻より早い」という事象が
-完全に不可視になる。`delay_minutes`もDBに0として保存されるため後から復元できない。早発は乗り遅れを
-生む運行事故だが管理画面のアラートに出ない。ETA計算の起点`currentDelay`も常に0以上になる。
+符号付きの遅延（負＝定刻より早い）は`trip_stop_progress.signed_delay_minutes`ほかに保存されるように
+なったが、それを見て「定刻より早く発車した便」を異常アラートとして挙げる処理はまだ無い。
+管理画面のバス停別詳細で1件ずつ開けば「定刻より◯分早い」バッジは見えるが、能動的には気づけない。
 
-**修正案**: 符号付きの差分を返す関数を別途用意し、DBには符号付きで保存する。表示側で`Math.max(0, …)`を
-適用すれば利用者向けの見え方は現行のまま維持できる。
+なお**表示・しきい値判定は`delay_minutes`（0以上に丸めた値）を使うのが正**で、
+これを符号付きに置き換えないこと（公開画面が「−3分遅れ」と出るようになる）。
 
-### M-5 「通過」確定済みのバス停が「到着済」に書き換えられ、区間統計に混入する
+**修正案**: 便レベルの`trip_vehicle_assignments.signed_delay_minutes`が一定値（例: −2分）を
+下回った便を、遅延アラートと同じ枠組みで一覧に出す。
 
-*バス停通過判定* — `passDetection.js`（`WHERE ... AND status != '到着済'` のため `'通過'` も対象）
+### M-8 ✅ 生ログ転記が1回500件で頭打ちのため、車両が増えると恒常的な遅れが出る — 対応済み
 
-`passStepConfirm()`の離脱検知と`passInterpolate()`の補間が、`is_through`（真の通過）のバス停でも
-120m以内を通過すれば「到着済」にする。降車できないバス停に実績時刻が付き、
-`completed_trip_stop_times.actual_minutes`に値が入るため`updateSegmentStats()`が「通過バス停を含む
-区間」を統計に取り込む（ETA予測が通過区間を統計から除外している設計と矛盾）。
+*GPS取得 / 非同期処理* — `vehicleAssigner.js`（`sortCarId()`）
 
-**修正案**: 到着確定・補間の対象を未確定（`status = ''`）のみに絞るか、少なくとも統計集計側で
-`is_through`の区間を除外する。
+**指摘だった状態**: 1周期あたりの取得件数が500を超えると未処理行が毎周期積み上がり、GPSが古い状態で
+割り当て・通過判定に使われる。原因が「転記の遅れ」だと分かりにくい。
 
-### M-6 GPS時刻の「未来」判定と日時書式が、時計ずれ・書式変更に弱い
+対応内容は[system-review-2026-09.md](system-review-2026-09.md) P-3を参照。
 
-*GPS取得* — `locationFetcher.js`
+- **滞留の可視化がない** → 返り値に`transferred`/`duplicateSkipped`/`batches`/`backlogRemains`を
+  含めるようにし、`jobMonitor`の`pipeline.sortCarId`から見えるようにした。
+- **1周期500件で頭打ち** → 取得件数がLIMIT未満になるまで、または上限（既定5バッチ＝2500件）に
+  達するまで、同一周期内でバッチを繰り返すようにした。
 
-`gpsDate > now`の`now`は`fetchLocation()`冒頭で1度だけ取得され、フィード取得中ずっと固定。処理が
-進むほど正常なデータが「未来」として捨てられる。日時パースが`new Date(str.replace(/-/g,'/') + ' +0900')`
-という書式依存の実装で、フィードがISO 8601に変わると全行NaN → 全件破棄。GPSが静かに欠落し
-`skippedStaleOrInvalidTime`カウンタにしか現れない。
-
-**修正案**: ループ内で`Date.now()`を取り直し、`gpsDate > now + 許容ずれ（例60秒）`のときだけ破棄する。
-パースを正規表現ベースにし、失敗率が閾値を超えたら`last_status = 'error'`にする。
-
-### M-7 同一測位が vehicle_gps_log に重複して蓄積される（一意制約が無い）
-
-*GPS取得 / DB整合性* — `vehicleAssigner.js`（INSERT に ON CONFLICT なし）、`schema.sql`（`(vehicle_id, gps_time_ts)` の一意制約なし）
-
-フィードの更新間隔がポーリング間隔（60秒）より長いと、同じ測位が`GPS_FRESHNESS_MIN`（15分）ぶん
-繰り返し挿入される。始発待機中・終点待機中は常時。`pass()`が重複ぶんの距離計算を毎回走らせる。
-
-**修正案**: `CREATE UNIQUE INDEX ON vehicle_gps_log (vehicle_id, gps_time_ts)`を追加し、INSERTを
-`ON CONFLICT DO NOTHING`にする。
-
-### M-8 生ログ転記が1回500件で頭打ちのため、車両が増えると恒常的な遅れが出る
-
-*GPS取得 / 非同期処理* — `vehicleAssigner.js`（`sortCarId()` の `LIMIT 500`、1行ごとにトランザクション）
-
-1周期あたりの取得件数が500を超えると未処理行が毎周期積み上がり、GPSが古い状態で割り当て・通過判定に
-使われる。原因が「転記の遅れ」だと分かりにくい。
-
-**修正案**: 未処理件数を返り値に含めて`jobMonitor`で可視化する。処理を1トランザクションでまとめ、
-`INSERT … SELECT FROM unnest(...)`で一括挿入する。滞留があれば同一周期でループする。
+**残っている課題**: 行ごとのBEGIN/COMMITは変えていない（1トランザクションへまとめて
+`INSERT … SELECT FROM unnest(...)`で一括化する案は見送った。1行の失敗が他行を巻き込まない
+という既存の耐障害性を保つため）。上限（既定2500件/周期）を超える滞留は次回以降のポーリングに持ち越す。
 
 ### M-9 系統表示が切り替わる前後の車両が、次の便の候補になれない
 
@@ -148,18 +136,6 @@ GPS途絶しきい値（`GPS_STALE_TIMEOUT_MIN`、既定6分）が他のGPS鮮�
 
 **修正案**: `vehicles`の一意キーを`(feed_id, car_id)`にして物理車両1台＝1行にし、系統は
 `vehicle_gps_log`側の観測値として持つ。または候補検索を`car_id` + 距離 + direction で行う。
-
-### M-10 ETAプリコンピュートが区間統計を1停留所ずつ問い合わせる（N+1）
-
-*ETA予測 / 非同期処理* — `etaPredictor.js`（`getSegmentStat(...)`をループ内で実行、全active割り当てを直列処理）
-
-クエリ数は概ね「active割り当て数 × 未到着停留所数」。候補車両も対象なので、ピーク時に数千クエリが
-60秒ごとに単一接続で直列に走る。⑧の所要時間がポーリング間隔に近づくと、次周期の`pipelineRunning`
-ガードでパイプライン全体がスキップされる。
-
-**修正案**: その日に必要な`segment_travel_stats`を`(day_type, hour_bucket)`単位で1回まとめて読み、
-プロセス内Mapに載せる。`predictArrivals()`の引数に統計ルックアップ関数を渡す形にすればアルゴリズム
-本体を変えずに済む。
 
 ### M-11 予測精度監視の「実績」に、線形補間値やGPS途絶時の救済値が混ざっている
 
@@ -183,29 +159,21 @@ GPS途絶しきい値（`GPS_STALE_TIMEOUT_MIN`、既定6分）が他のGPS鮮�
 **修正案**: `start_at >= now() - interval '15 minutes'`のような下限を条件に足し、それより古い
 pending便は`unassigned`にして閉じる。
 
-### M-14 候補が1台も居なかった便は closed_at が立たず、保持期間まで残る
-
-*運行終了判定 / DB整合性* — `tripAssignment.js`（`reassignOrphanTrips()`が割り当てゼロの便を除外）
-
-候補ゼロで`unassigned`になった便には割り当て行が1件も無いため`reassignOrphanTrips()`の対象外。
-`closed_at`を立てる経路は翌日以降の`finishTrips()`の運行日終了掃除しかない。管理画面の
-`unassignedTrip`アラートに一日中残り続け、ノイズ化する。
-
-**修正案**: 候補ゼロを確定した時点で`closed_at`も同時に立てる。または`/api/admin/alerts`の未割当条件に
-「始発時刻から◯分以内」の上限を入れる。
-
-### M-15 管理者パスワードの既定値が `admin` / `admin123` のまま起動できる
+### M-15 ✅ 管理者パスワードの既定値が `admin` / `admin123` のまま起動できる — 対応済み
 
 *API / 管理画面* — `services/adminAuth.js`（`process.env.ADMIN_USERNAME || 'admin'`）
 
-`ADMIN_USERNAME`/`ADMIN_PASSWORD`を設定しなくても起動でき、その場合は誰でも知っている
-既定値で管理画面が開く。管理画面からは運用パラメータの変更・車両の手動割り当て・
-お知らせ配信・GTFS手動再取得ができるため、乗っ取られると利用者へ誤情報を配信できる。
+**指摘だった状態**: `ADMIN_USERNAME`/`ADMIN_PASSWORD`を設定しなくても起動でき、その場合は
+誰でも知っている既定値で管理画面が開いていた。管理画面からは運用パラメータの変更・
+車両の手動割り当て・お知らせ配信・GTFS手動再取得ができるため、乗っ取られると利用者へ
+誤情報を配信できる。
 
-**修正案**: `ADMIN_PASSWORD`未設定時は起動を拒否するか、ランダム値を生成して起動ログへ1回だけ出す。
+同じ項目に含まれていた次の4点はすべて対応済み
+（[system-review-2026-09.md](system-review-2026-09.md) S-1〜S-4）。
 
-同じ項目に含まれていた次の3点は対応済み（[system-review-2026-09.md](system-review-2026-09.md) S-2〜S-4）。
-
+- **既定パスワード** → `ADMIN_PASSWORD`未設定時は起動を拒否する代わりに、起動のたびに変わる
+  ランダムなパスワードを生成し、起動ログに1回だけ出す方式にした。`ADMIN_PASSWORD`を
+  設定済みの環境は影響を受けない。
 - **CORS全開放** → 公開APIは`CORS_ALLOWED_ORIGINS`で絞れるようになり、管理API（`/api/admin/*`）には
   そもそもCORSヘッダーを付けない。
 - **非定数時間の比較** → `crypto.timingSafeEqual`（SHA-256で固定長に潰してから比較）に置き換え済み。
@@ -237,27 +205,6 @@ pending便は`unassigned`にして閉じる。
 短い系統コードを導入したり備考欄にIDを含めたりすると誤解決する。
 **修正案**: 外部IDが入る列位置を`config/feeds.js`にフィードごとに持ち、その列との完全一致で解決する。
 
-### L-3 route_id や service_id にアンダースコアがあるとグループキーの分解が壊れる
-
-`seed.js`（キーを`route_id + '_' + directionId + '_' + serviceId`で組み、`split('_')`で復元）。
-区切り文字がIDに現れないことを前提にしている。現在の2フィードは数値IDなので該当しない。
-**修正案**: 文字列キーをやめ、`JSON.stringify([routeId, directionId, serviceId])`を使う。
-
-### L-4 フロントの既定 routeId が未修飾の '11' で、初回描画が空になる
-
-`frontend/app.js`（`let selectedRouteId = '11';`）。DBの`route_id`は`guruttomatsumotobus1:11`形式。
-路線一覧取得後に補正されるが、それ以前の`loadAll()`は素の`'11'`で叩き、運行状況が一瞬
-「バスがありません」と表示される。
-**修正案**: 既定値を`'guruttomatsumotobus1:11'`に揃えるか、routeId無しで`/api/buses`を叩いて
-サーバー側の既定に委ねる。
-
-### L-5 SIGTERM を処理しておらず、接続プールも閉じずに終了する
-
-`server.js`（SIGINTのみ、`process.exit(0)`即時）。`docker stop`・RenderのデプロイはいずれもSIGTERMを
-送る。進行中のトランザクションが途中で切れる（DB側でロールバックされるため実害は限定的）。
-**修正案**: SIGTERM/SIGINTの両方で、タイマー停止 → HTTPサーバーの`close()` → `pool.end()`の順に
-待ってから終了する。
-
 ### L-6 位置情報CSVのパーサがエスケープされたダブルクォートに対応していない
 
 `locationFetcher.js`。同じ処理のパーサがリポジトリ内に複数あり、`locationFetcher`のものだけ`""`を
@@ -272,21 +219,6 @@ pending便は`unassigned`にして閉じる。
 カウントされる。負荷判定のための通信が負荷指標を作っている。
 **修正案**: `/api/server-load`をカウント対象から除外する。`document.visibilityState !== 'visible'`の
 ときはポーリングを止める。
-
-### L-9 有効なGTFSフィードが0件のとき、更新間隔の記録が更新されない
-
-`gtfsFeedManager.js`（`if (feeds.length === 0) return`が`lastGtfsUpdateAt = now`より前にある）。
-全GTFSフィードを`enabled: false`にすると、60秒ごとに接続を取得してログを出すだけの無駄な処理が回る
-（実害は軽微）。
-**修正案**: `lastGtfsUpdateAt = now`を関数の入口側かfinallyに移す。
-
-### L-10 data gtfs/ が永続ボリュームでなく、再作成のたびに全フィードを再取得する
-
-`Dockerfile`（`COPY ["data gtfs", "data gtfs"]`）、`docker-compose.yml`（backendサービスにvolume指定なし）。
-コンテナ再作成でイメージ内の古いGTFSに巻き戻り、`ensureGtfsFilesPresent()`はファイルが揃っているかしか
-見ないので再取得も走らない。デプロイ直後、最大1時間ダイヤ改正前のGTFSで当日便が生成される。
-**修正案**: `docker-compose.yml`のbackendに名前付きボリュームを割り当てる。または起動時に必ず1回
-`updateAllGtfsFeeds()`を強制実行する。
 
 ### L-11 パイプラインが間隔内に終わらなかったことを検知・記録していない
 

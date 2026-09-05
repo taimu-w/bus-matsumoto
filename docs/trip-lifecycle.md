@@ -25,6 +25,8 @@
 - `tripAssignment.reassignOrphanTrips()`（パイプライン⑤、`POLL_INTERVAL_SECONDS`＝既定60秒間隔）から、担当車両が終点まで走り切ったとき（終了理由が`finishService.SUCCESS_END_REASONS`＝`最終バス停到着済`／`終点到着（GPS途絶時判定）`／`終点到着（GPS途絶時判定・付近経由）`のいずれか。後2者はGPS途絶時の終点到着救済判定で終点到達が確認できたケースで、正常終了扱いとしGPS途絶ロストには含めない）、または再割り当てできる候補車両が居なくなったときに呼ばれる（判定条件の詳細は[vehicle-assignment.md](vehicle-assignment.md)）。
 - `finishService.finishTrips()`自身（1分間隔の運行終了バッチ）の末尾、運行日が過ぎてもクローズされていない便を掃除する処理（理由`運行日終了`）からも直接呼ばれる。
 
+同じ`reassignOrphanTrips()`の末尾からは、**候補車両が1台も見つからなかった便**のクローズ（`closeCandidatelessTrips()`、理由`候補なし`）も行います。この種の便は`trip_vehicle_assignments`を1行も持たないため再割り当ての対象にならず、以前は`closed_at`が立つ経路が翌日の`運行日終了`掃除しかなく、管理画面の`unassignedTrip`アラートに一日中残っていました。対象は「`closed_at`未設定・`assignment_state='unassigned'`・割り当て行ゼロ」の便のうち、始発時刻から`VEHICLE_MAX_AGE_MIN`（既定120分。担当が付いた便の割り当てを強制終了するのと同じ時間）が経過したものです。担当を経験した割り当てが無いためアーカイブは1件も発生せず、運行実績・区間統計には影響しません。`assignment_state`も`'unassigned'`のままなので、割り当て監視画面の表示（理由「候補なし」）は変わりません。
+
 この2つのタイマーはサーバー起動時にほぼ同時に開始されるため位相が揃いやすく、日付が変わった直後や再割り当てが発生した便では、同じ`daily_trip_id`に対して両方の経路がほぼ同時に`closeDailyTrip()`を呼ぶことが実際に起こります。
 
 **二重実行対策**: `closeDailyTrip()`は冒頭で`SELECT id FROM daily_trips WHERE id = $1 AND closed_at IS NULL FOR UPDATE`により当該便の行ロックを取ります。後発側のトランザクションはこのロックで先発側の`COMMIT`までブロックされ、ロック取得後に`closed_at`が既に埋まっていることを確認して`{ archived: 0 }`で即座に抜けます。これにより、2系統から同時に呼ばれても実績が二重にアーカイブされることはありません。`completed_trips`には`UNIQUE (daily_trip_id, assignment_id)`制約も張ってあり、万一この行ロックをすり抜けるコード変更が将来入っても、実績が黙って二重に入ることだけは防ぎます（行ロックが一次防御、制約は安全網という位置づけ）。

@@ -8,29 +8,41 @@
 // 以降の全処理（割り当て・通過判定・遅延計算・ETA・API）は仮想便と通常便を
 // 一切区別しなくてよくなる（仕様書 3.4.2）。
 const pool = require('../config/db');
-const { getActiveServiceIds } = require('./gtfsCalendar');
+const { getActiveServiceIdsWithStatus } = require('./gtfsCalendar');
 const { expandFrequencies } = require('./gtfsFrequencies');
 const {
   timeStrToMinutes,
-  minutesToTimeStr,
+  minutesToServiceTimeStr,
   getServiceDateString,
   serviceDateTimeToDate
 } = require('../utils/time');
 const { getRuntimeSetting } = require('./runtimeSettings');
 
 // 生成済みの運行日（プロセス内キャッシュ）。GTFS再投入時は invalidateDailyTripCache() で無効化する。
+// ここに運行日が入るのは「全フィードのカレンダーを読めた」ときだけ。読めなかったフィードが
+// 1つでもあれば、その回の結果は不完全なので確定させず、次のポーリングで再試行する。
 let builtServiceDate = null;
+
+// カレンダーを読めなかったフィードがあった運行日と、その次の再試行時刻（エポックミリ秒）。
+// 毎ポーリング（POLL_INTERVAL_SECONDS）で全便を作り直すとDBに無駄な負荷がかかるため、
+// 再試行はこの間隔まで間引く。全フィードを読めた時点で builtServiceDate 側へ移る。
+let incompleteServiceDate = null;
+let incompleteRetryAt = 0;
+const INCOMPLETE_RETRY_INTERVAL_MS = 5 * 60 * 1000;
 
 function invalidateDailyTripCache() {
   builtServiceDate = null;
+  incompleteServiceDate = null;
+  incompleteRetryAt = 0;
 }
 
 /**
- * その運行日に有効なservice_idを取得する。
- * getActiveServiceIds は日付から曜日を見るため、JSTの正午を渡してタイムゾーンのズレを避ける。
+ * その運行日に有効なservice_idを、フィードごとの読み込み結果つきで取得する。
+ * getActiveServiceIdsWithStatus は日付から曜日を見るため、JSTの正午を渡して
+ * タイムゾーンのズレを避ける。
  */
 async function loadActiveServiceIds(serviceDate) {
-  return getActiveServiceIds(new Date(`${serviceDate}T12:00:00+09:00`));
+  return getActiveServiceIdsWithStatus(new Date(`${serviceDate}T12:00:00+09:00`));
 }
 
 /**
@@ -133,12 +145,16 @@ function buildInstances(trip, frequencyRows, baseStartMinutes) {
 /**
  * オフセットを適用した定刻文字列を返す。
  * offset が 0 のとき（＝通常便）は元の文字列をそのまま使い、表記を一切変えない。
+ *
+ * 24時超えは折り返さない（minutesToServiceTimeStr）。素の便の定刻はGTFSの
+ * "25:00" 表記のまま入るため、仮想便だけ "1:00" になると同じ運行日の同じ時刻が
+ * 2通りに割れてしまう。
  */
 function shiftTime(timeStr, offsetMinutes) {
   if (offsetMinutes === 0) return timeStr;
   const minutes = timeStrToMinutes(timeStr);
   if (Number.isNaN(minutes)) return null;
-  return minutesToTimeStr(minutes + offsetMinutes);
+  return minutesToServiceTimeStr(minutes + offsetMinutes);
 }
 
 async function upsertDailyTrip(client, serviceDate, trip, instance, startStop, startTimeStr, startMinutes) {
@@ -208,13 +224,38 @@ async function replaceStopTimes(client, dailyTripId, trip, offsetMinutes) {
 }
 
 /**
+ * カレンダーを読めなかったフィードがあった回の後始末。
+ * 運行日を確定させず（builtServiceDate は触らない）、次の再試行時刻だけ決める。
+ */
+function markIncomplete(serviceDate, failedFeedIds) {
+  incompleteServiceDate = serviceDate;
+  incompleteRetryAt = Date.now() + INCOMPLETE_RETRY_INTERVAL_MS;
+  console.warn(
+    `[dailyTripBuilder] ${serviceDate} のカレンダーを読めなかったフィードがあります` +
+    `(${failedFeedIds.join(', ')})。当日便の生成を確定させず、` +
+    `${INCOMPLETE_RETRY_INTERVAL_MS / 60000}分後に再試行します。`
+  );
+}
+
+/**
  * 当日の運行便を生成する（冪等）。
  * 既に生成済みで、かつGTFSの再投入もなければ何もしない。
+ *
+ * カレンダー（calendar.txt / calendar_dates.txt）を読めなかったフィードがある回は
+ * 「生成済み」として確定させない。確定させると以降のポーリングが即リターンし、
+ * 当日便0件のまま固定されて、GTFS再取得の成功（＝invalidateDailyTripCache）まで
+ * 復旧しなくなるため。
  */
 async function ensureDailyTrips(options = {}) {
   const serviceDate = options.serviceDate || getServiceDateString();
-  if (!options.force && builtServiceDate === serviceDate) {
-    return { serviceDate, skipped: true, created: 0 };
+  if (!options.force) {
+    if (builtServiceDate === serviceDate) {
+      return { serviceDate, skipped: true, created: 0 };
+    }
+    // 前回カレンダーを読めなかった運行日。再試行はするが、間隔を空けて間引く。
+    if (incompleteServiceDate === serviceDate && Date.now() < incompleteRetryAt) {
+      return { serviceDate, skipped: true, created: 0, incomplete: true };
+    }
   }
 
   const client = await pool.connect();
@@ -222,11 +263,26 @@ async function ensureDailyTrips(options = {}) {
   let virtualGenerated = 0;
 
   try {
-    const activeServiceIds = await loadActiveServiceIds(serviceDate);
+    const calendar = await loadActiveServiceIds(serviceDate);
+    const activeServiceIds = calendar.serviceIds;
+
+    if (!calendar.complete) {
+      markIncomplete(serviceDate, calendar.failedFeedIds);
+    }
+
     if (activeServiceIds.length === 0) {
-      console.warn(`[dailyTripBuilder] ${serviceDate} に有効なservice_idがありません。当日便を生成しません。`);
-      builtServiceDate = serviceDate;
-      return { serviceDate, skipped: false, created: 0 };
+      if (calendar.complete) {
+        // 全フィードのカレンダーを読めたうえで該当なし＝本当にその日は運行が無い。
+        console.warn(`[dailyTripBuilder] ${serviceDate} に有効なservice_idがありません。当日便を生成しません。`);
+        builtServiceDate = serviceDate;
+      }
+      return {
+        serviceDate,
+        skipped: false,
+        created: 0,
+        incomplete: !calendar.complete,
+        failedFeedIds: calendar.failedFeedIds
+      };
     }
 
     const trips = await loadScheduleTrips(client, activeServiceIds);
@@ -255,7 +311,7 @@ async function ensureDailyTrips(options = {}) {
         const startMinutes = baseStartMinutes + instance.offsetMinutes;
         const startTimeStr = instance.offsetMinutes === 0
           ? startStopRow.scheduledTime
-          : minutesToTimeStr(startMinutes);
+          : minutesToServiceTimeStr(startMinutes);
 
         await client.query('BEGIN');
         try {
@@ -281,8 +337,10 @@ async function ensureDailyTrips(options = {}) {
       }
     }
 
-    // GTFSから消えた便のうち、まだ車両を割り当てていないものを掃除する
-    if (keptIds.length > 0) {
+    // GTFSから消えた便のうち、まだ車両を割り当てていないものを掃除する。
+    // カレンダーを読めなかったフィードがある回はスキップする（そのフィードの便は
+    // keptIds に入らないため、生きている便まで消してしまう）。
+    if (keptIds.length > 0 && calendar.complete) {
       const removed = await client.query(
         `DELETE FROM daily_trips
          WHERE service_date = $1
@@ -295,12 +353,23 @@ async function ensureDailyTrips(options = {}) {
       }
     }
 
-    builtServiceDate = serviceDate;
+    if (calendar.complete) {
+      builtServiceDate = serviceDate;
+      incompleteServiceDate = null;
+      incompleteRetryAt = 0;
+    }
     console.log(
       `[dailyTripBuilder] ${serviceDate} の運行便 ${generated} 件を生成しました` +
       (virtualGenerated > 0 ? `（うち frequencies 由来の仮想便 ${virtualGenerated} 件）` : '') + '。'
     );
-    return { serviceDate, skipped: false, created: generated, virtual: virtualGenerated };
+    return {
+      serviceDate,
+      skipped: false,
+      created: generated,
+      virtual: virtualGenerated,
+      incomplete: !calendar.complete,
+      failedFeedIds: calendar.failedFeedIds
+    };
   } finally {
     client.release();
   }

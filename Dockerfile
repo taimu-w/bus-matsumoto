@@ -7,9 +7,11 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# 依存関係のインストール（キャッシュを効かせるため package.json のみ先にコピー）
-COPY backend/package.json ./backend/package.json
-RUN cd backend && npm install --omit=dev
+# 依存関係のインストール（キャッシュを効かせるため package.json / package-lock.json のみ先にコピー）
+# package-lock.json に固定されたバージョンだけを再現インストールするため npm ci を使う
+# （npm install と違い lockfile を書き換えず、lockfile と package.json の不一致があれば失敗する）。
+COPY backend/package.json backend/package-lock.json ./backend/
+RUN cd backend && npm ci --omit=dev
 
 # アプリ本体と GTFS データをコピー
 COPY backend ./backend

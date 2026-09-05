@@ -19,12 +19,33 @@
  * **セッションはプロセス内メモリなので、再起動・デプロイで全て失効する**（＝再ログインが要る）。
  * 資格情報をクライアントに残さない以上これは避けられないトレードオフで、管理画面側は
  * 401を受けたらログイン画面へ戻す実装になっている（frontend/admin-core.js）。
+ *
+ * **ADMIN_PASSWORD未設定時の扱い**: 以前は固定の既定値（'admin123'）にフォールバックしており、
+ * 運用者が明示的に設定しない限り誰でも知っている資格情報で管理画面が開いた
+ * （docs/system-review-2026-09.md S-1）。管理画面からは運用パラメータの変更・お知らせ配信・
+ * GTFS手動再取得ができるため、乗っ取られると利用者に誤情報を配信できてしまう。
+ * 未設定のときは起動のたびに変わるランダム値へ差し替え、起動ログに1回だけ出す方式にした
+ * （既知の固定パスワードを無くしつつ、`ADMIN_PASSWORD`を設定していない開発環境でも
+ * 起動自体は失敗させない）。`ADMIN_PASSWORD`を設定済みの環境は一切影響を受けない。
  */
 const crypto = require('crypto');
 const security = require('../config/security');
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+
+const configuredAdminPassword = process.env.ADMIN_PASSWORD;
+const ADMIN_PASSWORD_AUTO_GENERATED = !configuredAdminPassword;
+const ADMIN_PASSWORD = configuredAdminPassword || crypto.randomBytes(18).toString('base64url');
+
+if (ADMIN_PASSWORD_AUTO_GENERATED) {
+  // eslint未導入のためconsoleを直接使用。起動ログにしか出さない一度きりの警告。
+  console.warn(
+    '[adminAuth] ADMIN_PASSWORDが未設定のため、起動時にランダムなパスワードを生成しました。\n' +
+    `[adminAuth] 管理画面ログイン → ユーザー名: ${ADMIN_USERNAME} / パスワード: ${ADMIN_PASSWORD}\n` +
+    '[adminAuth] このパスワードはプロセスを再起動するたびに変わります。' +
+    '固定したい場合は環境変数 ADMIN_PASSWORD を設定してください（本番では必須）。'
+  );
+}
 
 const SESSION_COOKIE_NAME = 'bt_admin_session';
 const SESSION_TTL_MS = security.ADMIN_SESSION_TTL_MIN * 60 * 1000;
@@ -195,6 +216,7 @@ function isSameOriginRequest(req) {
 
 module.exports = {
   SESSION_COOKIE_NAME,
+  ADMIN_PASSWORD_AUTO_GENERATED,
   verifyCredentials,
   parseBasicAuthHeader,
   hasPresentedCredentials,

@@ -23,24 +23,58 @@ services:
   # プロキシを置いたら .env に次を設定すること（backend/.env.example 参照）:
   #   TRUST_PROXY=1        … クライアントIP（レートリミットの単位）とHTTPS判定に必要
   #   FORCE_HTTPS=true     … 平文で届いたリクエストをHTTPSへ寄せる
-  #   ADMIN_USERNAME / ADMIN_PASSWORD … 未設定だと admin / admin123 のまま起動する
+  #   ADMIN_USERNAME / ADMIN_PASSWORD … ADMIN_PASSWORD未設定だと起動のたびに変わる
+  #                                     ランダム値になり、パスワードは起動ログにしか出ない
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
     env_file:
-      - .env
+      # .env が無くてもコード既定値（backend/src/config/db.js のローカル接続既定と、
+      # 下の db サービスの既定が一致）でそのまま起動できる。設定を変えたいときだけ
+      # `cp backend/.env.example .env` して編集する。required: false は Compose v2.24+。
+      - path: .env
+        required: false
     environment:
       PGHOST: db
       PGPORT: 5432
+      # コンテナのローカルタイムをJST（Asia/Tokyo）に固定する。アプリのコードは
+      # 時刻をすべて明示的に Asia/Tokyo で扱う（backend/src/utils/time.js）ため
+      # 挙動には影響せず、効くのはログ・スタックトレースの時刻表記だけ。
+      # ※ db コンテナ側の TZ は CURRENT_DATE / now()::date の評価に影響し、便の
+      #   クローズと掃除のタイミングが変わる（docs/system-review-2026-09.md DB-1）。
+      #   これは本項（D-5）の範囲外なので、db 側には設定していない。
+      TZ: Asia/Tokyo
     depends_on:
       db:
         condition: service_healthy
+    volumes:
+      # GTFSの展開先（/app/data gtfs）を名前付きボリュームに載せ、コンテナ再作成で
+      # イメージ同梱の古いGTFS（リポジトリにコミット済みの版）へ巻き戻らないようにする
+      # （docs/system-review-2026-09.md D-5 / G-5）。ボリュームは初回作成時にイメージの
+      # 内容で初期化されるので、初めての起動時の挙動は従来と同じ。以降はパイプラインが
+      # 毎時 updateAllGtfsFeeds() で最新へ更新し、seed 時の ensureGtfsFilesPresent() が
+      # 欠損ファイルを補うため、ボリュームを消しても自己復旧する。
+      - type: volume
+        source: gtfs_data
+        target: /app/data gtfs
     ports:
       # 前段にプロキシを置く構成では "127.0.0.1:3000:3000" にして、
       # アプリ本体を外部へ直接公開しないようにするのが安全です。
       - "3000:3000"
+    # /healthz（DB疎通・直近パイプライン完了・GTFS鮮度）で「起動したが不健全」を検知する
+    # （docs/system-review-2026-09.md D-8）。busyboxのwgetはHTTP 503で終了コード1になるため、
+    # アプリが503を返す（DB不通・パイプラインが詰まっている）とunhealthy判定になる。
+    # start_period 中の失敗はretriesに数えない（起動直後の猶予）。
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
 volumes:
   db_data:
+  # GTFS展開先（backend）。コンテナ再作成をまたいで、最後に取得したGTFSを保持する。
+  gtfs_data:

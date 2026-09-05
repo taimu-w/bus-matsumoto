@@ -8,7 +8,10 @@ let currentBuses = [];
 let currentTimetable = [];
 // 管理画面「リアルタイム休止」でこの路線のリアルタイム表示が止められているか（/api/buses のレスポンス由来）
 let currentRealtimeSuspension = null; // null | { reason: string }
-let selectedRouteId = '11';
+// DBのroute_idは常に「feedId:routeId」形式（qualifyRouteId）。'11'のような未修飾値だと
+// /api/buses・/api/timetableのWHERE route_id = $1が一致せず、路線一覧取得で補正される前の
+// 一瞬「バスがありません」表示になる（docs/system-review-2026-09.md F-1）。
+let selectedRouteId = 'guruttomatsumotobus1:11';
 let routeOptions = [];
 // smartBack()が「アプリ内で実際に画面遷移したか」を判定するためのカウンタ（renderCurrentRouteで加算）
 let spaRenderCount = 0;
@@ -55,12 +58,16 @@ function buildTripDetailUrl(bus, { view } = {}) {
   const query = view ? `?view=${encodeURIComponent(view)}` : '';
   return `/timetable/trips/${encodeURIComponent(bus.feedId)}/${encodeURIComponent(bus.gtfsRouteId)}/${encodeURIComponent(bus.gtfsTripId)}/${encodeURIComponent(bus.departureUrlTime)}${query}`;
 }
+// realtime-diagram.js（表示モード「基本表示」）から参照できるようにする
+window.buildTripDetailUrl = buildTripDetailUrl;
 
 /** timetable.js のSPAルーティングへパスで遷移する（history APIをpushしてrenderCurrentRouteを呼ぶ）。 */
 function navigateToPath(url) {
   window.history.pushState({}, '', url);
   if (typeof window.renderCurrentRoute === 'function') window.renderCurrentRoute();
 }
+// realtime-diagram.js（表示モード「基本表示」）から参照できるようにする
+window.navigateToPath = navigateToPath;
 
 /**
  * 「戻る」ボタン共通ヘルパー（補完仕様書対応：本アプリは単純な階層構造ではなく、
@@ -87,7 +94,10 @@ window.smartBack = smartBack;
 /**
  * DBのバス停名（GTFSのstop_nameをそのまま保持。CLAUDE.md記載のとおりGTFS stop_idは持たない）から
  * バス停検索機能（/busstop）のstopKeyへ、既存の検索APIを使って橋渡しする。
- * 完全一致する候補が見つからなければ何もしない（soft-fail。新規の橋渡し用APIは作らない）。
+ * 完全一致する候補が見つからなければ何もしない（soft-fail）。
+ * 標柱（のりば）は区別できない（名前一致のみのため、循環路線で同名バス停が複数回登場する場合に
+ * どちらの標柱かを判定できない）。feedId・GTFS stop_idが分かる場面では
+ * navigateToBusStopByFeedStop() を使うこと（こちらはそのフォールバック専用）。
  */
 async function navigateToBusStopByName(name) {
   if (!name) return;
@@ -99,6 +109,36 @@ async function navigateToBusStopByName(name) {
     // 橋渡し失敗時は何もしない（このバス停名タップは補助的な導線のため）
   }
 }
+// realtime-diagram.js（表示モード「基本表示」）から参照できるようにする
+window.navigateToBusStopByName = navigateToBusStopByName;
+
+/**
+ * リアルタイムDB側のバス停識別子（feedId + 生のGTFS stop_id。/api/timetable・/api/busesが
+ * stopId/gtfsStopIdとして返す値）から、標柱（のりば）単位で識別されたバス停詳細ページへ
+ * 遷移する（GET /api/busstop/resolve-by-feed-stop）。名前一致だけのnavigateToBusStopByName()と
+ * 異なり、循環路線で同名バス停が複数回登場する場合でもどの標柱かを取り違えない。
+ * 解決に失敗した場合（GTFS再取込直後の一時的な不一致等）はfallbackNameで
+ * navigateToBusStopByName()にフォールバックする。
+ */
+async function navigateToBusStopByFeedStop(feedId, gtfsStopId, fallbackName) {
+  if (feedId && gtfsStopId) {
+    try {
+      const data = await fetchJson(
+        `${API_BASE}/busstop/resolve-by-feed-stop?feedId=${encodeURIComponent(feedId)}&stopId=${encodeURIComponent(gtfsStopId)}`
+      );
+      if (data && data.stopKey) {
+        const query = data.platformKey ? `?platform=${encodeURIComponent(data.platformKey)}` : '';
+        navigateToPath(`/busstop/${encodeURIComponent(data.stopKey)}${query}`);
+        return;
+      }
+    } catch (err) {
+      // 解決失敗時は名前ベースの橋渡しにフォールバックする（下記）
+    }
+  }
+  if (fallbackName) navigateToBusStopByName(fallbackName);
+}
+// realtime-diagram.js（表示モード「基本表示」）から参照できるようにする
+window.navigateToBusStopByFeedStop = navigateToBusStopByFeedStop;
 
 /**
  * 遅延分数の表示文字列を返す。0〜1分は誤差として「定刻通り」と表示する。
@@ -109,13 +149,13 @@ function formatDelayLabel(minutes) {
   return minutes <= 1 ? '定刻通り' : `${minutes}分遅れ`;
 }
 
-/* ---------- モーダル（style.displayのみで制御。hidden属性は使わない） ---------- */
+/* ---------- モーダル（CSSクラス .modal-hidden の付け外しで制御） ---------- */
 function openModal(id) {
-  $(id).style.display = 'flex';
+  $(id).classList.remove('modal-hidden');
 }
 
 function closeModal(id) {
-  $(id).style.display = 'none';
+  $(id).classList.add('modal-hidden');
 }
 
 document.addEventListener('click', (e) => {
@@ -324,8 +364,7 @@ async function loadAll() {
     $('loading').style.display = 'none';
     $('app-content').style.display = 'block';
 
-    renderBuses(currentBuses);
-    renderSchedule(currentTimetable);
+    renderRealtimeAndSchedule(currentTimetable, currentBuses);
 
     if (!isFirstLoad) {
       window.scrollTo(scrollX, scrollY);
@@ -355,7 +394,7 @@ function syncRouteSelector() {
   });
 
   if (!routeOptions.length) {
-    selector.innerHTML = '<option value="11">横田信大循環線</option>';
+    selector.innerHTML = '<option value="guruttomatsumotobus1:11">横田信大循環線</option>';
   }
 
   selectedRouteId = currentValue;
@@ -450,6 +489,67 @@ async function loadNotices() {
   }
 }
 
+/* ---------- リアルタイム運行状況画面：本日の運行有無に応じたセクション出し分け ----------
+ * 「本日の運行がそもそも無い」「本日の運行はもう終わった」場合は、リアルタイム・
+ * 時刻表の各セクションを個別の空表示のまま並べず、1行のメッセージにまとめる。
+ * 休止中（管理画面「リアルタイム休止」）は /api/buses が常に buses:[] を返すため、
+ * 稼働中バスの有無では終了判定ができない → 休止中は判定せず通常表示のままにする
+ * （休止メッセージ側に「時刻表は通常どおり」と案内済みのため）。 */
+function renderRealtimeAndSchedule(timetable, buses) {
+  const statusEl = $('realtime-day-status');
+  const liveSection = $('section-realtime-live');
+  const scheduleSection = $('section-schedule');
+  const unsupportedSection = $('section-realtime-unsupported');
+  const diagramSection = $('section-realtime-diagram');
+
+  const unsupportedTrips = computeUnsupportedTrips(timetable, buses);
+  const diagramMode = isDiagramMode();
+
+  let message = null;
+  if (!timetable || timetable.length === 0) {
+    message = '本日の運行はありません。';
+  } else if (!currentRealtimeSuspension) {
+    const remaining = computeRemainingTrips(timetable);
+    if (remaining.length === 0 && (!buses || buses.length === 0) && unsupportedTrips.length === 0) {
+      message = '本日の運行は終了しました。';
+    }
+  }
+
+  if (statusEl) {
+    statusEl.textContent = message || '';
+    statusEl.style.display = message ? 'block' : 'none';
+  }
+  // カード表示（section-realtime-live）と基本表示（section-realtime-diagram）は排他表示。
+  // どちらのモードでも「本日の運行が無い／終了」の間はどちらも隠す。
+  if (liveSection) liveSection.style.display = message ? 'none' : (diagramMode ? 'none' : '');
+  if (diagramSection) diagramSection.style.display = message ? 'none' : (diagramMode ? 'block' : 'none');
+  if (scheduleSection) scheduleSection.style.display = message ? 'none' : '';
+
+  if (message) {
+    if (unsupportedSection) unsupportedSection.style.display = 'none';
+    return;
+  }
+
+  if (diagramMode) {
+    // 基本表示では「リアルタイム非対応」便もdiagram内にバスアイコンとして統合するため、
+    // カード表示専用のセクションは常に隠す。
+    if (unsupportedSection) unsupportedSection.style.display = 'none';
+    window.RealtimeDiagramView.render(diagramSection, {
+      routeId: selectedRouteId,
+      patternKey: parseHashRoute().patternKey,
+      timetable,
+      buses,
+      unsupportedTrips,
+      suspended: !!currentRealtimeSuspension,
+      suspensionReason: currentRealtimeSuspension ? (currentRealtimeSuspension.reason || '') : ''
+    });
+  } else {
+    renderBuses(buses);
+    renderUnsupportedBuses(unsupportedTrips);
+  }
+  renderSchedule(timetable);
+}
+
 /* ---------- バスカード（リアルタイム） ---------- */
 function findLastArrivedIndex(stops) {
   let idx = -1;
@@ -491,15 +591,14 @@ function renderBuses(buses) {
 
 function createBusCard(bus) {
   const stops = bus.stops || [];
-  const firstStop = stops[0] || null;
-  const lastStop = stops[stops.length - 1] || null;
-  const startTime = firstStop?.scheduledTime || '--';
-  const endTime = lastStop?.scheduledTime || '--';
 
   const lastIdx = findLastArrivedIndex(stops);
   const currentStop = lastIdx >= 0 ? stops[lastIdx] : null;
   const hasDeparted = currentStop !== null;
   const currentPos = currentStop ? `${currentStop.name}に到着済` : '始発前';
+  // 行先はtrip_headsignではなくstop_headsign（現在地点のもの、無ければ始発のもの）を使う。
+  // APIが既にcurrentHeadsignとして解決済み（stop_headsign未設定ならtrip_headsignにフォールバック）。
+  const headsignLabel = bus.currentHeadsign || bus.headsign || '';
 
   const delay = bus.delayMinutes || 0;
   const delayStyle = delay >= 5
@@ -541,7 +640,7 @@ function createBusCard(bus) {
           <div>
             <p class="text-[10px] text-gray-400 font-bold">現在の位置</p>
             <p class="text-xl font-bold text-gray-900">${escapeHtml(currentPos)}</p>
-            <p class="text-[11px] text-gray-600 font-bold mt-1">始発 ${escapeHtml(startTime)} / 終点 ${escapeHtml(endTime)}</p>
+            ${headsignLabel ? `<p class="text-[11px] text-gray-600 font-bold mt-1">${escapeHtml(headsignLabel)}行き</p>` : ''}
           </div>
         </div>
         ${arrowHtml}
@@ -557,15 +656,147 @@ function createBusCard(bus) {
   return card;
 }
 
-/* ---------- 時刻表（参考） : アコーディオンで全バス停の時刻を閲覧できる ---------- */
-function renderSchedule(timetable) {
-  const container = $('schedule-list');
+/* ---------- バスカード（リアルタイム非対応・時刻表フォールバック） ----------
+ * 「今走っているはず」の便（時刻表上、始発〜終点の間に現在時刻が含まれる）のうち、
+ * /api/buses に対応する割り当てが無い（GPS未検知・GPS途絶による便打ち切り等で
+ * リアルタイム追跡できていない）便を、時刻表どおりの参考情報として表示する。
+ * リアルタイム運行情報にある「〇〇に到着済」相当の表示は「〇〇付近」にとどめ、
+ * 遅延・定刻表示は行わない（時刻表由来の推測に過ぎないため）。 */
+function parseScheduleMinutes(timeStr) {
+  if (!timeStr) return NaN;
+  const parts = String(timeStr).split(':');
+  if (parts.length < 2) return NaN;
+  const h = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  if (Number.isNaN(h) || Number.isNaN(m)) return NaN;
+  return h * 60 + m;
+}
+
+// 現在時刻時点で「通過済み」とみなせる最後のバス停（＝リアルタイムなら到着済表示になる停留所）
+function findScheduleCurrentStop(sortedStops, nowMinutes) {
+  let current = null;
+  sortedStops.forEach((stop) => {
+    const t = parseScheduleMinutes(stop.scheduledTime);
+    if (!Number.isNaN(t) && t <= nowMinutes) current = stop;
+  });
+  return current;
+}
+
+// 時刻表上「今走っているはず」で、かつ /api/buses（実際の割り当て）に対応が無い便を抽出する。
+// 対応の有無は daily_trips.id（timetable/buses 双方が tripId として返す）で突き合わせる。
+function computeUnsupportedTrips(timetable, buses) {
+  const trackedTripIds = new Set(
+    (buses || []).map((b) => b.tripId).filter((id) => id !== null && id !== undefined)
+  );
+  const nowMinutes = new Date().getHours() * 60 + new Date().getMinutes();
+
+  return (timetable || []).filter((trip) => {
+    if (trackedTripIds.has(trip.tripId)) return false;
+    const stops = (trip.stops || []).filter((s) => s.scheduledTime);
+    if (stops.length === 0) return false;
+    const sorted = stops.slice().sort((a, b) => a.seqOrder - b.seqOrder);
+    const firstMinutes = parseScheduleMinutes(sorted[0].scheduledTime);
+    const lastMinutes = parseScheduleMinutes(sorted[sorted.length - 1].scheduledTime);
+    if (Number.isNaN(firstMinutes) || Number.isNaN(lastMinutes)) return false;
+    return nowMinutes >= firstMinutes && nowMinutes <= lastMinutes;
+  });
+}
+
+// タップ確認後に開く便詳細ページのURL（保留中の遷移先）
+let pendingScheduleFallbackUrl = null;
+
+function openScheduleFallbackConfirm(url) {
+  pendingScheduleFallbackUrl = url;
+  openModal('realtime-unsupported-confirm-modal');
+}
+// realtime-diagram.js（表示モード「基本表示」）から参照できるようにする
+window.openScheduleFallbackConfirm = openScheduleFallbackConfirm;
+
+function createUnsupportedBusCard(trip) {
+  const stops = (trip.stops || []).slice().sort((a, b) => a.seqOrder - b.seqOrder);
+
+  const nowMinutes = new Date().getHours() * 60 + new Date().getMinutes();
+  const currentStop = findScheduleCurrentStop(stops, nowMinutes);
+  const currentPos = currentStop ? `${currentStop.stopName}付近` : '始発前';
+  // リアルタイム対応便（createBusCard）と同じ考え方で、現在地点のstop_headsign
+  // （まだ発車していなければ始発のもの）を使う。trip_headsignへのフォールバックも同様。
+  const headsignLabel = (currentStop && currentStop.stopHeadsign)
+    || (stops[0] && stops[0].stopHeadsign)
+    || trip.headsign
+    || '';
+
+  const badge = `<span class="text-[10px] font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded border border-gray-200">リアルタイム非対応</span>`;
+  const extraBadge = trip.startTime
+    ? `<span class="ml-1 text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-1 rounded border border-blue-200">${escapeHtml(trip.startTime)}発</span>`
+    : '';
+
+  const card = document.createElement('div');
+  card.className = 'bg-white rounded-2xl shadow-sm border-2 border-gray-200 overflow-hidden mb-4 transition-all';
+
+  // 便詳細ページへのURL（?viewを付けないので既定の時刻表モードで開く）。
+  // GTFS識別子が引けない便はタップ不可のまま（createBusCardと同じ方針）。
+  const detailUrl = buildTripDetailUrl(trip);
+  const toggleCursorClass = detailUrl ? 'cursor-pointer active:opacity-50' : 'cursor-default';
+  const arrowHtml = detailUrl
+    ? `<svg class="w-6 h-6 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>`
+    : '';
+
+  card.innerHTML = `
+    <div class="p-5 ${toggleCursorClass}" data-role="toggle">
+      <div class="flex justify-between items-start mb-3">
+        <div>${badge}${extraBadge}</div>
+      </div>
+      <div class="flex items-center justify-between">
+        <div class="flex items-center">
+          <div class="w-12 h-12 bg-gray-500 rounded-xl flex items-center justify-center text-white mr-3 shadow">
+            <svg class="w-8 h-8" fill="currentColor" viewBox="0 0 24 24"><path d="M18,11H6V6h12M16.5,17A1.5,1.5 0 0,1 15,15.5A1.5,1.5 0 0,1 16.5,14A1.5,1.5 0 0,1 18,15.5A1.5,1.5 0 0,1 16.5,17M7.5,17A1.5,1.5 0 0,1 6,15.5A1.5,1.5 0 0,1 7.5,14A1.5,1.5 0 0,1 9,15.5A1.5,1.5 0 0,1 7.5,17M4,16c0,0.88 0.39,1.67 1,2.22V20a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1h8v1a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1.78c0.61-0.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8,0.5-8,4V16Z"></path></svg>
+          </div>
+          <div>
+            <p class="text-[10px] text-gray-400 font-bold">現在の位置</p>
+            <p class="text-xl font-bold text-gray-900">${escapeHtml(currentPos)}</p>
+            ${headsignLabel ? `<p class="text-[11px] text-gray-600 font-bold mt-1">${escapeHtml(headsignLabel)}行き</p>` : ''}
+          </div>
+        </div>
+        ${arrowHtml}
+      </div>
+    </div>
+  `;
+
+  if (detailUrl) {
+    const toggleEl = card.querySelector('[data-role="toggle"]');
+    toggleEl.addEventListener('click', () => openScheduleFallbackConfirm(detailUrl));
+  }
+
+  return card;
+}
+
+function renderUnsupportedBuses(unsupportedTrips) {
+  const section = $('section-realtime-unsupported');
+  const container = $('realtime-unsupported-buses');
+  if (!section || !container) return;
   container.innerHTML = '';
 
-  if (!timetable || timetable.length === 0) {
-    container.innerHTML = '<p class="text-sm text-gray-500 px-1">時刻表データがありません。</p>';
+  // 管理画面でこの路線のリアルタイム表示自体が休止されている場合は、
+  // 上の休止メッセージで案内済みのため、ここには重ねて出さない。
+  if (currentRealtimeSuspension) {
+    section.style.display = 'none';
     return;
   }
+
+  if (!unsupportedTrips || unsupportedTrips.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+
+  section.style.display = 'block';
+  unsupportedTrips.forEach((trip) => container.appendChild(createUnsupportedBusCard(trip)));
+}
+
+/* ---------- 時刻表（参考） : アコーディオンで全バス停の時刻を閲覧できる ---------- */
+// 「本日これから発車する便」の一覧（renderSchedule・本日の運行終了判定の両方から使う）。
+// 発車済みでも15分の猶予を持たせて含める（乗車後すぐの参照用）。
+function computeRemainingTrips(timetable) {
+  if (!timetable || timetable.length === 0) return [];
 
   const now = new Date();
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
@@ -598,7 +829,7 @@ function renderSchedule(timetable) {
       })
       .sort((a, b) => a.minutes - b.minutes)
       .filter((t) => t.minutes >= nowMinutes - 15);
-    
+
     filteredTrips.forEach((t) => {
       const directionLabel = t.trip.headsign ? `${t.trip.headsign}方面` : fallbackLabel;
       allTrips.push({ ...t, directionLabel });
@@ -607,6 +838,19 @@ function renderSchedule(timetable) {
 
   // 時間順にソート
   allTrips.sort((a, b) => a.minutes - b.minutes);
+  return allTrips;
+}
+
+function renderSchedule(timetable) {
+  const container = $('schedule-list');
+  container.innerHTML = '';
+
+  if (!timetable || timetable.length === 0) {
+    container.innerHTML = '<p class="text-sm text-gray-500 px-1">時刻表データがありません。</p>';
+    return;
+  }
+
+  const allTrips = computeRemainingTrips(timetable);
 
   if (allTrips.length === 0) {
     container.innerHTML = '<p class="text-sm text-gray-500 px-1">本日の残り便はありません。</p>';
@@ -655,10 +899,10 @@ function createScheduleCard(trip, firstTime, directionLabel = '') {
         </div>
         <span class="font-bold text-blue-800 shrink-0">${escapeHtml(passed ? '通過' : (stop.scheduledTime || '--'))}</span>
       `;
-      // バス停名タップで /busstop/{stop_id} へ（補完仕様書 3.6.2）。
+      // バス停名タップで、標柱単位で識別されたバス停詳細ページへ（補完仕様書 3.6.2）。
       row.querySelector('[data-role="stop-name-link"]').addEventListener('click', (e) => {
         e.stopPropagation();
-        navigateToBusStopByName(stop.stopName);
+        navigateToBusStopByFeedStop(trip.feedId, stop.gtfsStopId, stop.stopName);
       });
       rowsContainer.appendChild(row);
     });
@@ -761,8 +1005,15 @@ function parseHashRoute() {
   if (parts[0] !== 'realtime') return { page: 'home' };
   if (parts.length < 3) return { page: 'realtime-list' };
   const feedId = decodeURIComponent(parts[1]);
-  const routeId = decodeURIComponent(parts.slice(2).join('/'));
-  return { page: 'realtime-detail', routeId: feedId === 'default' ? routeId : `${feedId}:${routeId}` };
+  // parts[3]（あれば）は表示モード「基本表示」の経路選択キー（realtime-diagram.jsのpatternKey）。
+  // routeIdは常にparts[2]単独（qualifyRouteIdは素の数字文字列のため"/"を含むことはない）。
+  const routeId = decodeURIComponent(parts[2]);
+  const patternKey = parts.length >= 4 ? decodeURIComponent(parts[3]) : null;
+  return {
+    page: 'realtime-detail',
+    routeId: feedId === 'default' ? routeId : `${feedId}:${routeId}`,
+    patternKey
+  };
 }
 
 /* ---------- 下部ナビゲーションのハイライト同期 ---------- */
@@ -864,7 +1115,7 @@ function createBusIcon(bus) {
     html: `
       <div class="bus-marker-wrap">
         <div class="bus-marker-body" style="background:${bg};">🚌</div>
-        ${label ? `<div class="bus-marker-label" style="background:${labelBg};color:${labelFg};">${escapeHtml(label)}</div>` : ''}
+        ${label ? `<div class="bus-marker-label" data-abbrev-fit style="background:${labelBg};color:${labelFg};">${escapeHtml(label)}</div>` : ''}
       </div>`,
     iconSize: [32, 32],
     iconAnchor: [16, 16],
@@ -933,6 +1184,12 @@ function updateBusMarkers(buses) {
   if (!busMapFitted && latLngs.length > 0) {
     busMapFitted = true;
     mapInstance.fitBounds(L.latLngBounds(latLngs).pad(0.2), { maxZoom: 15 });
+  }
+
+  // ラベルはLeafletが直後にDOM挿入するため、レイアウト確定を待ってから
+  // はみ出し判定（略称への切替）を行う。
+  if (window.TextAbbrev) {
+    requestAnimationFrame(() => window.TextAbbrev.fitAll(document));
   }
 }
 
@@ -1200,6 +1457,27 @@ async function renderCurrentRoute() {
   }
 }
 
+/* ---------- リアルタイム運行状況の表示モード（カード表示／基本表示） ----------
+ * 選択状態はlocalStorageにグローバルなキー1本で持つ。路線ごとには保存しない＝
+ * 「いずれかの路線で変更した場合は他の路線画面にも同じ設定を適用する」という
+ * 仕様をキーを1本にするだけで満たす。実際の描画の出し分けはrenderRealtimeAndSchedule()。 */
+const DISPLAY_MODE_STORAGE_KEY = 'busTimeDisplayMode';
+let realtimeDisplayMode = localStorage.getItem(DISPLAY_MODE_STORAGE_KEY) === 'diagram' ? 'diagram' : 'card';
+
+function isDiagramMode() { return realtimeDisplayMode === 'diagram'; }
+
+function updateDisplayModeToggleUI() {
+  const label = $('realtime-display-mode-label');
+  if (label) label.textContent = isDiagramMode() ? '基本表示' : 'カード表示';
+}
+
+function setDisplayMode(mode) {
+  realtimeDisplayMode = mode;
+  localStorage.setItem(DISPLAY_MODE_STORAGE_KEY, mode);
+  updateDisplayModeToggleUI();
+  if (parseHashRoute().page === 'realtime-detail') renderRealtimeAndSchedule(currentTimetable, currentBuses);
+}
+
 /* ---------- 自動更新のON/OFF ---------- */
 const AUTO_REFRESH_STORAGE_KEY = 'busTimeAutoRefresh';
 // ユーザーが明示的に選んだON/OFF（localStorageで次回訪問時も引き継ぐ）。
@@ -1253,10 +1531,19 @@ const refreshBtn = $('refresh-btn');
 const routeSelect = $('route-select');
 const busMapRouteSelect = $('busmap-route-select');
 const autoRefreshToggle = $('auto-refresh-toggle');
+const displayModeToggle = $('realtime-display-mode-toggle');
+const unsupportedConfirmBtn = $('realtime-unsupported-confirm-btn');
 
 if (refreshBtn) refreshBtn.addEventListener('click', () => {
   if (parseHashRoute().page === 'realtime-detail') loadAll();
 });
+if (unsupportedConfirmBtn) {
+  unsupportedConfirmBtn.addEventListener('click', () => {
+    closeModal('realtime-unsupported-confirm-modal');
+    if (pendingScheduleFallbackUrl) navigateToPath(pendingScheduleFallbackUrl);
+    pendingScheduleFallbackUrl = null;
+  });
+}
 if (routeSelect) {
   routeSelect.addEventListener('change', (e) => {
     selectedRouteId = e.target.value;
@@ -1280,6 +1567,10 @@ if (autoRefreshToggle) {
   updateAutoRefreshToggleUI();
   autoRefreshToggle.addEventListener('click', () => setAutoRefreshEnabled(!autoRefreshEnabled));
 }
+if (displayModeToggle) {
+  updateDisplayModeToggleUI();
+  displayModeToggle.addEventListener('click', () => setDisplayMode(isDiagramMode() ? 'card' : 'diagram'));
+}
 
 window.addEventListener('hashchange', renderCurrentRoute);
 // 時刻表検索機能が使う History API による遷移（戻る/進む）にも追随させる
@@ -1298,3 +1589,12 @@ setInterval(() => {
 // サーバー負荷チェックは画面によらず常時行う（次にポーリング画面を開いたときには既にOFFにしておくため）
 checkServerLoad();
 setInterval(checkServerLoad, POLL_MS);
+
+/* ---------- PWA: オフラインシェル用Service Workerの登録（F-4） ---------- */
+// 失敗しても（対応ブラウザでない・登録エラー等）アプリの動作には一切影響しない。
+// sw.jsは/api/配下をキャッシュしないため、リアルタイム表示の鮮度には影響しない。
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}

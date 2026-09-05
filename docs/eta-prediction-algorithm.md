@@ -9,16 +9,40 @@
 - `etaPredictor.js`の`computeAndStoreAllArrivals()`が、`jobs/pipeline.js`の`runPipeline()`から
   `delayCalc()`の直後（パイプラインの⑧番目のステップ）に呼ばれます。役割（担当・候補）を問わず
   `state = 'active'`な全割り当てに対して`predictArrivals()`を実行し、結果を`trip_arrival_predictions`
-  テーブルへUPSERTします（`assignment_id, stop_id`が複合主キー）。あわせて`computed_at`が48時間より
-  古いレコードを削除します。
+  テーブルへUPSERTします（`assignment_id, stop_id`が複合主キー）。
+- `computed_at`が48時間より古いレコードの削除は`purgeOldPredictions()`が担当し、`computeAndStoreAllArrivals()`
+  からは呼ばれません。GPSログ・完了便アーカイブ等と同じ`scheduler.js`の1時間間隔クリーンアップタイマー
+  から実行されます（48時間保持のデータに対して60秒ごとの削除は過剰だったため、他の保持期間ベースの
+  掃除と間隔を揃えました）。
 - API側は計算を一切行わず、`getArrivalsForAssignment(client, assignmentId)`で
   `trip_arrival_predictions`から読み出すだけです（`routes/api.js`の`GET /api/buses`、
   `services/realtimeTripLookup.js`の`buildBusEntry()`）。
 - 計算回数は「ポーリング間隔（既定60秒）× active割り当て数」に固定され、APIリクエスト数がどれだけ
   増えても計算コストは増えません。代わりに予測値は最大でポーリング間隔ぶん遅れます。
 
-`predictArrivals(client, assignmentId)`の引数は車両IDではなく**割り当てID**です（進捗が
-`trip_stop_progress`に移ったため）。以下はアルゴリズム本体の詳細です。
+### 1周期ぶんの共有データ（`buildPredictionContext()`）
+
+`computeAndStoreAllArrivals()`は1周期の先頭で`buildPredictionContext()`を**1回だけ**呼び、
+その結果を各`predictArrivals(client, assignmentId, context)`へ渡して使い回します。
+**この関数はDBアクセスの回数を減らすだけで、アルゴリズム本体（区間ごとの判断・フォールバックの
+順序）には一切関与しません。**
+
+- **区間統計**: 対象の割り当てが実際に持つ停留所どうしの組に限定して`segment_travel_stats`を
+  1クエリで読み、`from|to|hour_bucket`をキーにプロセス内Mapへ載せます。
+  これを入れる前は未到着バス停ごとに`getSegmentStat()`を1クエリずつ発行していました（N+1）。
+- **周辺道路実績**: `getRecentSegmentPerformance()`を除外なしで1回だけ実行し、対象の割り当て自身の
+  除外（SQL側の`a.id != $1`）は返り値に持たせた`assignmentId`でのJS側フィルタで行います。
+  これを入れる前は割り当てごとに全スキャンを呼び直しており、実質O(便数²)でした。
+
+**Mapのカバー範囲外を問われたときは従来どおり個別クエリへ落とします**（別の曜日区分、共有データを
+作った後に増えた停留所）。「Mapに無い＝統計が無い」と取り違えると、統計を持つ区間が
+`schedule_paced`へ降格して予測が変わってしまうため、この分岐を外さないでください。
+`buildPredictionContext()`が失敗した回は`context = null`のまま進み、`predictArrivals()`が
+従来どおり個別クエリで動きます（遅くなるだけでETA配信は止まりません）。
+
+`predictArrivals(client, assignmentId, context)`の第2引数は車両IDではなく**割り当てID**です（進捗が
+`trip_stop_progress`に移ったため）。`context`は省略可で、省略時は必要なぶんを都度クエリします
+（結果は同じ）。以下はアルゴリズム本体の詳細です。
 
 ## データの土台：区間別走行時間統計（`segment_travel_stats`テーブル）
 
@@ -33,8 +57,9 @@
 1. `updateSegmentStats()`全体を1つのトランザクション（`BEGIN`〜`COMMIT`）で実行する。
 2. `completed_trips`のうち`aggregated = FALSE`（未集計）**かつ`is_official = TRUE`**の便を`FOR UPDATE SKIP LOCKED`付きで最大200件取得する。
    `is_official`は「その便の実績として正とみなす記録＝最後に担当車両だった割り当て」を表します。候補車両止まりの記録を混ぜると、別経路をたまたま走っていた車両の所要時間で統計が汚染され、さらに担当が切り替わった便では同じ区間を二重計上してしまうため、意図的に除外しています。`FOR UPDATE SKIP LOCKED`は、もう一方の呼び出しが同時に処理中の行をロックごと読み飛ばすためのもので、これが無いと同じ便が両方から同時に集計され、区間統計が二重計上されます。
-3. 各便について、実績時刻がある停車バス停（`completed_trip_stop_times`）を`seq_order`順に並べる。
+3. 各便について、実績時刻がある停車バス停（`completed_trip_stop_times`）を`seq_order`順に並べる。あわせて`daily_trip_stop_times`（`daily_trip_id`+`stop_id`）から`is_through`（真の通過＝乗車も降車もできない停車）を引き当てる。
 4. **隣接する2つのバス停**（`seq_order`の差が1）だけを対象に、実績時刻の差分（分）を計算する。
+   - 区間の両端（`from`・`to`）のいずれかが`is_through`のバス停なら、その区間は統計から除外する。GPS通過判定自体は`is_through`のバス停も候補から除外しないため（[pass-detection.md](pass-detection.md)）実績時刻は付くが、降車できない地点で確定した時刻をETA予測の学習データに混ぜないための除外。該当便が`DAILY_TRIP_RETENTION_DAYS`経過で既に掃除済みの場合は判定できないため除外しない（集計は便のクローズ直後に行われるため実際には起こらない）。
    - 差分が負になる場合（日を跨いだ場合）は24時間分を足して補正。
    - 差分が0以下、または60分を超える場合は「計測誤り」とみなして統計から除外する。
 5. 到着時刻（分）を1時間単位の`hourBucket`に丸める。`day_type`（平日/土曜/休日）は`completed_trips.day_type`列（`finishService.js`のアーカイブ時点で`getDayType()`＋祝日カレンダーを使って確定済み）をそのまま使う。祝日カレンダー導入前にアーカイブされ`day_type`が未設定の古い行だけ、`day_of_week`（0=日曜のみholiday扱い）からのフォールバック導出になる。
@@ -73,7 +98,7 @@
 
 対象区間（`prevStop → s`）の**周辺500m以内**を最近走った、他の便（担当・候補いずれも、他路線も含む）の実績から「今この道路周辺がどの程度混雑しているか」を推定する補正要素。
 
-- 候補プールは`predictArrivals()`呼び出しごとに**1回だけ**取得する（区間ごとにSQLを投げ直さない）。現在アクティブな全割り当て（`trip_vehicle_assignments.state = 'active'`。対象の割り当て自身は除外）の`trip_stop_progress`から、隣接区間で実績が揃っているものを`getNearbyCandidateSegments()`が抽出し、区間ごとの重み付けは`computeNearbyFactor()`がJS側で行う。
+- 候補プールは**区間ごとにSQLを投げ直さない**。現在アクティブな全割り当て（`trip_vehicle_assignments.state = 'active'`）と、直近90分以内に終了した割り当ての`trip_stop_progress`から、隣接区間で実績が揃っているものを`getRecentSegmentPerformance()`が抽出し、区間ごとの重み付けは`computeNearbyFactor()`がJS側で行う。プリコンピュートでは1周期に1回だけ取得したものを全割り当てで共有し、対象の割り当て自身の除外はJS側の`assignmentId`フィルタで行う（上記「1周期ぶんの共有データ」）。`context`なしで単発呼び出しした場合は`excludeAssignmentId`付きで都度取得する（結果は同じ）。
 - 候補は担当・候補どちらの役割でも採用する。どちらも実在する車両の実際のGPS実績であり、路面状況を知る手掛かりとしては同格に扱ってよいため。
 - 各候補区間について、対象区間との**距離**・**方位差**・**新しさ**をそれぞれ重み付けし、3つの積を総合重みとする：
 

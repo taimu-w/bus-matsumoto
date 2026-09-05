@@ -52,6 +52,7 @@
         const data = await response.json().catch(() => ({}));
         throw new Error(data.error || 'ダウンロードに失敗しました');
       }
+      const truncated = response.headers.get('X-Export-Truncated') === 'true';
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -61,8 +62,13 @@
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      statusEl.textContent = 'ダウンロードしました。';
-      statusEl.className = 'text-sm text-green-700 font-bold';
+      if (truncated) {
+        statusEl.textContent = 'ダウンロードしました（件数が上限を超えたため一部のみ。詳細はCSV末尾を参照）。';
+        statusEl.className = 'text-sm text-amber-600 font-bold';
+      } else {
+        statusEl.textContent = 'ダウンロードしました。';
+        statusEl.className = 'text-sm text-green-700 font-bold';
+      }
     } catch (err) {
       statusEl.textContent = err.message;
       statusEl.className = 'text-sm text-red-600 font-bold';

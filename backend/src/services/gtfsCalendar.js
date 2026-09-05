@@ -57,27 +57,54 @@ async function getEnabledFeedIds() {
   return getEnabledGtfsFeedIds();
 }
 
-// calendar.txt と calendar_dates.txt を読み込んで、
-// 指定日付に有効な、DB保存形式の service_id の配列を返す。
-// feedId が未指定の場合は全有効フィードを対象にする。
-async function getActiveServiceIds(date, feedId = null) {
+/**
+ * calendar.txt と calendar_dates.txt を読み込んで、指定日付に有効な
+ * DB保存形式の service_id と、フィードごとの読み込み結果を返す。
+ * feedId が未指定の場合は全有効フィードを対象にする。
+ *
+ * 「1件も無い」には2つの意味がある:
+ *   (a) カレンダーは読めたが、その日は本当に運行が無い（年末年始の特定日など）
+ *   (b) カレンダーが読めなかった（GTFS差し替え中のファイル入れ替え窓・ディスクの瞬断など）
+ * 両者を配列の長さだけで区別することはできない。(b) を「運行なし」と確定させると
+ * 当日便が0件のまま固定されるため（dailyTripBuilder.ensureDailyTrips）、
+ * 呼び出し側が判断できるよう failedFeedIds / complete を返す。
+ *
+ * calendar_dates.txt はGTFS上の任意ファイルなので、存在しない（ENOENT）だけなら
+ * 「例外日なし」として扱い、フィードの失敗にはしない。
+ *
+ * @returns {{serviceIds: string[], feedsTotal: number, failedFeedIds: string[], complete: boolean}}
+ */
+async function getActiveServiceIdsWithStatus(date, feedId = null) {
   const yyyymmdd = formatDate(date);
   const feedIds = feedId ? [feedId] : await getEnabledFeedIds();
 
   // フィード未設定の旧構成では data gtfs 直下の静的GTFSを使う。
   const targetFeedIds = feedIds.length > 0 ? feedIds : [null];
   const activeServiceIds = [];
+  const failedFeedIds = [];
 
   for (const currentFeedId of targetFeedIds) {
+    const source = currentFeedId ? `feed=${currentFeedId}` : 'static GTFS';
     let calendarRows;
     let calendarDatesRows;
     try {
       calendarRows = readCsv('calendar.txt', currentFeedId);
+    } catch (err) {
+      console.warn(`[gtfsCalendar] ${source} の calendar.txt を読めませんでした:`, err.message);
+      failedFeedIds.push(currentFeedId === null ? '(static)' : currentFeedId);
+      continue;
+    }
+    try {
       calendarDatesRows = readCsv('calendar_dates.txt', currentFeedId);
     } catch (err) {
-      const source = currentFeedId ? `feed=${currentFeedId}` : 'static GTFS';
-      console.warn(`[gtfsCalendar] ${source} のカレンダー読み込みをスキップ:`, err.message);
-      continue;
+      if (err.code === 'ENOENT') {
+        // 任意ファイル。無いフィードは「例外日なし」として通常どおり処理する。
+        calendarDatesRows = [];
+      } else {
+        console.warn(`[gtfsCalendar] ${source} の calendar_dates.txt を読めませんでした:`, err.message);
+        failedFeedIds.push(currentFeedId === null ? '(static)' : currentFeedId);
+        continue;
+      }
     }
 
     const calendarByServiceId = new Map();
@@ -112,7 +139,22 @@ async function getActiveServiceIds(date, feedId = null) {
     }
   }
 
-  return activeServiceIds;
+  return {
+    serviceIds: activeServiceIds,
+    feedsTotal: targetFeedIds.length,
+    failedFeedIds,
+    complete: failedFeedIds.length === 0
+  };
+}
+
+/**
+ * 有効な service_id の配列だけを返す従来どおりの入口。
+ * 読み込み失敗と「本当に運行なし」を区別する必要がある呼び出し側は
+ * getActiveServiceIdsWithStatus() を使うこと。
+ */
+async function getActiveServiceIds(date, feedId = null) {
+  const { serviceIds } = await getActiveServiceIdsWithStatus(date, feedId);
+  return serviceIds;
 }
 
 function isServiceActiveOnDayOfWeek(calRow, dayOfWeek) {
@@ -142,6 +184,7 @@ function formatDate(date) {
 
 module.exports = {
   getActiveServiceIds,
+  getActiveServiceIdsWithStatus,
   getDayOfWeek,
   formatDate
 };

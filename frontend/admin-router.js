@@ -26,6 +26,7 @@ const SECTION_LOADERS = {
   'busstop-notices': () => window.AdminBusstopNotices.load(),
   holidays: () => window.AdminHolidays.load(),
   'route-mappings': () => window.AdminRouteMappings.load(),
+  'display-abbreviations': () => window.AdminDisplayAbbreviations.load(),
   'direction-rules': () => window.AdminDirectionRules.load(),
   'realtime-suspension': () => window.AdminRuntimeSuspension.load(),
   'runtime-settings': () => window.AdminRuntimeSettings.load(),

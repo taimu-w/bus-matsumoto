@@ -23,13 +23,15 @@
 すべて`backend/`から実行します。
 
 ```bash
-npm install
+npm install        # ローカル開発用。package-lock.json があるので、package.json を変えない限り lockfile どおりに入る
 npm run setup      # migrate.js（スキーマ適用）→ seed.js（GTFSマスタデータをDBに投入）
 npm start           # node src/server.js
 npm run dev          # node --watch src/server.js
 npm run db:init      # migrate.jsのみ
 npm run db:seed      # seed.jsのみ
 ```
+
+依存を追加・更新したら`backend/package-lock.json`もコミットすること。**Dockerイメージのビルドは`npm ci`（`npm install`ではない）で lockfile どおりに再現インストールする**ため、lockfileと`package.json`がずれているとビルドが失敗します。
 
 Docker（PostgreSQLを含む）：
 
@@ -69,7 +71,7 @@ daily_trips（当日の便。例：8:00発）
 `backend/src/jobs/pipeline.js`の`runPipeline()`は、以下のステップを**毎回のポーリングでこの順序のまま直列実行**します。各ステップの結果（DBの状態）を次のステップが前提にしているため、順序を変えると壊れます。
 
 ```
-updateAllGtfsFeeds()  ⓪ config/feeds.jsに基づきGTFS ZIPを更新（独自のtry/catch、失敗しても後続は継続）
+updateAllGtfsFeeds()  ⓪ config/feeds.jsに基づきGTFS ZIPを更新（内容が変わったときだけ展開＋seed()。独自のtry/catch、失敗しても後続は継続）
 ensureDailyTrips()     ① 当日の運行便を生成 → daily_trips / daily_trip_stop_times（生成済みなら即リターン）
 fetchLocation()         ② 有効な位置情報フィード全件からGPSを取得 → vehicle_positions_raw
 sortCarId()              ③ 生ログを車両ごとのログに振り分け（vehicle_gps_log）、新規車両を登録
@@ -80,11 +82,13 @@ delayCalc()                  ⑦ 定刻と実績の差から遅延分数を算�
 computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括計算し trip_arrival_predictions へ保存（担当・候補すべて）
 ```
 
-**⓪①は深夜帯（`isNightTime()`）でもスキップしません。** 最も早い便が5:40発で、深夜帯が明ける前に始発時刻が来るためです（`NIGHT_END`は05:00に設定してあります）。②以降だけが深夜帯にスキップされます。
+**⓪①は深夜帯（`isNightTime()`）でもスキップしません。** 最も早い便が5:40発で、深夜帯が明ける前に始発時刻が来るためです（`NIGHT_END`は05:00に設定してあります）。②以降だけが深夜帯にスキップされます（**車両割り当て④も止まります**）。
+
+ただし深夜帯でも、`countDuePendingTrips()`が「始発時刻を過ぎたのに`assignment_state='pending'`の便」を検出した場合は②以降も継続します。④は②③のGPS取り込み結果を前提にしているため、深夜帯だからと一律に抜けると、その時間帯にかかる便の割り当てが黙って行われないまま`pending`のまま消えるからです。既定値（23:00〜05:00・最早便5:40発・最終停車22:45）ではこの条件に当てはまる便はなく、挙動は従来と同じです。`NIGHT_END`は管理画面「運用パラメータ設定」から編集できるため、これは運用者が早朝便の始発より後ろへ動かした場合の安全弁です。
 
 `finishTrips()`（`services/finishService.js`）は独立した1分間隔のタイマーで動作し、**割り当て単位**で運行終了条件を判定して`state='ended'`にします。便のクローズ（実績確定＋アーカイブ）は`closeDailyTrip()`が担当し、再割り当てできる候補が居なくなった時点、または終点まで走り切った時点で呼ばれます。アーカイブ後に`etaPredictor.js`の`updateSegmentStats()`を呼んでETA予測に使う統計データを育てます。
 
-**到着予測はパイプラインの⑧番目のステップとしてプリコンピュートされます。** `etaPredictor.js`の`computeAndStoreAllArrivals()`が`delayCalc()`の直後に呼ばれ、全active割り当て（担当・候補とも）の到着予測を一括計算して`trip_arrival_predictions`テーブルへUPSERTします。計算アルゴリズム本体は`predictArrivals(client, assignmentId)`（引数は車両IDではなく**割り当てID**）。`/api/buses`・ルート検索は`getArrivalsForAssignment(client, assignmentId)`で`trip_arrival_predictions`から読み出すだけで、最大60秒のラグと引き換えにDBスパイクと重複計算を排除しています。48時間以上前の予測は`computeAndStoreAllArrivals()`内で毎回掃除されます。詳細は[docs/eta-prediction-algorithm.md](docs/eta-prediction-algorithm.md)。
+**到着予測はパイプラインの⑧番目のステップとしてプリコンピュートされます。** `etaPredictor.js`の`computeAndStoreAllArrivals()`が`delayCalc()`の直後に呼ばれ、全active割り当て（担当・候補とも）の到着予測を一括計算して`trip_arrival_predictions`テーブルへUPSERTします。計算アルゴリズム本体は`predictArrivals(client, assignmentId, context)`（第2引数は車両IDではなく**割り当てID**）。`context`は`buildPredictionContext()`が1周期の先頭で1回だけ用意する共有データ（区間統計のプロセス内Map＋周辺道路実績）で、区間統計のN+1と周辺道路実績のO(便数²)スキャンを潰すためのものです。**アルゴリズム本体には関与せず、Mapのカバー範囲外は個別クエリへ落ちる**ので、渡しても渡さなくても結果は同じです（`context`省略時・作成失敗時は従来どおり都度クエリ）。`/api/buses`・ルート検索は`getArrivalsForAssignment(client, assignmentId)`で`trip_arrival_predictions`から読み出すだけで、最大60秒のラグと引き換えにDBスパイクと重複計算を排除しています。48時間以上前の予測は`purgeOldPredictions()`が`scheduler.js`の1時間間隔クリーンアップタイマーから掃除します（GPSログ・完了便アーカイブ等の保持期間ベースの掃除と同じタイマー。以前は`computeAndStoreAllArrivals()`内で60秒ごとに実行していましたが、48時間保持のデータに対して過剰だったため間隔を揃えました）。詳細は[docs/eta-prediction-algorithm.md](docs/eta-prediction-algorithm.md)。
 
 `backend/src/utils/time.js`と`utils/geo.js`は、ほぼすべてのサービスで使われる共通ヘルパー（時刻文字列の変換、遅延計算、ハバーサイン距離）です。`utils/geo.js`は徒歩の所要時間の実態推定（`estimateWalkMinutes`/`estimateWalkSeconds`。「直線距離×迂回係数＋信号バッファ」で、迂回係数・信号バッファとも直線距離に応じて増やす区分線形）も持ち、時刻表検索の「近くのバス停」・スポット検索・観光スポット情報・経路検索の徒歩接続で共通に使います（表示する距離は直線距離のまま、徒歩分数だけ実態寄りに換算。GPS照合・通過判定には使いません）。
 
@@ -123,7 +127,7 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 - 探索は**DBを一切見ません**。任意の日付で検索でき、当日便の生成状況にも、DBの死活にも影響されません。
 - アルゴリズムはRAPTOR型（ラウンド＝乗車回数）。乗換2回まで（フォールバック時3回）、バス停グループ間400m（同800m）以内は徒歩で乗り継げるものとして扱います。
 - **出発時刻指定（`runRaptor`）と到着時刻指定（`runRaptorReverse`、`timeMode=arrival`）は、時間軸を反転させた対（つい）の実装です。片方だけを変更しないでください。** 乗車索引と降車索引・乗換余裕を免除するラウンド・探索窓の向き・枝刈りの向きがそれぞれ対応しており、対称性が崩れると「出発時刻指定では出るのに到着時刻指定では出ない区間」が生まれます。対応表は[docs/route-search.md](docs/route-search.md) 5.6にあります。到着時刻指定では最早到着ではなく**最遅出発**を最大化し、並び順・おすすめ判定もそれに合わせて反転します。
-- **徒歩の連鎖（徒歩→徒歩）は意図的に禁止しています。** 許すと「4分歩いて5分歩いて…」が最速解になり、現実的でない経路が上位に出ます。
+- **徒歩の連鎖（徒歩→徒歩）は意図的に禁止しています。** 許すと「4分歩いて5分歩いて…」が最速解になり、現実的でない経路が上位に出ます。ただしスポットを出発地・目的地にすると、スポット⇔バス停の徒歩（`attachSpotWalkLegs()`）が探索側の乗り継ぎの徒歩と隣り合って2連続になり得ます。この場合は`mergeConsecutiveWalkLegs()`が**距離と徒歩分数を足し合わせて1本の徒歩レグにまとめて**返します（端点間の直線距離で引き直さないこと。実際には途中のバス停を経由して歩くため短く出ます）。
 - **徒歩ありの探索結果に、徒歩なしの探索結果を必ず混ぜています。** 徒歩を許すと「1駅手前で降りて歩く」方が最速になり、枝刈りでバスだけの案が消えてしまうためです。
 - 結果0件のときは条件を段階的に緩め（`RELAXATION_STEPS`）、それでも0件なら「次の運行日」「その日の始発」「近くのバス停」を返します。**「見つかりませんでした」だけを返さないこと。**
 - **詳細設定（乗換回数の上限・徒歩での乗り継ぎ・乗換の余裕時間）は、探索条件を「絞る方向」にだけ効かせます（`applyPreferencesToStep()`）。** 段階的フォールバックは0件のとき条件を緩めますが、利用者が明示した上限は超えさせないでください（「乗り換えなし」で検索したのに段階3のフォールバックで乗換つきの案が出る、という事故になります）。正規化は`normalizeSearchPreferences()`の1箇所に集約し、**未指定・不正値はすべて既定の探索条件へ落とします**（既存のURL・お気に入りの挙動を変えないため）。乗換余裕は探索時とリアルタイム反映後の乗換リスク判定（`flagTransferRisks()`）で同じ値を使ってください。詳細設定つきで0件になったときは、翌日以降を探す前に既定条件で探し直して原因を切り分け、設定が原因なら`no-route-with-conditions`を返して画面に解除の導線を出させます。
@@ -148,6 +152,7 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 - `gtfsTimetable.js`の公開関数（`searchStops`/`searchNearbyStops`/`getStopSummariesByKeys`）は**呼ぶだけ**。シグネチャを変えないこと。
 - 付近のバス停は緯度経度の近接検索で**参照時に**都度解決（観光スポット情報機能と同じ方針。半径既定500m）。
 - 路線サジェスト・路線解決・結果に載せる路線は**`routes`テーブルに実在する路線だけ**に絞ります（`#/realtime/{feedId}/{routeId}`が必ず開けるようにするため）。路線名の一致は`normalizeSearchText()`の正規化テキストのみ（`routes`にはよみがな・ローマ字が無い）。
+- 観光スポットの候補一致は`touristSpots.searchTouristSpots()`が名称・かな・ローマ字に加えて**別称（`tourist_spots.aliases`、「,」区切り）**でも行います（経路検索の出発地・目的地の候補も同じ関数）。**別称は`serializeRow`に含めず、利用者画面・APIレスポンスにも出しません**（検索補助専用。かな・ローマ字変換もしない）。別称でしか一致しないスポットを自由文字列解決で拾えるよう、`searchTouristSpots()`は各結果に`matchScore`を付けて返し、`spotSearch.chooseFreeTextTarget()`がそれを候補スコアに取り込みます（この2点をセットで外さないこと）。
 - 画面はパスルーティング（`/spotsearch`）。路線チップからリアルタイム時刻表（**ハッシュ**ルーティング`#/realtime/...`）へ移るときは`pushState('/#/realtime/...')`でpathnameを`/`に戻してから`renderCurrentRoute()`を呼びます。**自由文字列が路線に解決したリダイレクトだけ`replaceState`**（`?q=`のURLを履歴に残すと戻るたびに再リダイレクトするため）。
 - **検索回数（`spot_search_counts`）は`spotSearch.js`が書き、分析用の読み出し（タップ回数とのマージ）も`spotSearch.getSpotEngagementStats()`が担います。`touristSpots.js`は`spot_search_counts`を参照しません**（循環参照防止。依存は`spotSearch.js`→`touristSpots.js`の一方向）。`tourist_spot_link_clicks`と同じく外部キーは張らず、`spot_id=''`（空文字）は「観光スポット以外（バス停・地名）に解決した検索」。
 - **観光スポットの識別子（`tourist_spots.id`、TEXT）は管理画面「観光スポット管理」のテキスト一括入力の1列目で管理者が指定します**（`services/touristSpots.js`、[docs/tourist-spots.md](docs/tourist-spots.md)）。名称による名寄せはせず、IDが同じなら名称が変わっても同一スポット。全件洗い替えはこのIDをキーにUPSERT＋テキストに無いIDをDELETE。`tourist_spot_link_clicks`/`spot_search_counts`の`spot_id`もこのIDです。
@@ -183,8 +188,16 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 - **`finishService.closeDailyTrip()`冒頭の`SELECT … FOR UPDATE`による行ロック、および`etaPredictor.updateSegmentStats()`の`FOR UPDATE SKIP LOCKED`＋`segment_travel_stats`への原子的UPSERTを外さないでください。** どちらも「便への処理が1箇所からしか呼ばれない」ように見えて、実際には`tripAssignment.reassignOrphanTrips()`（パイプライン⑤、60秒間隔）と`finishService.finishTrips()`自身（運行日終了の掃除、1分間隔）という2つの独立したタイマー・DB接続の両方から同じ便に対して呼ばれます。サーバー起動時に両タイマーがほぼ同時に開始されるため位相が揃いやすく、排他制御を外すと`completed_trips`への実績の二重アーカイブ、`segment_travel_stats`の二重集計が実際に発生します。`completed_trips`の`UNIQUE (daily_trip_id, assignment_id)`制約も同じ対策の一部なので、削除しないでください。
 - **バスマップ（`#/busmap`）の`/api/buses-for-map`呼び出しで`routeId`の既定値を特定の路線に決め打ちしないでください。** 全路線を俯瞰する画面なので、既定を1路線に固定するとその路線が運行していない時間帯に0台になります。`routeId`を付けてよいのは、利用者が画面上の「路線で絞り込み」セレクトで明示的に路線を選んだときだけです（選択は`#/busmap/<feedId>/<routeId>`としてハッシュに載り、`routeHref()`と同じ組み立ての`busMapHref()`が生成、`parseHashRoute()`が復元します）。フィルタ切り替え時は`history.replaceState`でURLだけ同期し、地図インスタンス・マーカーは作り直しません（ハッシュ代入だと`renderCurrentRoute`経由で地図が再生成され表示位置が戻るため）。表示範囲の再フィットは`busMapFitted`フラグを戻すことで行います。同じ画面で、地図を作り直すときに`busMarkers`/`userMarker`を捨て忘れると2回目以降に描画されなくなる点、現在地取得を`await`してからバスを取得すると許可ダイアログの間バスが出ない点にも注意してください。
 - **`routes/api.js`にルート定義を追加する際は、`router`が`/api`配下にマウントされている前提でパスを書くこと（先頭に`/api`を重ねない）。**
+- **`GET /healthz`（`services/healthCheck.js`）は`server.js`で`httpsRedirect`・セキュリティヘッダー・CORS・`/api`ルーターより手前に置いてあります。** 位置を下げないでください。オーケストレータ／compose の healthcheck が平文の`localhost`から叩けること、API稼働統計（`apiMetrics`）や閲覧数（`visitorTracker`）を汚さないことが前提です。DB不通・パイプライン停滞（`jobMonitor`の`scheduler.pipeline`が既定300秒完了なし）で503を返します。GTFS鮮度は情報のみで503条件に含めません（フィード側都合で取得間隔が開くのは異常ではないため）。
 - 上記の3つの曜日区分ロジックについて補足：`getDayType()`は平日/土曜/休日の3区分で、日曜に加えて`holidays`テーブル（`services/holidayCalendar.js`がキャッシュ、`utils/japaneseHolidays.js`が国民の祝日を算出してseed.jsが初期投入、管理画面`/admin`から追加・削除可）に登録された日もholiday扱いになります。`getActiveServiceIds()`はGTFSの正式な`calendar.txt`/`calendar_dates.txt`に基づく当日便生成用の運行日判定です。`getDayType()`自体はDBアクセスを持たない純粋関数のままとし、祝日集合(`holidaySet`)は呼び出し側（`etaPredictor.js`/`finishService.js`）が渡す設計です。
-- **`dailyTripBuilder.js`が「既に車両を割り当て済みの便は書き換えない」ガードを持つのは意図的です。** GTFSは1時間ごとに再取得され、成功すると`seed()`が走ってマスタが入れ替わります。このとき走行中の便の定刻まで書き換えると、遅延計算と実績が破綻します。
+- **`dailyTripBuilder.js`が「既に車両を割り当て済みの便は書き換えない」ガードを持つのは意図的です。** GTFSは1時間ごとに再取得され、**内容が変わっていれば**`seed()`が走ってマスタが入れ替わります。このとき走行中の便の定刻まで書き換えると、遅延計算と実績が破綻します。
+- **GTFS ZIPの内容指紋（`feeds.content_hash` / `last_etag` / `last_modified`）は、`seed()`が成功した後にだけ書いてください（`gtfsFeedManager.commitFeedFingerprint()`）。** ダウンロード直後に書くと、`seed()`が失敗した回の指紋が残って以降ずっと「内容不変」と判定され、**DBが古いまま固定されて自動復旧しなくなります**（次回以降のリトライ経路が消えるため）。同じ理由で、内容不変によるスキップは**必須ファイルがディスク上に揃っているときだけ**行います。ファイルが欠けている状態でスキップすると時刻表インデックスが復旧できません。`ensureGtfsFilesPresent()`（欠損の復旧）と管理画面の手動再取得が`force: true`で判定を素通りするのはこのためです。
+- **`seed.js`の`alignTripIndexesByGtfsTripId()`を、`schedule_trips`へのUPSERTより前から動かさないでください。** 一意キーの`trip_index`は`trips.txt`内の並び順そのもので、行の同一性を表していません。整列を挟まずにUPSERTすると、ダイヤ改正で便が1本増減しただけで以降の便が全部ずれ、**既存行の中身が別の便のもので上書き**されます。`daily_trips.schedule_trip_id`が指す先がずれるため、走行中の便に別の便の定刻が出ます。GTFSから消えた便の行を**削除せず後ろの番号へ退避するだけ**にしてあるのも意図的で、`completed_trips.trip_id`がCASCADE無しでこの行を参照しており、削除するとアーカイブ済みの運行実績を巻き添えにするためです（副作用は[docs/known-issues.md](docs/known-issues.md) H-6）。
+- **`seedStopsAndTimetable()`が`stops`/`schedule_stop_times`の孤児行を掃除する際の`NOT EXISTS`ガードを外さないでください。** GTFSから消えたバス停・通らなくなった停車パターンの残骸を消すため、便ごとのUPSERT直後に`schedule_stop_times`の不要行を`DELETE`し、方向（route_id, direction_id）単位のUPSERT直後に不要な`stops`行を`DELETE`します。`stops.id`は`daily_trip_stop_times`/`trip_stop_progress`/`trip_gps_matches`/`completed_trip_stop_times`/`segment_travel_stats`/`daily_trips(start_stop_id)`から`ON DELETE CASCADE`無しで参照されているため、`stops`側の削除はこれらに現に参照されている行を`NOT EXISTS`で必ず除外しています。このガードを外すと、当日便・進行中の割り当て・保持期間内の実績を削除しようとしてFK違反となり、`seed()`全体がROLLBACKして今回のGTFS更新そのものが失敗します（`schedule_stop_times`側は他テーブルから参照されないため無条件DELETEで問題ありません）。
+- **`seed()`冒頭の`pg_advisory_xact_lock()`を外さないでください。** `seed()`は(1)毎時パイプライン（`gtfsFeedManager.updateAllGtfsFeeds()`）、(2)管理画面の手動再取得（`POST /api/admin/gtfs-feeds/:feedId/refetch`）の2経路から**別接続で**呼ばれます。ロックが無いと両者が同時に`stops`/`schedule_trips`/`schedule_stop_times`へ大量UPSERTし、ロック取得順の違いでデッドロックしえます（片方がROLLBACKし、そのGTFS更新が黙って失敗します）。ロックはトランザクション単位（`pg_advisory_xact_lock`）なので`COMMIT`/`ROLLBACK`で自動解放され、明示的な`unlock`は不要です。
+- **`ensureDailyTrips()`の生成済みキャッシュ（`builtServiceDate`）を、カレンダーを読めなかった回に立てないでください。** `getActiveServiceIdsWithStatus()`が返す`complete: false`（＝`calendar.txt`を読めなかったフィードがある）を無視して「今日は運行なし」と確定させると、以降のポーリングが即リターンし、**当日便0件のまま固定**されます。復旧経路は`invalidateDailyTripCache()`＝GTFS再取得の成功だけなので、配信元が落ちていれば半日リアルタイムも時刻表APIの当日分も空になります。不完全な回は`markIncomplete()`で5分後に再試行し、**GTFSから消えた便の掃除（DELETE）もスキップ**します（読めなかったフィードの便が`keptIds`に入らず、生きている便まで消えるため）。なお`calendar_dates.txt`はGTFS上の任意ファイルなので、ENOENTだけならフィードの失敗として数えません。
+- **時刻の分→文字列変換は用途で2つに分かれています（`utils/time.js`）。** `minutesToTimeStr()`は実時刻用で24時を折り返し（1500分→`"1:00"`）、`minutesToServiceTimeStr()`は運行日の0時起点表記用で折り返しません（1500分→`"25:00"`）。`daily_trips.start_time`と`daily_trip_stop_times.scheduled_time`はGTFSの表記をそのまま持つ列なので、frequencies由来の仮想便の定刻も必ず後者で作ってください。前者に戻すと同じ運行日の同じ時刻が素の便`"25:00"`／仮想便`"1:00"`と2通りに割れ、便詳細URLの`departure_time`突合（`realtimeTripLookup.findLiveAssignment()`）が外れます。
+- **遅延分数は`delay_minutes`（0以上に丸めた値）と`signed_delay_minutes`（符号付き。負＝早発・早着）の2本立てです。** 表示・しきい値判定・ETA予測は`computeDelayMinutes()`＝`delay_minutes`側が正で、ここを符号付きに差し替えないでください（公開画面が「−3分遅れ」と出ます）。逆に、定刻より早く発車・到着したという事実は`computeSignedDelayMinutes()`が書く符号付き列にしか残らないので、そちらを0で埋めないでください。
 - GTFSカレンダーの読み込み（`gtfsCalendar.js`）は、`config/feeds.js`で有効な各GTFSフィードのディレクトリから読みます。フィード由来のカレンダーは`feedId:service_id`というプレフィックス規約によって機能しており、別のコードパスがあるわけではありません。
 - **有効フィード一覧の取得口は`config/feeds.js`だけです。各サービスが独自に`SELECT ... FROM feeds`を書かないでください。** 同じSQLが複数サービスに重複すると、1箇所でも取り残したときに「サービス間で有効なフィードの認識がずれる」静かなデータ不整合（表示されるのにバスが来ない路線、車両が割り当たらないゴースト便など）を生みます。一覧が欲しくなったら`config/feeds.js`に関数を足してください。
 - **`feeds`テーブルへのUPSERT（`seed.js`の`ensureFeedRows()`）で、`last_fetched_at`/`last_status`/`last_error`を`ON CONFLICT DO UPDATE`のSET句に含めてはいけません。** 含めると再起動のたびに稼働状態がリセットされ、「最後に取得に成功したのはいつか」が失われます。逆に`id`/`feed_type`/`name`/`url`/`enabled`はコードが正で、DBを直接編集しても次回起動時に上書きされます。

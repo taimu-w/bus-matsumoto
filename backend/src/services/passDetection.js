@@ -934,9 +934,12 @@ async function pass() {
   let totalPassed = 0;
   let totalInterpolated = 0;
   let totalVectorConfirmed = 0;
+  let assignmentCount = 0;
+  const startedAt = Date.now();
 
   try {
     const assignments = await getActiveAssignments(client);
+    assignmentCount = assignments.length;
 
     for (const assignment of assignments) {
       const result = await processAssignmentPass(client, assignment, {
@@ -954,7 +957,21 @@ async function pass() {
     client.release();
   }
 
-  return { totalNearby, totalPassed, totalInterpolated, totalVectorConfirmed };
+  // 全割り当てを単一接続で直列処理しているため（既知の制約。P-2）、
+  // 台数増加時にどこまで遅くなっているかを「便あたり何ms」で可視化する
+  // （jobMonitorのlastMetaとして管理画面から見える。計算方法自体は変えていない）。
+  const durationMs = Date.now() - startedAt;
+  const avgMsPerAssignment = assignmentCount > 0 ? Math.round((durationMs / assignmentCount) * 10) / 10 : 0;
+
+  return {
+    totalNearby,
+    totalPassed,
+    totalInterpolated,
+    totalVectorConfirmed,
+    assignmentCount,
+    durationMs,
+    avgMsPerAssignment
+  };
 }
 
 // trip_stop_progress.arrival_method の管理画面向け日本語説明。

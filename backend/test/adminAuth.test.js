@@ -1,9 +1,16 @@
 // 管理画面の認証（services/adminAuth.js）の回帰テスト。
 // DB・ネットワーク・Expressを必要としない部分だけを対象にする。
-// 資格情報は環境変数未設定時のコード既定値（admin / admin123）を前提にしている。
+// ADMIN_PASSWORD未設定時は起動のたびに変わるランダム値になる（S-1対応）ため、
+// このテストでは資格情報を明示的な環境変数で固定してから読み込む。
+process.env.ADMIN_USERNAME = 'admin';
+process.env.ADMIN_PASSWORD = 'admin123';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const adminAuth = require('../src/services/adminAuth');
+
+test('ADMIN_PASSWORDを設定していればランダム生成しない', () => {
+  assert.equal(adminAuth.ADMIN_PASSWORD_AUTO_GENERATED, false);
+});
 
 test('verifyCredentials: 正しい組み合わせだけを通す', () => {
   assert.equal(adminAuth.verifyCredentials('admin', 'admin123'), true);

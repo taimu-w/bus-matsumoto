@@ -151,10 +151,13 @@ async function chooseFreeTextTarget(query) {
       kind: 'spot',
       spotId: spot.spotId,
       order: 2,
+      // 別称（からす城・国宝など）でしか一致しないスポットは name/kana/romaji のスコアが0になるため、
+      // searchTouristSpots が返した一致度（matchScore: 2=前方一致・1=部分一致）も候補スコアに含める。
       score: Math.max(
         scoreNameMatch(spot.name, nq),
         scoreNameMatch(spot.kana, nq),
-        scoreNameMatch(spot.romaji, nq)
+        scoreNameMatch(spot.romaji, nq),
+        spot.matchScore || 0
       )
     })),
     ...routes.map((route) => ({

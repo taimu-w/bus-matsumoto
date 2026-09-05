@@ -25,11 +25,15 @@ GTFSインメモリインデックス（`gtfsTimetable.js`）と `tourist_spots`
 | 種別 | 取得元 | サジェスト | 自由文字列での解決 |
 |---|---|---|---|
 | バス停 | `gtfsTimetable.searchStops()` | ○ | ○（結果ページ） |
-| 観光スポット／その他のスポット | `touristSpots.searchTouristSpots()`（`display_tag` は問わない） | ○ | ○（結果ページ） |
+| 観光スポット／その他のスポット | `touristSpots.searchTouristSpots()`（`display_tag` は問わない。名称・かな・ローマ字に加えて**別称**（`aliases`）でも一致） | ○ | ○（結果ページ） |
 | 路線 | `spotSearch.searchRoutes()`（`routes` テーブルの `name` / `short_name` の正規化テキスト一致） | ○ | ○（リアルタイム時刻表へリダイレクト） |
 
 - バス停・観光スポットの候補検索は **時刻表検索・経路検索とまったく同じ検索体験**（漢字・ひらがな・
   カタカナ・ローマ字、大文字小文字・全半角不問、1文字から、前方一致優先の部分一致）。
+- 観光スポットは名称・かな・ローマ字に加えて **別称**（`tourist_spots.aliases`、「からす城」「国宝」など）
+  でも一致する。別称は候補一致にだけ使い、候補ラベル・結果画面・APIレスポンスには出さない
+  （`serializeRow` に含めない）。かな・ローマ字への変換はしない。詳細は
+  [tourist-spots.md](tourist-spots.md) の `aliases`。
 - **路線には `translations.txt` 相当のよみがな・ローマ字が無い**ため、路線名の一致は
   `utils/kana.js` の `normalizeSearchText()` を通した正規化テキストの一致のみ（実質、漢字・かな入力）。
 - 路線サジェスト・路線解決が返すのは **`routes` テーブルに実在する路線だけ**なので、
@@ -52,6 +56,9 @@ GTFSインメモリインデックス（`gtfsTimetable.js`）と `tourist_spots`
 
 - 自由文字列の最有力候補は `scoreNameMatch()`（完全一致3／前方一致2／部分一致1）で決め、
   **同スコアならバス停 > 観光スポット > 路線**（バス停検索が主目的のため）。
+- 観光スポットは、名称・かな・ローマ字のスコアに加えて `searchTouristSpots()` が返す
+  `matchScore`（別称一致を含む前方一致2／部分一致1）も取り込む。これにより
+  **別称でしか一致しないスポット**（名称スコア0）も自由文字列で解決できる。
 - スポット／バス停に解決したら、その座標を中心に付近のバス停を探す。
 
 ## 4. 付近のバス停と周辺路線
@@ -130,9 +137,11 @@ GTFSインメモリインデックス（`gtfsTimetable.js`）と `tourist_spots`
    詳細は [docs/tourist-spots.md](tourist-spots.md) の「写真表示（カルーセル）」。
    公式サイトリンクのタップは `POST /api/tourist-spots/:id/link-click` へ `sendBeacon`。
    `busstop.js` の周辺観光スポット表示と同じ考え方）
-3. 「この周辺を通る路線」— 重複排除済みの路線チップ（タップでリアルタイム時刻表）
+3. 「この周辺を通る路線」— 重複排除済みの路線を **1行1件で縦に並べる**（左端に路線カラーの帯。
+   リアルタイム運行状況の路線選択画面〔`app.js` の `renderRouteList`〕と同じ見た目。淡い路線カラーが
+   白背景に埋もれないよう帯の縁に薄い暗色の輪郭を重ねる）。タップでリアルタイム時刻表。
 4. 「周辺のバス停」— `primaryStop` ＋ 付近のバス停カード。バス停名 → `/busstop/{stopKey}`（`data-spa`）、
-   路線チップ → リアルタイム時刻表
+   路線チップ → リアルタイム時刻表（こちらは省スペースのため路線カラーのチップのまま）
 
 - 検索欄が空のときは、経路検索・バス停検索と同じくお気に入りバス停・近くのバス停を初期候補に出す
   （soft-fail：取れなければ何も出さない）。
@@ -143,7 +152,7 @@ GTFSインメモリインデックス（`gtfsTimetable.js`）と `tourist_spots`
 
 | メソッド | パス | 概要 |
 |---|---|---|
-| GET | `/api/spot-search/suggest?q=&limit=` | 入力候補。`{ stops, spots, routes }`（`stops`＝`gtfsTimetable.searchStops` の結果、`spots`＝`touristSpots.searchTouristSpots` の結果、`routes`＝`{ qualifiedId, feedId, routeId, name, shortName, color, textColor }`） |
+| GET | `/api/spot-search/suggest?q=&limit=` | 入力候補。`{ stops, spots, routes }`（`stops`＝`gtfsTimetable.searchStops` の結果、`spots`＝`touristSpots.searchTouristSpots` の結果〔`serializeRow` ＋一致度 `matchScore`。別称一致のスポットも含むが別称そのものは返さない〕、`routes`＝`{ qualifiedId, feedId, routeId, name, shortName, color, textColor }`） |
 | GET | `/api/spot-search?spotId=\|stopKey=\|q=&radius=&limit=` | スポット検索の実行。対象がスポットに確定したら検索回数を +1。`{ found, resolvedFrom, origin, spot, primaryStop, nearbyStops, routes, radiusMeters }`、路線解決時は `{ found:true, resolvedFrom:'route', route }`、不一致時は `{ found:false, reason, suggestions:{ stops, spots } }` |
 | GET | `/api/admin/tourist-spots/link-clicks?from=&to=` | （管理）検索回数とリンクタップ回数のマージ集計。[5節](#5-検索回数の計測spot_search_counts) |
 
@@ -158,3 +167,8 @@ GTFSインメモリインデックス（`gtfsTimetable.js`）と `tourist_spots`
   `spotSearch.getSpotEngagementStats()` が担う）。
 - 検索回数の記録は「対象が観光スポット／その他のスポット／バス停に解決したとき」だけ。
   サジェスト（`/api/spot-search/suggest`）では記録しない。
+- **別称（`tourist_spots.aliases`）は `serializeRow` に含めない**＝サジェスト・結果・
+  単発取得（`/api/tourist-spots/:id`）のどのレスポンスにも出さない。候補一致専用。
+  別称でしか一致しないスポットを自由文字列で解決できるよう、`searchTouristSpots()` は
+  結果に `matchScore` を付けて返し、`chooseFreeTextTarget()` がそれを候補スコアに含める
+  （この2点はセット。片方だけ外すと別称一致が黙って壊れる）。

@@ -10,7 +10,7 @@
 // 便起点方式では、処理単位は車両ではなく便への割り当て(assignment)。
 // 候補車両も担当車両と同じように遅延計算を行う（仕様書 9）。
 const pool = require('../config/db');
-const { computeDelayMinutes } = require('../utils/time');
+const { computeDelayMinutes, computeSignedDelayMinutes } = require('../utils/time');
 
 async function delayCalc() {
   const client = await pool.connect();
@@ -27,7 +27,7 @@ async function delayCalc() {
 
     for (const a of assignments.rows) {
       const rows = await client.query(
-        `SELECT stop_id, seq_order, scheduled_time, status, actual_time, delay_minutes
+        `SELECT stop_id, seq_order, scheduled_time, status, actual_time, delay_minutes, signed_delay_minutes
          FROM trip_stop_progress
          WHERE assignment_id = $1
          ORDER BY seq_order ASC`,
@@ -35,32 +35,40 @@ async function delayCalc() {
       );
 
       let latestDelay = null;
+      // 便レベルの符号付き遅延は「最後に確定したバス停の符号付き差分」。
+      // signed_delay_minutes 導入前に確定した行は null のままなので、
+      // その場合は latestSignedDelay も null に落とす（0で埋めない＝不明を残す）。
+      let latestSignedDelay = null;
       let changed = false;
 
       for (const r of rows.rows) {
         if (r.delay_minutes !== null && r.delay_minutes !== undefined) {
           latestDelay = r.delay_minutes;
+          latestSignedDelay = r.signed_delay_minutes ?? null;
           continue;
         }
 
         if (r.status !== '到着済' || !r.actual_time || !r.scheduled_time) continue;
 
-        const result = computeDelayMinutes(r.scheduled_time, r.actual_time);
-        if (result === null) continue;
+        const signed = computeSignedDelayMinutes(r.scheduled_time, r.actual_time);
+        if (signed === null) continue;
+        const result = Math.max(0, signed);
 
         await client.query(
-          `UPDATE trip_stop_progress SET delay_minutes = $1 WHERE assignment_id = $2 AND stop_id = $3`,
-          [result, a.assignment_id, r.stop_id]
+          `UPDATE trip_stop_progress SET delay_minutes = $1, signed_delay_minutes = $2
+           WHERE assignment_id = $3 AND stop_id = $4`,
+          [result, signed, a.assignment_id, r.stop_id]
         );
         latestDelay = result;
+        latestSignedDelay = signed;
         changed = true;
       }
 
       if (latestDelay !== null) {
-        await client.query(`UPDATE trip_vehicle_assignments SET delay_minutes = $1 WHERE id = $2`, [
-          latestDelay,
-          a.assignment_id
-        ]);
+        await client.query(
+          `UPDATE trip_vehicle_assignments SET delay_minutes = $1, signed_delay_minutes = $2 WHERE id = $3`,
+          [latestDelay, latestSignedDelay, a.assignment_id]
+        );
       }
       if (changed) updatedAssignments++;
     }

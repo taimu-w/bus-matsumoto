@@ -130,7 +130,7 @@ async function updateSegmentStats(client) {
     // 集計する。候補車両止まりの記録を混ぜると、別経路をたまたま走っていた車両の所要時間で
     // 区間統計が汚染される。また担当が切り替わった便で同じ区間を二重計上することも防げる。
     const pending = await client.query(
-      `SELECT id, day_of_week, day_type FROM completed_trips
+      `SELECT id, day_of_week, day_type, daily_trip_id FROM completed_trips
        WHERE aggregated = FALSE AND is_official = TRUE
        ORDER BY id ASC LIMIT 200
        FOR UPDATE SKIP LOCKED`
@@ -146,11 +146,21 @@ async function updateSegmentStats(client) {
     const maxSamples = getRuntimeSetting('SEGMENT_STATS_MAX_SAMPLES');
 
     for (const trip of pending.rows) {
+      // is_through（真の通過＝乗車も降車もできない停車）はcompleted_trip_stop_times自体には
+      // 持たせていない（trip_stop_progress.statusはGPS到着確定で'通過'から書き換わってしまい、
+      // アーカイブ時点では区別が残らないため）。daily_trip_stop_times側の当日分コピーを
+      // daily_trip_id + stop_idで引き当てて判定する。該当便がDAILY_TRIP_RETENTION_DAYS経過で
+      // 既に掃除されていた場合はLEFT JOINが不一致になりCOALESCEでFALSE（=従来どおり除外なし）
+      // にフォールバックする。集計は便のクローズ直後に行われるため実際には起こらない。
       const stopTimes = await client.query(
-        `SELECT stop_id, seq_order, actual_minutes FROM completed_trip_stop_times
-         WHERE completed_trip_id = $1 AND actual_minutes IS NOT NULL
-         ORDER BY seq_order ASC`,
-        [trip.id]
+        `SELECT cts.stop_id, cts.seq_order, cts.actual_minutes,
+                COALESCE(dtst.is_through, FALSE) AS is_through
+           FROM completed_trip_stop_times cts
+           LEFT JOIN daily_trip_stop_times dtst
+             ON dtst.daily_trip_id = $2 AND dtst.stop_id = cts.stop_id
+          WHERE cts.completed_trip_id = $1 AND cts.actual_minutes IS NOT NULL
+          ORDER BY cts.seq_order ASC`,
+        [trip.id, trip.daily_trip_id]
       );
       const rows = stopTimes.rows;
       // day_type は祝日カレンダー反映済み（finishService.jsのarchiveAssignment()参照）。
@@ -162,6 +172,10 @@ async function updateSegmentStats(client) {
         const from = rows[i];
         const to = rows[i + 1];
         if (to.seq_order - from.seq_order !== 1) continue; // 隣接区間のみ統計対象にする
+        // 真の通過（乗降不可）バス停を挟む区間は統計から除外する。GPS通過判定自体は
+        // is_throughのバス停も候補から除外しない設計だが（docs/pass-detection.md）、
+        // そこで確定した実績時刻をETA予測の学習データに混ぜるかどうかは別の判断。
+        if (from.is_through || to.is_through) continue;
 
         let diffMin = to.actual_minutes - from.actual_minutes;
         if (diffMin < 0) diffMin += 24 * 60;
@@ -211,6 +225,65 @@ async function getSegmentStat(client, fromStopId, toStopId, dayType, hourBucket)
   );
   if (res.rows.length === 0) return null;
   return res.rows[0];
+}
+
+/**
+ * 【プリコンピュート1周期ぶんの共有データ】
+ * predictArrivals() は本来、未到着バス停ごとに getSegmentStat() を1クエリずつ発行し
+ * （N+1）、さらに割り当てごとに getRecentSegmentPerformance()（全active割り当て＋直近
+ * 終了ぶんの trip_stop_progress の全スキャン）を呼び直していた。担当・候補の両方を
+ * 計算するため割り当て数がそのまま2〜3倍に効き、実質 O(便数²) になってピーク時に
+ * パイプライン⑧がポーリング間隔を食い潰していた。
+ *
+ * ここで「1周期に1回だけ」まとめて読み、以降は各 predictArrivals() へ渡して使い回す。
+ * アルゴリズム本体（区間ごとの判断）は一切変えず、データの取得回数だけを減らす。
+ *
+ * - 区間統計: 対象割り当てが実際に持つ停留所どうしの組に限定して1クエリで読み、
+ *   プロセス内Mapに載せる（`segment_travel_stats` の主キー前半 from_stop_id で引ける）。
+ *   カバー範囲外の停留所・別の曜日区分を問われたときだけ従来どおり個別クエリへ落ちる
+ *   ため、結果は常に個別クエリと一致する。
+ * - 周辺道路実績: 除外なしで1回だけ取得し、対象割り当て自身の除外は JS 側の
+ *   assignmentId フィルタで行う（SQL側の `a.id != $1` と同値）。
+ *
+ * この関数が失敗しても呼び出し側は null を渡すだけで、predictArrivals() は従来どおり
+ * 個別クエリで動く（性能が戻るだけで結果は変わらない）。
+ *
+ * @returns {Promise<{dayType, statByKey: Map, coveredStopIds: Set, recentSegments: Array}|null>}
+ */
+async function buildPredictionContext(client, assignmentIds) {
+  if (!Array.isArray(assignmentIds) || assignmentIds.length === 0) return null;
+
+  const holidaySet = await loadHolidaySet(client);
+  const dayType = getDayType(new Date(), holidaySet);
+
+  const stopIdRes = await client.query(
+    `SELECT DISTINCT stop_id FROM trip_stop_progress WHERE assignment_id = ANY($1::bigint[])`,
+    [assignmentIds]
+  );
+  const coveredStopIdList = stopIdRes.rows.map((r) => r.stop_id);
+  const coveredStopIds = new Set(coveredStopIdList);
+
+  const statByKey = new Map();
+  if (coveredStopIdList.length > 0) {
+    const statRes = await client.query(
+      `SELECT from_stop_id, to_stop_id, hour_bucket, sample_count, avg_seconds
+         FROM segment_travel_stats
+        WHERE day_type = $1
+          AND from_stop_id = ANY($2::int[])
+          AND to_stop_id = ANY($2::int[])`,
+      [dayType, coveredStopIdList]
+    );
+    for (const row of statRes.rows) {
+      statByKey.set(`${row.from_stop_id}|${row.to_stop_id}|${row.hour_bucket}`, {
+        sample_count: row.sample_count,
+        avg_seconds: row.avg_seconds
+      });
+    }
+  }
+
+  const recentSegments = await getRecentSegmentPerformance(client);
+
+  return { dayType, statByKey, coveredStopIds, recentSegments };
 }
 
 /**
@@ -335,7 +408,7 @@ const RECENTLY_ENDED_MINUTES = 90;
  * メッシュ可視化（services/delayMesh.js）の共通データソース。前者は対象の割り当て自身を
  * 除外する（excludeAssignmentId）が、後者はシステム全体を俯瞰するため除外対象を持たない。
  *
- * @returns {Promise<Array<{fromStopId, toStopId, midLat, midLon, bearing, toMinutes, ratio}>>}
+ * @returns {Promise<Array<{assignmentId, fromStopId, toStopId, midLat, midLon, bearing, toMinutes, ratio}>>}
  */
 async function getRecentSegmentPerformance(client, { excludeAssignmentId = null } = {}) {
   const res = await client.query(
@@ -372,6 +445,9 @@ async function getRecentSegmentPerformance(client, { excludeAssignmentId = null 
       if (scheduledDiff <= 0 || actualDiff <= 0 || actualDiff > 60) continue;
 
       segments.push({
+        // どの割り当ての実績かを持たせておく。プリコンピュートは除外なしで1回だけ
+        // 取得し、対象割り当て自身の除外（SQLの `a.id != $1`）をこの値で行うため。
+        assignmentId: from.assignment_id,
         fromStopId: from.stop_id,
         toStopId: to.stop_id,
         midLat: (from.lat + to.lat) / 2,
@@ -523,7 +599,28 @@ const EMPTY_PACE_INFO = {
   combinedPaceFactor: null
 };
 
-async function predictArrivals(client, assignmentId) {
+/**
+ * @param {object} client - PostgreSQLクライアント
+ * @param {number|string} assignmentId - 割り当てID
+ * @param {object|null} context - buildPredictionContext() が用意した1周期ぶんの共有データ。
+ *   省略・null のときは従来どおり必要なぶんを個別クエリで読む（結果は同じ）。
+ */
+async function predictArrivals(client, assignmentId, context = null) {
+  // 区間統計の参照口。共有データがあればプロセス内Mapから引き、無ければ従来の個別クエリ。
+  // Mapのカバー範囲外（別の曜日区分・共有データ作成後に増えた停留所）は個別クエリへ落として、
+  // 「Mapに無い＝統計が無い」と取り違えないようにする。
+  const lookupSegmentStat = (fromStopId, toStopId, requestDayType, hourBucket) => {
+    if (
+      context &&
+      context.dayType === requestDayType &&
+      context.coveredStopIds.has(fromStopId) &&
+      context.coveredStopIds.has(toStopId)
+    ) {
+      return context.statByKey.get(`${fromStopId}|${toStopId}|${hourBucket}`) || null;
+    }
+    return getSegmentStat(client, fromStopId, toStopId, requestDayType, hourBucket);
+  };
+
   const rows = await client.query(
     `SELECT p.stop_id, p.seq_order, p.scheduled_time, p.status, p.actual_time,
             s.name, s.lat, s.lon,
@@ -566,7 +663,7 @@ async function predictArrivals(client, assignmentId) {
       if (actualDiff < 0) actualDiff += 24 * 60;
 
       const hourBucket = Math.floor(toMin / 60) % 24;
-      const stat = await getSegmentStat(client, from.stop_id, to.stop_id, dayType, hourBucket);
+      const stat = await lookupSegmentStat(from.stop_id, to.stop_id, dayType, hourBucket);
       let baseline = null;
       if (stat && stat.sample_count >= MIN_SAMPLES_FOR_TRUST) {
         baseline = stat.avg_seconds / 60;
@@ -616,7 +713,12 @@ async function predictArrivals(client, assignmentId) {
   // 以降の区間ループで使い回す（区間ごとにSQLを投げ直さない）。始発前（上のreturn）
   // では不要なため、ここまで到達した＝実際に残り区間の計算が必要な便だけが取得する。
   const todayPreviousTripFactor = await getTodayPreviousTripFactor(client, tripContext, assignmentId);
-  const nearbyCandidateSegments = await getRecentSegmentPerformance(client, { excludeAssignmentId: assignmentId });
+  // 周辺道路実績は、プリコンピュートでは1周期に1回だけ取得したものを共有し、対象割り当て
+  // 自身の除外だけをここで行う（SQL側の `a.id != $1` と同値。assignment_idはbigint＝
+  // 文字列で返るため、呼び出し元が数値を渡した場合も揃うようString比較にする）。
+  const nearbyCandidateSegments = context
+    ? context.recentSegments.filter((seg) => String(seg.assignmentId) !== String(assignmentId))
+    : await getRecentSegmentPerformance(client, { excludeAssignmentId: assignmentId });
   const nowTokyo = nowInTokyo();
   const nowMinutes = nowTokyo.hour * 60 + nowTokyo.minute;
 
@@ -691,7 +793,7 @@ async function predictArrivals(client, assignmentId) {
       }
     } else {
       const hourBucket = Math.floor(cursorMinutes / 60) % 24;
-      const stat = await getSegmentStat(client, prevStop.stop_id, s.stop_id, dayType, hourBucket);
+      const stat = await lookupSegmentStat(prevStop.stop_id, s.stop_id, dayType, hourBucket);
 
       // 【追加要素①②の適用】liveFactorに、今日の前便実績・周辺道路実績を
       // 動的な重みでブレンドした補正係数。両方欠損時はliveFactorそのものに一致する。
@@ -857,9 +959,20 @@ async function computeAndStoreAllArrivals() {
        WHERE a.state = 'active' ORDER BY a.id ASC`
     );
 
+    // 1周期ぶんの共有データ（区間統計・周辺道路実績）をここで1回だけ用意する。
+    // 失敗した場合は null のまま進め、predictArrivals() が従来どおり個別クエリで
+    // 読む（遅くなるだけで結果は変わらない）ので、ETA配信は止めない。
+    let context = null;
+    try {
+      context = await buildPredictionContext(client, assignments.rows.map((a) => a.id));
+    } catch (err) {
+      console.error('[etaPredictor] 共有データの事前読み込みに失敗しました（個別クエリで継続）:', err.message);
+      context = null;
+    }
+
     for (const assignment of assignments.rows) {
       try {
-        const arrivals = await predictArrivals(client, assignment.id);
+        const arrivals = await predictArrivals(client, assignment.id, context);
         if (arrivals.length === 0) {
           computed++;
           continue;
@@ -927,18 +1040,36 @@ async function computeAndStoreAllArrivals() {
       }
     }
 
-    // 48時間以上前の予測は掃除する（便がclosedになった場合のトリップCASCADE削除の
-    // 補完。カスケード対象外の孤児レコードが残る経路は無いはずだが保険）
+    console.log(
+      `[etaPredictor] ETA プリコンピュート完了: ${computed} 割り当て / ${stored} レコード保存 ` +
+        `(${Date.now() - startedAt}ms)`
+    );
+
+    return { computed, stored };
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * 48時間以上前の予測を掃除する（便がclosedになった場合のトリップCASCADE削除の
+ * 補完。カスケード対象外の孤児レコードが残る経路は無いはずだが保険）。
+ *
+ * 以前は computeAndStoreAllArrivals() の末尾で毎周期（既定60秒）実行していたが、
+ * 48時間保持のデータに対して60秒間隔の削除は過剰だった（既知 P-6）。
+ * 他の保持期間ベースの掃除（GPSログ・完了便アーカイブ等）と同じ1時間間隔の
+ * scheduler.js クリーンアップタイマーへ移した。削除対象・削除条件は変えていない。
+ */
+async function purgeOldPredictions() {
+  const client = await pool.connect();
+  try {
     const deleted = await client.query(
       `DELETE FROM trip_arrival_predictions WHERE computed_at < now() - interval '48 hours'`
     );
-
-    console.log(
-      `[etaPredictor] ETA プリコンピュート完了: ${computed} 割り当て / ${stored} レコード保存 ` +
-        `/ ${deleted.rowCount} 古いレコード削除 (${Date.now() - startedAt}ms)`
-    );
-
-    return { computed, stored, deleted: deleted.rowCount };
+    if (deleted.rowCount > 0) {
+      console.log(`[etaPredictor] 古い予測レコードを ${deleted.rowCount} 件削除しました。`);
+    }
+    return { deleted: deleted.rowCount };
   } finally {
     client.release();
   }
@@ -993,6 +1124,7 @@ module.exports = {
   updateSegmentStats,
   predictArrivals,
   computeAndStoreAllArrivals,
+  purgeOldPredictions,
   getArrivalsForAssignment,
   describeSource,
   SOURCE_INFO,
