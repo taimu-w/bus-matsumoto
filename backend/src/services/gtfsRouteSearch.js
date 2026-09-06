@@ -1103,6 +1103,31 @@ function flagTransferRisks(journey, minTransferSeconds = MIN_TRANSFER_SECONDS) {
 }
 
 /**
+ * 区間の「表示上の」出発秒。バス区間にリアルタイムの予測発車時刻があればそれを（日跨ぎを
+ * 揃えた秒で）、無ければ定刻を返す。徒歩区間の秒は attachRealtime() が直前のバス遅延ぶんだけ
+ * 既にずらしているのでそのまま返す。
+ *
+ * journey.departureSeconds / journey.arrivalSeconds は「1本前/1本後」の再検索アンカーが
+ * 定刻前提のため定刻のまま保持する。所要時間の表示や、末尾スポット徒歩の起点にはこの関数を使う。
+ */
+function legDisplayDepartureSeconds(leg) {
+  if (leg && leg.type === 'bus' && leg.realtime && leg.realtime.predictedDepartureTime) {
+    const s = alignPredictedSeconds(leg.realtime.predictedDepartureTime, leg.departureSeconds);
+    if (Number.isFinite(s)) return s;
+  }
+  return leg ? leg.departureSeconds : null;
+}
+
+/** 区間の「表示上の」到着秒（legDisplayDepartureSeconds の到着版）。 */
+function legDisplayArrivalSeconds(leg) {
+  if (leg && leg.type === 'bus' && leg.realtime && leg.realtime.predictedArrivalTime) {
+    const s = alignPredictedSeconds(leg.realtime.predictedArrivalTime, leg.arrivalSeconds);
+    if (Number.isFinite(s)) return s;
+  }
+  return leg ? leg.arrivalSeconds : null;
+}
+
+/**
  * 当日の運行実績・予測を重ねる。失敗しても定刻表示のまま成立させる（soft-fail）。
  */
 async function attachRealtime(journeys, minTransferSeconds = MIN_TRANSFER_SECONDS) {
@@ -1229,16 +1254,9 @@ async function attachRealtime(journeys, minTransferSeconds = MIN_TRANSFER_SECOND
       journey.departureTime = firstLeg.departureTime;
       journey.arrivalTime = lastLeg.arrivalTime;
 
-      const effectiveDepartureSeconds =
-        firstLeg.type === 'bus' && firstLeg.realtime && firstLeg.realtime.predictedDepartureTime
-          ? alignPredictedSeconds(firstLeg.realtime.predictedDepartureTime, firstLeg.departureSeconds) ??
-            firstLeg.departureSeconds
-          : firstLeg.departureSeconds;
-      const effectiveArrivalSeconds =
-        lastLeg.type === 'bus' && lastLeg.realtime && lastLeg.realtime.predictedArrivalTime
-          ? alignPredictedSeconds(lastLeg.realtime.predictedArrivalTime, lastLeg.arrivalSeconds) ??
-            lastLeg.arrivalSeconds
-          : lastLeg.arrivalSeconds; // 徒歩区間ならこの時点で既に上の伝播でずらし済み
+      // 末尾が徒歩区間なら、その秒はこの時点で既に上の伝播でずらし済み（legDisplay* はそのまま返す）。
+      const effectiveDepartureSeconds = legDisplayDepartureSeconds(firstLeg);
+      const effectiveArrivalSeconds = legDisplayArrivalSeconds(lastLeg);
       journey.durationMinutes = Math.max(1, Math.round((effectiveArrivalSeconds - effectiveDepartureSeconds) / 60));
 
       journey.delayMinutes = journey.legs
@@ -1565,9 +1583,18 @@ function serializeSpotRef(spot) {
  * 観光スポット起点/終点の経路に、スポット⇔実際に採用されたバス停間の徒歩レグを
  * 先頭/末尾へ組み込む（観光スポット情報_仕様書）。従来は注記文言だけで案内していたが、
  * 経路そのものの一部として表示するため legs 配列・所要時間・徒歩分数を更新する。
+ *
+ * attachRealtime() の後に呼ばれる。末尾スポット徒歩は、最後のバス区間がリアルタイムで
+ * 遅れていればその予測到着（legDisplayArrivalSeconds）を起点にする。定刻の
+ * journey.arrivalSeconds をそのまま起点にすると、遅延ぶんが末尾の徒歩・スポット到着へ
+ * 伝わらず、画面上「バスの時刻だけ遅れて徒歩以降は定刻のまま」というちぐはぐな表示になる。
+ * 先頭スポット徒歩は逆に定刻の発車に間に合う時刻を起点にする（バスが定刻へ戻ったときに
+ * 乗り遅れないよう、遅延ぶん後ろ倒ししない）。
  */
 function attachSpotWalkLegs(ranked, origin, destination) {
   for (const journey of ranked) {
+    let changed = false;
+
     if (origin.viaSpot) {
       const firstLeg = journey.legs[0];
       const info = buildSpotWalkInfo(origin, firstLeg.fromStop.stopKey);
@@ -1591,7 +1618,7 @@ function attachSpotWalkLegs(ranked, origin, destination) {
         journey.departureTime = formatTime(departureSeconds);
         journey.departureDayOffset = dayOffsetOf(departureSeconds);
         journey.walkMinutes += info.walkMinutes;
-        journey.durationMinutes = Math.max(1, Math.round((journey.arrivalSeconds - departureSeconds) / 60));
+        changed = true;
       }
     }
 
@@ -1599,7 +1626,11 @@ function attachSpotWalkLegs(ranked, origin, destination) {
       const lastLeg = journey.legs[journey.legs.length - 1];
       const info = buildSpotWalkInfo(destination, lastLeg.toStop.stopKey);
       if (info) {
-        const departureSeconds = journey.arrivalSeconds;
+        // 定刻ベースの起点（「1本前/1本後」の再検索アンカー用に journey.arrivalSeconds は
+        // 定刻のまま持ち回す）と、表示上の起点（リアルタイム遅延を含む）を分ける。
+        const scheduledDeparture = journey.arrivalSeconds;
+        const displayDeparture = legDisplayArrivalSeconds(lastLeg);
+        const departureSeconds = Number.isFinite(displayDeparture) ? displayDeparture : scheduledDeparture;
         const arrivalSeconds = departureSeconds + info.walkMinutes * 60;
         journey.legs.push({
           type: 'walk',
@@ -1614,11 +1645,21 @@ function attachSpotWalkLegs(ranked, origin, destination) {
           departureDayOffset: dayOffsetOf(departureSeconds),
           arrivalDayOffset: dayOffsetOf(arrivalSeconds)
         });
-        journey.arrivalSeconds = arrivalSeconds;
+        journey.arrivalSeconds = scheduledDeparture + info.walkMinutes * 60;
         journey.arrivalTime = formatTime(arrivalSeconds);
         journey.arrivalDayOffset = dayOffsetOf(arrivalSeconds);
         journey.walkMinutes += info.walkMinutes;
-        journey.durationMinutes = Math.max(1, Math.round((arrivalSeconds - journey.departureSeconds) / 60));
+        changed = true;
+      }
+    }
+
+    // 所要時間の表示は「表示上の出発〜到着」で引き直す（定刻の journey.*Seconds ではなく
+    // 先頭・末尾区間の表示秒。リアルタイム遅延を含んだ値になる）。
+    if (changed) {
+      const dep = legDisplayDepartureSeconds(journey.legs[0]);
+      const arr = legDisplayArrivalSeconds(journey.legs[journey.legs.length - 1]);
+      if (Number.isFinite(dep) && Number.isFinite(arr)) {
+        journey.durationMinutes = Math.max(1, Math.round((arr - dep) / 60));
       }
     }
   }
@@ -1759,13 +1800,19 @@ async function searchJourneys(options = {}) {
   // preferences は成否にかかわらず必ず返す（画面が現在の詳細設定を復元・表示するのに使う）
   // gtfsValidity: 選択された日付が現在のGTFSデータの有効期間外なら、画面で
   // 「ダイヤが変更される可能性がある」旨を注意喚起する（成否にかかわらず返す）。
+  // viaSpotFrom / viaSpotTo: 観光スポットを出発地／目的地にした場合の元スポット
+  // （spotId＋name）。見出し「◯◯ → △△」を実際に乗降するバス停名ではなくスポット名で
+  // 出すために使う。成否にかかわらず返し、成立した検索では下で徒歩距離・分数付きの版へ
+  // 差し替える。
   const common = {
     date: dateStr,
     baseTime,
     isToday,
     timeMode,
     preferences: serializePreferences(preferences),
-    gtfsValidity: describeDateValidity(index, dateStr)
+    gtfsValidity: describeDateValidity(index, dateStr),
+    viaSpotFrom: origin.viaSpot ? { spotId: origin.viaSpot.spotId, name: origin.viaSpot.name } : null,
+    viaSpotTo: destination.viaSpot ? { spotId: destination.viaSpot.spotId, name: destination.viaSpot.name } : null
   };
 
   if (origin.groups.length === 0 || destination.groups.length === 0) {
@@ -1903,7 +1950,8 @@ async function searchJourneys(options = {}) {
     from: serializeEndpoint(index.groups.get(actualFromKey) || origin.groups[0]),
     to: serializeEndpoint(index.groups.get(actualToKey) || destination.groups[0]),
     // 観光スポットを起点/終点にした場合の元スポット情報（観光スポット情報_仕様書）。
-    // 「〈松本城〉から徒歩○分の△△バス停発」のような注記に使う。
+    // common の版（spotId＋name のみ）を、実際に採用したバス停までの徒歩距離・分数付きへ
+    // 差し替える。「〈松本城〉から徒歩○分の△△バス停発」のような注記に使う。
     viaSpotFrom: origin.viaSpot
       ? { spotId: origin.viaSpot.spotId, name: origin.viaSpot.name, ...buildSpotWalkInfo(origin, actualFromKey) }
       : null,
@@ -2080,6 +2128,9 @@ module.exports = {
   searchRouteSearchStops,
   // 回帰テスト用（DB・GTFSインデックスに依存しない純ロジック）
   mergeConsecutiveWalkLegs,
+  attachSpotWalkLegs,
+  legDisplayDepartureSeconds,
+  legDisplayArrivalSeconds,
   // 調査・将来の再利用向け
   getSearchIndex
 };

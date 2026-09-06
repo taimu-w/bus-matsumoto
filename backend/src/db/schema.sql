@@ -122,6 +122,14 @@ CREATE TABLE IF NOT EXISTS route_realtime_suspensions (
 -- seq_orderは路線内の表示順専用（一覧表示・バス停マップの並び替えにのみ使う）。
 -- 便ごとの実際の停車順（枝分かれ・逆回りで異なりうる）はschedule_stop_times.stop_sequenceを
 -- 参照すること。seq_orderをその用途に使わないこと（停車パターンの異なる便で順序が壊れる）。
+--
+-- ⚠️ stops(id) を参照する子テーブル（daily_trips.start_stop_id / daily_trip_stop_times /
+-- trip_stop_progress / trip_gps_matches / completed_trip_stop_times / segment_travel_stats）は
+-- すべて意図的に ON DELETE NO ACTION（＝CASCADE も SET NULL もしない）である。GTFSから消えた
+-- バス停の掃除は seed.js の seedStopsAndTimetable() が「どこからも参照されていない stops 行だけ」を
+-- NOT EXISTS ガード付きで DELETE する方式（G-4）に一本化してあり、CASCADE を張ると当日便・
+-- 進行中の割り当て・保持期間内の実績を巻き込んで消してしまう。trip_arrival_predictions /
+-- trip_arrival_prediction_log の stop_id だけは短命な予測データなので CASCADE でよい（例外）。
 CREATE TABLE IF NOT EXISTS stops (
   id            SERIAL PRIMARY KEY,
   route_id      TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
@@ -322,21 +330,30 @@ CREATE TABLE IF NOT EXISTS display_abbreviations (
 
 -- 観測されている物理車両。便との紐付けは trip_vehicle_assignments が持つ。
 -- 運行終了しても行は削除せず status='inactive' にする（1台が複数便に関与するため）。
+--
+-- 一意キーは (feed_id, car_id) ＝ 位置情報フィード内で car_id が指す物理車両1台につき1行。
+-- 系統（route）は物理車両の属性ではなく測位ごとの観測値なので vehicle_gps_log.route_id
+-- が正であり、この行の route_id / direction_id は「直近に観測した値」を保持するだけ
+-- （表示・既存クエリ互換用）。系統表示が切り替わる前後で行が割れないようにするための構成
+-- （system-review-2026-09 DB-5 / 旧 known-issues M-9）。feed_id は直近に生ログが無い引退車両で
+-- NULL のことがある（無害。次に測位が届けば getOrCreateVehicle がそのフィードで確定させる）。
 CREATE TABLE IF NOT EXISTS vehicles (
   id                  SERIAL PRIMARY KEY,
-  route_id            TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  feed_id             TEXT,             -- 観測元の位置情報フィードID（config/feeds.js の LOCATION_FEEDS）
+  route_id            TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,   -- 直近に観測した系統（qualified route id）。候補検索の系統の正は vehicle_gps_log.route_id
   car_id              TEXT NOT NULL,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  direction_id        INTEGER,          -- 位置情報CSVから解決した方向。NULLは方向不明／方向を使わない路線
+  direction_id        INTEGER,          -- 直近に観測した方向。NULLは方向不明／方向を使わない路線
   direction_raw       TEXT,             -- 位置情報CSVの方向列の生値（設定ミス調査用）
   last_gps_at         TIMESTAMPTZ,      -- 直近GPS時刻
   status              TEXT NOT NULL DEFAULT 'active',   -- 'active' | 'inactive'
-  UNIQUE (route_id, car_id)
+  UNIQUE (feed_id, car_id)
 );
+CREATE INDEX IF NOT EXISTS idx_vehicles_car ON vehicles(car_id);
 
 -- 管理画面で車両ID（car_id）に付ける名前・メモ。
--- vehicles は路線ごとに行が分かれ、運行終了で status='inactive' になって同じ車両が
--- 別の行として現れうるため、名前・メモは物理的な車両IDである car_id をキーにする。
+-- vehicles は位置情報フィードごとに行が分かれるため、名前・メモは物理的な車両IDである
+-- car_id をキーにする（1事業者内では car_id が物理車両を一意に指す）。
 -- 運行ダッシュボードの便詳細セクションでは、名前を持つ車両を car_id ではなく名前で表示し、
 -- 名前タップでメモを表示する。
 CREATE TABLE IF NOT EXISTS vehicle_labels (
@@ -391,9 +408,14 @@ CREATE INDEX IF NOT EXISTS idx_positions_raw_processed ON vehicle_positions_raw(
 CREATE INDEX IF NOT EXISTS idx_positions_raw_carid ON vehicle_positions_raw(car_id);
 
 -- 車両ごとに整理された走行ログ。
+-- route_id は「その測位が位置情報CSV上でどの系統として届いたか」の観測値（qualified route id）。
+-- 車両割り当ての候補検索は vehicles.route_id ではなくこの列を系統一致の正として使う
+-- （物理車両1台が複数系統を跨ぐため。system-review-2026-09 DB-5）。過去分のバックフィル漏れで
+-- NULL になりうる（その行は系統一致の候補検索に出ないだけ）。
 CREATE TABLE IF NOT EXISTS vehicle_gps_log (
   id                BIGSERIAL PRIMARY KEY,
   vehicle_id        INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+  route_id          TEXT,
   received_time     TEXT NOT NULL,
   gps_time          TEXT NOT NULL,
   gps_time_ts       TIMESTAMPTZ NOT NULL,
@@ -402,11 +424,13 @@ CREATE TABLE IF NOT EXISTS vehicle_gps_log (
 );
 -- (vehicle_id, gps_time_ts) は一意（既知 M-7: 同一測位の重複蓄積防止）。
 -- 書き込み側（vehicleAssigner.js）は ON CONFLICT DO NOTHING で無視する。
--- ⚠️ この索引は意図的にここへ書かない。CREATE TABLEと違い CREATE INDEX は
+-- ⚠️ この一意索引は意図的にここへ書かない。CREATE TABLEと違い CREATE INDEX は
 -- テーブルが既存でも毎回実行されるため、ここに書くと「既存DBに残る重複行を
 -- migrate.jsのステップ42が削除する前」に索引作成が走ってしまい、
 -- 重複データが残る既存環境で毎回失敗する。新規DB・既存DBのどちらも
 -- migrate.js（重複削除→索引作成の順を保証する）側で作成する。
+-- 系統別の候補検索用インデックス idx_gps_log_route_time も migrate.js 側で作成する
+-- （既存DBには route_id 列が無い状態で schema.sql が流れるため）。
 
 -- ==========================================================
 -- 便起点の車両割り当て（GTFS便を先に生成し、車両を後から割り当てる）
@@ -421,9 +445,12 @@ CREATE TABLE IF NOT EXISTS daily_trips (
   schedule_trip_id    INTEGER NOT NULL REFERENCES schedule_trips(id) ON DELETE CASCADE,
   service_id          TEXT NOT NULL,
   origin              TEXT NOT NULL DEFAULT 'static',   -- 'static' | 'frequency'
-  frequency_index     INTEGER NOT NULL DEFAULT 0,       -- 仮想便の連番（通常便は0）
-  offset_minutes      INTEGER NOT NULL DEFAULT 0,       -- 元tripの始発時刻からのシフト量（分）
-  start_stop_id       INTEGER NOT NULL REFERENCES stops(id),
+  frequency_index     INTEGER NOT NULL DEFAULT 0,       -- 仮想便の連番（通常便は0）。表示・ログ用のメタ情報で、
+                                                        -- 便の同一性は表さない（frequencies.txt の内容が変わると連番の
+                                                        -- 指す先がずれるため。一意キーには offset_minutes を使う）
+  offset_minutes      INTEGER NOT NULL DEFAULT 0,       -- 元tripの始発時刻からのシフト量（分）。通常便は0。
+                                                        -- frequencies由来の仮想便の同一性はこの値で表す
+  start_stop_id       INTEGER NOT NULL REFERENCES stops(id) ON DELETE NO ACTION,
   start_time          TEXT NOT NULL,                    -- "H:mm"（既存表記との互換用）
   start_at            TIMESTAMPTZ NOT NULL,             -- 実時刻（24時超え便も正しく表現できる）
   headsign            TEXT,
@@ -433,7 +460,12 @@ CREATE TABLE IF NOT EXISTS daily_trips (
   assigned_at         TIMESTAMPTZ,
   closed_at           TIMESTAMPTZ,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (service_date, schedule_trip_id, frequency_index)
+  -- 便の同一性は「始発時刻からのオフセット」で表す。frequency_index（生成時の連番）を
+  -- 含めると、frequencies.txt の start_time / headway が変わったとき ON CONFLICT が
+  -- 走行中でない別インスタンスの行に当たり、定刻が別の便のものに書き換わる（G-1 の
+  -- schedule_trips.trip_index と同型の位置依存キー問題）。通常便は offset_minutes=0 で
+  -- schedule_trip あたり1行なので、この変更で既存の挙動は変わらない。
+  UNIQUE (service_date, schedule_trip_id, offset_minutes)
 );
 CREATE INDEX IF NOT EXISTS idx_daily_trips_pending ON daily_trips(service_date, assignment_state, start_at);
 CREATE INDEX IF NOT EXISTS idx_daily_trips_route ON daily_trips(route_id, service_date);
@@ -442,7 +474,7 @@ CREATE INDEX IF NOT EXISTS idx_daily_trips_route ON daily_trips(route_id, servic
 -- 以降の全処理はこのテーブルだけを見れば良く、仮想便と通常便を区別しない。
 CREATE TABLE IF NOT EXISTS daily_trip_stop_times (
   daily_trip_id  BIGINT NOT NULL REFERENCES daily_trips(id) ON DELETE CASCADE,
-  stop_id        INTEGER NOT NULL REFERENCES stops(id),
+  stop_id        INTEGER NOT NULL REFERENCES stops(id) ON DELETE NO ACTION,
   seq_order      INTEGER NOT NULL,
   scheduled_time TEXT,                          -- "H:mm"。schedule_stop_times.scheduled_time と同じく
                                                  -- 通常は常に実時刻が入る
@@ -495,7 +527,7 @@ CREATE INDEX IF NOT EXISTS idx_assignments_recently_ended ON trip_vehicle_assign
 -- actual_timeの補完・遡及昇格に使う）。
 CREATE TABLE IF NOT EXISTS trip_stop_progress (
   assignment_id  BIGINT NOT NULL REFERENCES trip_vehicle_assignments(id) ON DELETE CASCADE,
-  stop_id        INTEGER NOT NULL REFERENCES stops(id),
+  stop_id        INTEGER NOT NULL REFERENCES stops(id) ON DELETE NO ACTION,
   seq_order      INTEGER NOT NULL,
   scheduled_time TEXT,
   status         TEXT NOT NULL DEFAULT '',      -- '' | '通過' | '付近' | '到着済'
@@ -530,7 +562,7 @@ CREATE INDEX IF NOT EXISTS idx_trip_progress_assignment ON trip_stop_progress(as
 CREATE TABLE IF NOT EXISTS trip_gps_matches (
   assignment_id BIGINT NOT NULL REFERENCES trip_vehicle_assignments(id) ON DELETE CASCADE,
   gps_log_id    BIGINT NOT NULL REFERENCES vehicle_gps_log(id) ON DELETE CASCADE,
-  stop_id       INTEGER NOT NULL REFERENCES stops(id),
+  stop_id       INTEGER NOT NULL REFERENCES stops(id) ON DELETE NO ACTION,
   matched_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (assignment_id, gps_log_id)
 );
@@ -546,7 +578,14 @@ CREATE TABLE IF NOT EXISTS completed_trips (
   id                  BIGSERIAL PRIMARY KEY,
   route_id            TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
   car_id              TEXT NOT NULL,
-  trip_id             INTEGER REFERENCES schedule_trips(id),
+  -- trip_id は意図的に ON DELETE NO ACTION。seed.js の alignTripIndexesByGtfsTripId() は
+  -- GTFSから消えた schedule_trips 行を「削除せず後ろの番号へ退避」する方式で、この FK が
+  -- CASCADE だと退避のはずが実績アーカイブごと消える（known-issues H-6）。
+  trip_id             INTEGER REFERENCES schedule_trips(id) ON DELETE NO ACTION,
+  -- daily_trip_id / assignment_id は意図的に FK なし（UNIQUE のみ）。参照先の daily_trips /
+  -- trip_vehicle_assignments は DAILY_TRIP_RETENTION_DAYS で completed_trips より先に消えうるため。
+  -- 下の UNIQUE (daily_trip_id, assignment_id) は二重アーカイブ防止の安全網で、NULL 同士は
+  -- PostgreSQL の UNIQUE 上重複扱いされないので両方 NULL の行が複数あっても問題ない。
   daily_trip_id       BIGINT,
   assignment_id       BIGINT,
   start_time          TEXT,        -- 便の始発時刻
@@ -559,16 +598,14 @@ CREATE TABLE IF NOT EXISTS completed_trips (
   finished_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   finish_reason       TEXT,
   aggregated          BOOLEAN NOT NULL DEFAULT FALSE,
-  -- 便のクローズが二重実行されても実績が二重に入らないようにする安全網。
-  -- 一次防御はfinishService.jsのcloseDailyTrip()が取る行ロックで、通常はこの制約に
-  -- 触れることはない。NULLはPostgreSQLのUNIQUE制約上重複扱いされないため、
-  -- daily_trip_id/assignment_idを持たない行があっても問題にならない。
+  -- 便のクローズが二重実行されても実績が二重に入らないようにする安全網（一次防御は
+  -- finishService.js の closeDailyTrip() の行ロック）。通常はこの制約に触れない。
   UNIQUE (daily_trip_id, assignment_id)
 );
 
 CREATE TABLE IF NOT EXISTS completed_trip_stop_times (
   completed_trip_id   BIGINT NOT NULL REFERENCES completed_trips(id) ON DELETE CASCADE,
-  stop_id             INTEGER NOT NULL REFERENCES stops(id),
+  stop_id             INTEGER NOT NULL REFERENCES stops(id) ON DELETE NO ACTION,
   seq_order           INTEGER NOT NULL,
   scheduled_time      TEXT,
   actual_time         TEXT,
@@ -586,8 +623,8 @@ CREATE TABLE IF NOT EXISTS completed_trip_stop_times (
 -- updateSegmentStats() は sample_count が SEGMENT_STATS_MAX_SAMPLES（既定500）に達したら
 -- 指数移動平均へ切り替え、古い実績を徐々に忘れる（ダイヤ改正・道路事情の変化への追従用）。
 CREATE TABLE IF NOT EXISTS segment_travel_stats (
-  from_stop_id    INTEGER NOT NULL REFERENCES stops(id),
-  to_stop_id      INTEGER NOT NULL REFERENCES stops(id),
+  from_stop_id    INTEGER NOT NULL REFERENCES stops(id) ON DELETE NO ACTION,
+  to_stop_id      INTEGER NOT NULL REFERENCES stops(id) ON DELETE NO ACTION,
   day_type        TEXT NOT NULL,      -- 'weekday' | 'saturday' | 'holiday'
   hour_bucket     INTEGER NOT NULL,   -- 0-23（区間の実績到着時刻の時）
   sample_count    INTEGER NOT NULL DEFAULT 0,  -- SEGMENT_STATS_MAX_SAMPLES で頭打ち

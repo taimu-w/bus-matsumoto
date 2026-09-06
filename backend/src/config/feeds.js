@@ -113,6 +113,24 @@ function getGtfsFeedIdsFor(locationFeedId) {
 }
 
 /**
+ * qualified route id（`gtfsFeedId:routeId`）から、その路線のGPSを配信しうる
+ * 位置情報フィードIDの配列を返す（`getGtfsFeedIdsFor` の逆引き）。
+ *
+ * 車両割り当ての候補検索で、系統表示が切り替わる前後の車両（`vehicle_gps_log.route_id`
+ * が別系統になっている物理車両）を、同じ位置情報フィードの範囲に限って拾うために使う
+ * （docs/feed-config.md・system-review-2026-09 DB-5）。
+ * 未知・不正なroute_idでは空配列（呼び出し側はフォールバック候補を拾わない）。
+ */
+function getLocationFeedIdsForRoute(qualifiedRouteId) {
+  if (typeof qualifiedRouteId !== 'string' || !qualifiedRouteId.includes(':')) return [];
+  const gtfsFeedId = qualifiedRouteId.slice(0, qualifiedRouteId.indexOf(':'));
+  if (!gtfsFeedId) return [];
+  return LOCATION_FEEDS
+    .filter((feed) => Array.isArray(feed.gtfsFeedIds) && feed.gtfsFeedIds.includes(gtfsFeedId))
+    .map((feed) => feed.id);
+}
+
+/**
  * feeds テーブルへのUPSERT用に、全フィードを `feed_type` 付きで返す。
  */
 function getAllFeedsForDb() {
@@ -193,6 +211,7 @@ module.exports = {
   getPlatformDisplayNameFeedPriority,
   getEnabledLocationFeeds,
   getGtfsFeedIdsFor,
+  getLocationFeedIdsForRoute,
   getAllFeedsForDb,
   validateFeedConfig
 };

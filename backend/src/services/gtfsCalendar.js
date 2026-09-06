@@ -72,6 +72,12 @@ async function getEnabledFeedIds() {
  * calendar_dates.txt はGTFS上の任意ファイルなので、存在しない（ENOENT）だけなら
  * 「例外日なし」として扱い、フィードの失敗にはしない。
  *
+ * calendar.txt の start_date / end_date（GTFS必須項目・"YYYYMMDD"）の範囲外の日付は
+ * その service を無効とする（gtfsTimetable.getActiveServices() と同じ解釈）。
+ * 「現行ダイヤ」と「次期ダイヤ」が同じZIPに同梱されたときの二重生成と、
+ * 期間切れ後も当日便が作られ続けるずれを防ぐ。calendar_dates.txt の追加日
+ * （exception_type=1）は期間外でも有効にする（例外日は期間より優先。標準の解釈）。
+ *
  * @returns {{serviceIds: string[], feedsTotal: number, failedFeedIds: string[], complete: boolean}}
  */
 async function getActiveServiceIdsWithStatus(date, feedId = null) {
@@ -127,7 +133,9 @@ async function getActiveServiceIdsWithStatus(date, feedId = null) {
       let isActive = false;
 
       if (!hasException) {
-        isActive = isServiceActiveOnDayOfWeek(calRow, getDayOfWeek(date));
+        isActive =
+          isServiceActiveOnDayOfWeek(calRow, getDayOfWeek(date)) &&
+          isWithinServicePeriod(calRow, yyyymmdd);
       } else {
         isActive = exceptions.includes(1) && !exceptions.includes(2);
       }
@@ -155,6 +163,19 @@ async function getActiveServiceIdsWithStatus(date, feedId = null) {
 async function getActiveServiceIds(date, feedId = null) {
   const { serviceIds } = await getActiveServiceIdsWithStatus(date, feedId);
   return serviceIds;
+}
+
+/**
+ * calendar.txt の有効期間（start_date 〜 end_date、両端含む・"YYYYMMDD"）に
+ * 対象日が入っているか。値が8桁数字でない（欠損・書式違い）フィードでは
+ * その端の判定をスキップし、従来どおり期間で絞らない（安全側）。
+ */
+function isWithinServicePeriod(calRow, yyyymmdd) {
+  const startDate = String(calRow.start_date || '').trim();
+  const endDate = String(calRow.end_date || '').trim();
+  if (/^\d{8}$/.test(startDate) && yyyymmdd < startDate) return false;
+  if (/^\d{8}$/.test(endDate) && yyyymmdd > endDate) return false;
+  return true;
 }
 
 function isServiceActiveOnDayOfWeek(calRow, dayOfWeek) {

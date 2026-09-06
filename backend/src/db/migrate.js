@@ -903,6 +903,281 @@ async function migrate() {
       ALTER TABLE tourist_spots ADD COLUMN IF NOT EXISTS aliases TEXT
     `);
 
+    // ==========================================================
+    // 44. daily_trips の一意キーを、位置依存の frequency_index から
+    //     offset_minutes（元tripの始発時刻からのシフト量＝仮想便の安定した同一性）へ移す（DB-3）。
+    //     frequencies.txt の start_time / headway_secs が変わると frequency_index（生成時の連番）の
+    //     指すインスタンスがずれ、ON CONFLICT が走行中でない別便の行に当たって定刻が別の便の
+    //     ものに書き換わる（G-1 の schedule_trips.trip_index と同型の位置依存キー問題）。
+    //     通常便は frequency_index も offset_minutes も 0 なので、現行データ
+    //     （frequencies.txt を持つGTFSフィードは無い）では移行の影響を受ける行が無い。
+    //     列構成でキーを特定するため、制約名がPGのバージョンで変わっても動く。
+    // ==========================================================
+    await client.query(`
+      DO $$
+      DECLARE
+        old_name text;
+        has_new  boolean;
+        has_dup  boolean;
+      BEGIN
+        SELECT EXISTS (
+          SELECT 1 FROM pg_constraint c
+          WHERE c.conrelid = 'daily_trips'::regclass AND c.contype = 'u'
+            AND (SELECT array_agg(a.attname::text ORDER BY a.attname::text)
+                 FROM pg_attribute a
+                 WHERE a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey))
+                = ARRAY['offset_minutes', 'schedule_trip_id', 'service_date']
+        ) INTO has_new;
+        IF has_new THEN
+          RETURN;  -- 新規DB（schema.sql が既に新キーで作成）または適用済み
+        END IF;
+
+        SELECT EXISTS (
+          SELECT 1 FROM daily_trips
+          GROUP BY service_date, schedule_trip_id, offset_minutes
+          HAVING count(*) > 1
+        ) INTO has_dup;
+        IF has_dup THEN
+          RAISE WARNING '[migrate] ステップ44: daily_trips に (service_date, schedule_trip_id, offset_minutes) の重複があるため一意キーの移行を見送りました（frequency_index キーのまま）';
+          RETURN;
+        END IF;
+
+        SELECT c.conname INTO old_name
+        FROM pg_constraint c
+        WHERE c.conrelid = 'daily_trips'::regclass AND c.contype = 'u'
+          AND (SELECT array_agg(a.attname::text ORDER BY a.attname::text)
+               FROM pg_attribute a
+               WHERE a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey))
+              = ARRAY['frequency_index', 'schedule_trip_id', 'service_date'];
+        IF old_name IS NOT NULL THEN
+          EXECUTE format('ALTER TABLE daily_trips DROP CONSTRAINT %I', old_name);
+        END IF;
+
+        ALTER TABLE daily_trips
+          ADD CONSTRAINT daily_trips_service_date_schedule_trip_id_offset_minutes_key
+          UNIQUE (service_date, schedule_trip_id, offset_minutes);
+        RAISE NOTICE '[migrate] ステップ44完了: daily_trips の一意キーを offset_minutes 基準へ移しました';
+      END $$;
+    `);
+
+    // ==========================================================
+    // 45. vehicles を「物理車両1台＝1行」にする（一意キー (route_id, car_id) → (feed_id, car_id)）。
+    //     旧構成では1台の物理バスが位置情報CSVの系統IDごとに別行になり、系統表示が切り替わる
+    //     前後のGPSが「前の系統の車両行」に入っていると、次の便の候補検索
+    //     （v.route_id = trip.route_id）にヒットせず unassigned になっていた
+    //     （system-review-2026-09 DB-5 / 旧 known-issues M-9）。
+    //     系統は物理車両の属性ではなく測位ごとの観測値なので vehicle_gps_log.route_id へ移す。
+    //     vehicles.route_id / direction_id は「直近に観測した値」として残す（表示・既存クエリ互換）。
+    // ==========================================================
+
+    // 45.0 列・索引（無条件・冪等）。既存DBには schema.sql 流し込み時点で
+    //      vehicle_gps_log.route_id 列が無いため、その索引はここで作る。
+    await client.query(`ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS feed_id TEXT`);
+    await client.query(`ALTER TABLE vehicle_gps_log ADD COLUMN IF NOT EXISTS route_id TEXT`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_vehicles_car ON vehicles(car_id)`);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_gps_log_route_time ON vehicle_gps_log(route_id, gps_time_ts)
+    `);
+
+    // 45.1 一度きりの移行。ガード: (feed_id, car_id) の UNIQUE がまだ無い（列構成で特定）。
+    const vehiclesFeedCarUnique = await client.query(`
+      SELECT 1 FROM pg_constraint c
+      WHERE c.conrelid = 'vehicles'::regclass AND c.contype = 'u'
+        AND (SELECT array_agg(a.attname::text ORDER BY a.attname::text)
+             FROM pg_attribute a WHERE a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey))
+            = ARRAY['car_id', 'feed_id']
+    `);
+
+    if (vehiclesFeedCarUnique.rows.length === 0) {
+      // このブロックの間、他セッション（稼働中サーバーのパイプライン）からの
+      // vehicles / vehicle_gps_log への書き込みを止める（ステップ42と同じ理由）。
+      await client.query('LOCK TABLE vehicles IN SHARE MODE');
+      await client.query('LOCK TABLE vehicle_gps_log IN SHARE MODE');
+
+      // 45.2 vehicle_gps_log.route_id バックフィル。旧構成では各 vehicles 行は単一 route_id
+      //      固定で、その行のログは全てその系統で転記されているため v.route_id が正確な観測値。
+      await client.query(`
+        UPDATE vehicle_gps_log g SET route_id = v.route_id
+        FROM vehicles v WHERE v.id = g.vehicle_id AND g.route_id IS NULL
+      `);
+
+      // 45.3 vehicles.feed_id を直近の生ログの feed_id でバックフィルする。
+      //      生ログの feed_id はその測位が届いたフィードそのもの（＝正確）。
+      //      直近48hに生ログが無い車両（retired）は NULL のままにする。config/feeds.js から
+      //      route_id 経由で推測すると、複数の位置情報フィードが同じGTFSフィードを配信している
+      //      場合に誤ったフィードを当ててしまい（実データで発生）、次の測位で
+      //      getOrCreateVehicle が別行を作ってしまう。NULL のままなら次の測位で
+      //      getOrCreateVehicle が正しいフィードで確定させる（新しい行を作らない）。
+      await client.query(`
+        UPDATE vehicles v SET feed_id = r.feed_id
+        FROM (
+          SELECT DISTINCT ON (car_id) car_id, feed_id
+          FROM vehicle_positions_raw
+          WHERE feed_id IS NOT NULL
+          ORDER BY car_id, id DESC
+        ) r
+        WHERE r.car_id = v.car_id AND v.feed_id IS NULL
+      `);
+
+      // 45.4 car_id ごとの重複 vehicles 行をマージ。survivor は「直近GPSが最も新しい行」
+      //      （＝route_id / direction_id / last_gps_at / status が最新の行）。
+      const dupCars = await client.query(`
+        SELECT car_id,
+               (array_agg(id ORDER BY last_gps_at DESC NULLS LAST, id ASC))[1] AS keep_id,
+               array_agg(id) AS all_ids
+        FROM vehicles
+        GROUP BY car_id
+        HAVING count(*) > 1
+      `);
+
+      let mergedCars = 0;
+      let collidedTva = 0;
+      let collidedGps = 0;
+      for (const row of dupCars.rows) {
+        const keepId = row.keep_id;
+        const loserIds = row.all_ids.filter((id) => id !== keepId);
+        if (loserIds.length === 0) continue;
+
+        // trip_vehicle_assignments: UNIQUE (daily_trip_id, vehicle_id) と衝突しない行だけ付け替え。
+        // （現行ロジックでは1便＝1路線で候補はその路線の行しか採らないため衝突は発生しない想定）
+        await client.query(
+          `UPDATE trip_vehicle_assignments t SET vehicle_id = $1
+           WHERE t.vehicle_id = ANY($2::int[])
+             AND NOT EXISTS (
+               SELECT 1 FROM trip_vehicle_assignments k
+               WHERE k.daily_trip_id = t.daily_trip_id AND k.vehicle_id = $1
+             )`,
+          [keepId, loserIds]
+        );
+        const tvaLeft = await client.query(
+          `DELETE FROM trip_vehicle_assignments WHERE vehicle_id = ANY($1::int[]) RETURNING id`,
+          [loserIds]
+        );
+        collidedTva += tvaLeft.rowCount;
+
+        await client.query(
+          `UPDATE daily_trips SET assigned_vehicle_id = $1 WHERE assigned_vehicle_id = ANY($2::int[])`,
+          [keepId, loserIds]
+        );
+
+        // vehicle_gps_log: UNIQUE (vehicle_id, gps_time_ts) と衝突しない行だけ付け替え。
+        // （同一 car_id の測位は生ログ1行につき1挿入なので gps_time_ts は行間で重複しない想定）
+        await client.query(
+          `UPDATE vehicle_gps_log g SET vehicle_id = $1
+           WHERE g.vehicle_id = ANY($2::int[])
+             AND NOT EXISTS (
+               SELECT 1 FROM vehicle_gps_log k
+               WHERE k.vehicle_id = $1 AND k.gps_time_ts = g.gps_time_ts
+             )`,
+          [keepId, loserIds]
+        );
+        const gpsLeft = await client.query(
+          `DELETE FROM vehicle_gps_log WHERE vehicle_id = ANY($1::int[]) RETURNING id`,
+          [loserIds]
+        );
+        collidedGps += gpsLeft.rowCount;
+
+        // survivor の feed_id が未確定なら loser 側の値で補完してから loser 行を削除
+        await client.query(
+          `UPDATE vehicles SET feed_id = COALESCE(feed_id, (
+             SELECT feed_id FROM vehicles WHERE id = ANY($2::int[]) AND feed_id IS NOT NULL LIMIT 1
+           )) WHERE id = $1`,
+          [keepId, loserIds]
+        );
+        await client.query(`DELETE FROM vehicles WHERE id = ANY($1::int[])`, [loserIds]);
+        mergedCars++;
+      }
+
+      // 45.5 旧 UNIQUE (route_id, car_id) を列構成で特定して DROP
+      await client.query(`
+        DO $$
+        DECLARE old_name text;
+        BEGIN
+          SELECT c.conname INTO old_name FROM pg_constraint c
+          WHERE c.conrelid = 'vehicles'::regclass AND c.contype = 'u'
+            AND (SELECT array_agg(a.attname::text ORDER BY a.attname::text)
+                 FROM pg_attribute a WHERE a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey))
+                = ARRAY['car_id', 'route_id'];
+          IF old_name IS NOT NULL THEN
+            EXECUTE format('ALTER TABLE vehicles DROP CONSTRAINT %I', old_name);
+          END IF;
+        END $$;
+      `);
+
+      // 45.6 新 UNIQUE (feed_id, car_id)。マージ後は car_id ごとに1行なので必ず一意。
+      await client.query(`
+        ALTER TABLE vehicles
+          ADD CONSTRAINT vehicles_feed_id_car_id_key UNIQUE (feed_id, car_id)
+      `);
+
+      console.log(
+        `[migrate] ステップ45完了: vehicles を (feed_id, car_id) 一意へ移行しました` +
+        `（${mergedCars} 台をマージ）。`
+      );
+      if (collidedTva > 0 || collidedGps > 0) {
+        console.warn(
+          `[migrate] ステップ45: マージ時の重複で trip_vehicle_assignments ${collidedTva} 行・` +
+          `vehicle_gps_log ${collidedGps} 行を削除しました（現行ロジックでは発生しない想定）。`
+        );
+      }
+    }
+
+    // ==========================================================
+    // 46. stops(id) / schedule_trips(id) を参照する子テーブルの FK に、挙動を変えずに
+    //     ON DELETE NO ACTION を明示する（system-review-2026-09 DB-4）。
+    //     いずれも「CASCADE も SET NULL もしない」が意図で、孤児掃除は seed.js の
+    //     NOT EXISTS ガード（G-4）／trip_index の退避（H-6）が担う。
+    //     目標の制約名の存在をガードにして一度きりにする（毎起動の再検証を避ける）。
+    // ==========================================================
+    await client.query(`
+      DO $$
+      DECLARE
+        existing_name text;
+        i int;
+        col_attnum smallint;
+        specs text[] := ARRAY[
+          'daily_trips|start_stop_id|stops|daily_trips_start_stop_fk',
+          'daily_trip_stop_times|stop_id|stops|daily_trip_stop_times_stop_fk',
+          'trip_stop_progress|stop_id|stops|trip_stop_progress_stop_fk',
+          'trip_gps_matches|stop_id|stops|trip_gps_matches_stop_fk',
+          'completed_trip_stop_times|stop_id|stops|completed_trip_stop_times_stop_fk',
+          'segment_travel_stats|from_stop_id|stops|segment_travel_stats_from_stop_fk',
+          'segment_travel_stats|to_stop_id|stops|segment_travel_stats_to_stop_fk',
+          'completed_trips|trip_id|schedule_trips|completed_trips_trip_id_noaction_fk'
+        ];
+        parts text[];
+      BEGIN
+        FOR i IN 1 .. array_length(specs, 1) LOOP
+          parts := string_to_array(specs[i], '|');  -- [table, column, reftable, newname]
+          IF EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = parts[4] AND conrelid = parts[1]::regclass
+          ) THEN
+            CONTINUE;  -- 移行済み
+          END IF;
+
+          SELECT a.attnum INTO col_attnum FROM pg_attribute a
+          WHERE a.attrelid = parts[1]::regclass AND a.attname = parts[2];
+
+          SELECT c.conname INTO existing_name
+          FROM pg_constraint c
+          WHERE c.contype = 'f'
+            AND c.conrelid = parts[1]::regclass
+            AND c.confrelid = parts[3]::regclass
+            AND c.conkey = ARRAY[col_attnum];
+
+          IF existing_name IS NOT NULL THEN
+            EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', parts[1], existing_name);
+          END IF;
+          EXECUTE format(
+            'ALTER TABLE %I ADD CONSTRAINT %I FOREIGN KEY (%I) REFERENCES %I(id) ON DELETE NO ACTION',
+            parts[1], parts[4], parts[2], parts[3]
+          );
+        END LOOP;
+        RAISE NOTICE '[migrate] ステップ46完了: stops/schedule_trips 参照FKに ON DELETE NO ACTION を明示しました';
+      END $$;
+    `);
+
     await client.query('COMMIT');
     console.log('[migrate] マイグレーション完了');
   } catch (err) {

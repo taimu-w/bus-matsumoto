@@ -58,6 +58,31 @@ test('getActiveServiceIds: 従来どおり配列だけを返す（読み込み�
   assert.equal(ids.length, 0);
 });
 
+// calendar.txt の start_date / end_date（有効期間）の範囲外の日付では service_id を返さない。
+// 「現行ダイヤ」と「次期ダイヤ」が同じZIPに同梱されたときの二重生成と、期間切れ後も
+// 当日便が作られ続けるずれを防ぐ（gtfsTimetable.getActiveServices() と同じ解釈）。
+test('getActiveServiceIdsWithStatus: calendar.txt の有効期間外は service_id を返さない（読み込み失敗ではない）', async () => {
+  // 現行データ（data gtfs/guruttomatsumotobus1）は全 service が 20260801〜20280331。
+  const before = await getActiveServiceIdsWithStatus(
+    new Date('2026-01-05T12:00:00+09:00'), 'guruttomatsumotobus1'
+  );
+  assert.deepEqual(before.serviceIds, []);
+  assert.equal(before.complete, true); // 「読めたが期間外」＝読み込み失敗ではない
+  assert.deepEqual(before.failedFeedIds, []);
+
+  const after = await getActiveServiceIdsWithStatus(
+    new Date('2028-04-01T12:00:00+09:00'), 'guruttomatsumotobus1'
+  );
+  assert.deepEqual(after.serviceIds, []);
+  assert.equal(after.complete, true);
+
+  // 期間内の平日は従来どおり service_id を返す（回帰防止）
+  const during = await getActiveServiceIdsWithStatus(
+    new Date('2026-09-07T12:00:00+09:00'), 'guruttomatsumotobus1' // 月曜
+  );
+  assert.ok(during.serviceIds.includes('guruttomatsumotobus1:平日'));
+});
+
 test('getDayOfWeek: 曜日番号の対応（日=0〜土=6、JST基準）', () => {
   withTz('UTC', () => {
     assert.equal(getDayOfWeek(new Date('2026-08-16T12:00:00+09:00')), 0); // 日

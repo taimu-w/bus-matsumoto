@@ -184,7 +184,7 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 |---|---|---|
 | `PORT` | `3000` | HTTPサーバーのポート |
 | `SHUTDOWN_TIMEOUT_MS` | `8000` | グレースフルシャットダウンの猶予（ミリ秒）。SIGTERM/SIGINT受信時に「タイマー停止 → HTTPサーバー`close()` → DBプール`end()`」がこの時間で終わらなければ強制終了する。Dockerの`stop`→SIGKILL既定10秒より短く |
-| `TZ` | - | コンテナ／プロセスのローカルタイム。`docker-compose.yml`は`backend`に`Asia/Tokyo`を設定（ログの時刻表記用。アプリのコードは時刻をすべて明示的にJSTで扱うため挙動には影響しない）。`db`コンテナには設定していない（`CURRENT_DATE`の評価が変わるため。[docs/system-review-2026-09.md](docs/system-review-2026-09.md) DB-1） |
+| `TZ` | - | コンテナ／プロセスのローカルタイム。`docker-compose.yml`は`backend`に`Asia/Tokyo`を設定（ログの時刻表記用。アプリのコードは時刻をすべて明示的にJSTで扱うため挙動には影響しない）。`db`コンテナには設定していない（DB-1 はコードで解消済み＝日付比較を`(now() AT TIME ZONE 'Asia/Tokyo')::date`に統一したためTZ非依存。`postgres:16-alpine`は`tzdata`を同梱しない可能性があり無言でUTCに落ちるリスクも避ける。[docs/system-review-2026-09.md](docs/system-review-2026-09.md) DB-1） |
 | `DATABASE_URL` | - | PostgreSQL接続文字列（Render等ホスティング用。指定時はSSL接続） |
 | `PGHOST` / `PGPORT` / `PGDATABASE` / `PGUSER` / `PGPASSWORD` | localhost等 | `DATABASE_URL`未指定時のローカル接続情報 |
 | `POLL_INTERVAL_SECONDS`※再起動要 | `60` | メインパイプラインの実行間隔（秒） |

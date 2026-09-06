@@ -134,12 +134,24 @@ function buildInstances(trip, frequencyRows, baseStartMinutes) {
     return [{ frequencyIndex: 0, offsetMinutes: 0, origin: 'static' }];
   }
 
-  // frequencies.txt に登場する便は仮想便としてのみ展開し、素の便は生成しない（GTFS標準の解釈）
-  return expanded.map((inst) => ({
-    frequencyIndex: inst.frequencyIndex,
-    offsetMinutes: inst.offsetMinutes,
-    origin: 'frequency'
-  }));
+  // frequencies.txt に登場する便は仮想便としてのみ展開し、素の便は生成しない（GTFS標準の解釈）。
+  //
+  // offset_minutes が daily_trips の一意キー（service_date, schedule_trip_id, offset_minutes）
+  // になっているため、同じ offset に丸まるインスタンス（headway_secs が60の倍数でない場合に
+  // 起こりうる）は先勝ちで1件にまとめる。定刻は分単位なので、同じ分に出る2便は
+  // 以降の全処理（時刻表・遅延計算・突合）で区別できず、まとめても情報は失われない。
+  const seenOffsets = new Set();
+  const instances = [];
+  for (const inst of expanded) {
+    if (seenOffsets.has(inst.offsetMinutes)) continue;
+    seenOffsets.add(inst.offsetMinutes);
+    instances.push({
+      frequencyIndex: inst.frequencyIndex,
+      offsetMinutes: inst.offsetMinutes,
+      origin: 'frequency'
+    });
+  }
+  return instances;
 }
 
 /**
@@ -164,19 +176,21 @@ async function upsertDailyTrip(client, serviceDate, trip, instance, startStop, s
        (service_date, route_id, direction_id, schedule_trip_id, service_id, origin,
         frequency_index, offset_minutes, start_stop_id, start_time, start_at, headsign)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-     ON CONFLICT (service_date, schedule_trip_id, frequency_index) DO UPDATE
+     ON CONFLICT (service_date, schedule_trip_id, offset_minutes) DO UPDATE
        SET
          -- 既に車両を割り当て済みの便は、GTFSが更新されても当日中は書き換えない。
          -- 走行中の便の定刻がずれると遅延計算と実績が破綻するため。
-         route_id       = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.route_id       ELSE daily_trips.route_id END,
-         direction_id   = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.direction_id   ELSE daily_trips.direction_id END,
-         service_id     = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.service_id     ELSE daily_trips.service_id END,
-         origin         = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.origin         ELSE daily_trips.origin END,
-         offset_minutes = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.offset_minutes ELSE daily_trips.offset_minutes END,
-         start_stop_id  = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.start_stop_id  ELSE daily_trips.start_stop_id END,
-         start_time     = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.start_time     ELSE daily_trips.start_time END,
-         start_at       = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.start_at       ELSE daily_trips.start_at END,
-         headsign       = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.headsign       ELSE daily_trips.headsign END
+         route_id        = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.route_id        ELSE daily_trips.route_id END,
+         direction_id    = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.direction_id    ELSE daily_trips.direction_id END,
+         service_id      = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.service_id      ELSE daily_trips.service_id END,
+         origin          = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.origin          ELSE daily_trips.origin END,
+         -- offset_minutes は ON CONFLICT のキーなので EXCLUDED と常に一致（実質no-op）。
+         -- frequency_index は表示・ログ用のメタ情報なので pending の間だけ最新の連番に追随させる。
+         frequency_index = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.frequency_index ELSE daily_trips.frequency_index END,
+         start_stop_id   = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.start_stop_id   ELSE daily_trips.start_stop_id END,
+         start_time      = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.start_time      ELSE daily_trips.start_time END,
+         start_at        = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.start_at        ELSE daily_trips.start_at END,
+         headsign        = CASE WHEN daily_trips.assignment_state = 'pending' THEN EXCLUDED.headsign        ELSE daily_trips.headsign END
      RETURNING id, assignment_state`,
     [
       serviceDate,
@@ -381,8 +395,10 @@ async function ensureDailyTrips(options = {}) {
 async function purgeOldDailyTrips(retentionDays = getRuntimeSetting('DAILY_TRIP_RETENTION_DAYS')) {
   const client = await pool.connect();
   try {
+    // 「今日」はJSTで評価する。service_date はJST基準で書かれるため、素の CURRENT_DATE
+    // （DBセッションのTZ＝composeではUTC）で比較すると保持期間の境界が最大1日ずれる。
     const res = await client.query(
-      `DELETE FROM daily_trips WHERE service_date < (CURRENT_DATE - $1::int)`,
+      `DELETE FROM daily_trips WHERE service_date < ((now() AT TIME ZONE 'Asia/Tokyo')::date - $1::int)`,
       [retentionDays]
     );
     if (res.rowCount > 0) {

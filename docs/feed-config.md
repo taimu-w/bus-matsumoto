@@ -27,7 +27,8 @@
 
 `backend/src/config/feeds.js`（コード）で管理します。変更頻度が低く、誤設定時の影響（違う路線に位置情報が紐づく）が大きいため、diffに残りレビューを経るコード管理にしています。変更にはコードの編集とデプロイが必要です（管理画面からは編集できません）。
 
-- 位置情報フィードがどのGTFSフィードの路線を解決対象にするかは`gtfsFeedIds`（**配列**）で明示します。アルピコ交通のように複数のGTFSフィードにまたがる事業者を1件へ畳まないための配列です。
+- 位置情報フィードがどのGTFSフィードの路線を解決対象にするかは`gtfsFeedIds`（**配列**）で明示します。アルピコ交通のように複数のGTFSフィードにまたがる事業者を1件へ畳まないための配列です。`getGtfsFeedIdsFor(locationFeedId)`で引きます。
+- `getLocationFeedIdsForRoute(qualifiedRouteId)`は上記の逆引き（qualified route id → GTFSフィードID → それを`gtfsFeedIds`に含む位置情報フィードID配列）。車両割り当ての候補検索（`tripAssignment.findCandidates()`）が、系統表示が切り替わる前後の車両を拾うフォールバックを「同じ位置情報フィードの範囲」に限るために使います（[system-review-2026-09.md](system-review-2026-09.md) DB-5）。
 - `PLATFORM_DISPLAY_NAME_FEED_PRIORITY`：時刻表検索での**のりば（標柱）の座標統合**（[timetable-search.md](timetable-search.md)「のりばの座標統合」）で、統合後の表示名・よみがなをどのGTFSフィードの`stop_name`に従わせるかの優先順位。2フィードが同じ物理のりばを別表記で持つため必要です。
 
 ### `feeds`テーブルの二重性質

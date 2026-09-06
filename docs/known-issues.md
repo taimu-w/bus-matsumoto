@@ -61,27 +61,9 @@ CASCADE無しの外部キーでこの行を参照しており、削除すると�
 
 ## Medium（条件次第で誤判定・性能劣化・安全性の懸念）
 
-### M-1 CURRENT_DATE がDBサーバのTZで評価され、便のクローズと掃除が最大9時間遅れる
-
-*DB整合性 / 運行終了判定* — `finishService.js`（`service_date < CURRENT_DATE`）、`dailyTripBuilder.js`
-
-`service_date`はJST基準で書き込まれるのに、比較対象の`CURRENT_DATE`はDBセッションのTZ（既定UTC）で
-評価される。前日の未クローズ便がJST 09:00まで残り、アーカイブと区間統計への反映がずれる。
-
-**修正案**: SQLを`service_date < (now() AT TIME ZONE 'Asia/Tokyo')::date`にするか、アプリ側で
-`getServiceDateString()`を計算してパラメータで渡す。DBコンテナに`TZ: Asia/Tokyo`も併用。
-
-### M-2 当日便生成の運行日判定に calendar.txt の有効期間チェックが無い
-
-*当日便生成 / GTFS更新* — `gtfsCalendar.js`（`getActiveServiceIds()`）
-
-`gtfsTimetable.getActiveServices()`は`start_date`/`end_date`の期間内かを見るが、当日便生成用の
-`getActiveServiceIds()`は見ない。現在のデータは全serviceが同一期間なので顕在化していないが、
-「現行ダイヤ」と「次期ダイヤ」が同じZIPに同梱される運用になると、両方が同時に有効になり、
-同じ時刻の便が二重生成される。期間切れ後は逆に「時刻表は運行なし／当日便は生成され続ける」ずれになる。
-
-**修正案**: `getActiveServiceIds()`にも`start_date`/`end_date`の範囲判定を入れる（3つの曜日区分ロジックを
-統合するという意味ではなく、有効期間の解釈だけを揃える）。
+M-1（`CURRENT_DATE` がDBサーバのTZで評価される）と M-2（当日便生成の運行日判定に
+`calendar.txt` の有効期間チェックが無い）は対応済みのため削除した
+（[system-review-2026-09.md](system-review-2026-09.md) DB-1 / DB-2）。
 
 ### M-3 強制終了までの120分に対し、時刻表上の最長所要が90分で余裕が小さい
 
@@ -125,17 +107,6 @@ CASCADE無しの外部キーでこの行を参照しており、削除すると�
 **残っている課題**: 行ごとのBEGIN/COMMITは変えていない（1トランザクションへまとめて
 `INSERT … SELECT FROM unnest(...)`で一括化する案は見送った。1行の失敗が他行を巻き込まない
 という既存の耐障害性を保つため）。上限（既定2500件/周期）を超える滞留は次回以降のポーリングに持ち越す。
-
-### M-9 系統表示が切り替わる前後の車両が、次の便の候補になれない
-
-*車両割り当て* — `tripAssignment.js`（`WHERE v.route_id = $1`）、`schema.sql`（`vehicles UNIQUE (route_id, car_id)`）
-
-1台の物理バスは位置情報CSVの系統IDごとに別々の`vehicles`行になる。始発時刻直前のGPSが「前の系統の
-車両行」に入っていると、次の便の候補検索（`v.route_id = trip.route_id`）にヒットしない。始発バス停に
-実際にバスが居るのに`unassigned`になる。
-
-**修正案**: `vehicles`の一意キーを`(feed_id, car_id)`にして物理車両1台＝1行にし、系統は
-`vehicle_gps_log`側の観測値として持つ。または候補検索を`car_id` + 距離 + direction で行う。
 
 ### M-11 予測精度監視の「実績」に、線形補間値やGPS途絶時の救済値が混ざっている
 

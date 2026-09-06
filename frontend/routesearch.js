@@ -1348,9 +1348,21 @@
             </p>`;
   }
 
+  /**
+   * 見出しに出す出発地／目的地の名前。観光スポットを起点／終点にした検索では、実際に
+   * 乗降するバス停名（result.from.name / result.to.name）ではなく元のスポット名を出す
+   * （サーバーが viaSpotFrom / viaSpotTo でスポットの spotId＋name を返す）。
+   */
+  function endpointFromName(result) {
+    return (result.viaSpotFrom && result.viaSpotFrom.name) || (result.from && result.from.name) || '';
+  }
+  function endpointToName(result) {
+    return (result.viaSpotTo && result.viaSpotTo.name) || (result.to && result.to.name) || '';
+  }
+
   /** 結果ヘッダーの「出発地 → 目的地」。観光スポット詳細ポップアップはタイムライン側のスポット名から開く。 */
   function endpointHeadingHtml(result) {
-    return `${esc(result.from.name)} <span class="text-gray-400">→</span> ${esc(result.to.name)}`;
+    return `${esc(endpointFromName(result))} <span class="text-gray-400">→</span> ${esc(endpointToName(result))}`;
   }
 
   /** 経路の性質を表すバッジ（一覧・詳細で共用。同じ経路が同じ見た目になるようにする）。 */
@@ -1708,7 +1720,7 @@
     return `
       <div class="bg-yellow-50 border-2 border-yellow-300 rounded-2xl p-5">
         <p class="text-sm font-bold text-yellow-900">${esc(result.message || '経路が見つかりませんでした。')}</p>
-        ${result.from && result.to ? `<p class="text-xs font-bold text-yellow-800 mt-2">${esc(result.from.name)} → ${esc(result.to.name)}（${esc(formatDateLabel(result.date))} ${esc(baseTimeLabel(result))}）</p>` : ''}
+        ${result.from && result.to ? `<p class="text-xs font-bold text-yellow-800 mt-2">${esc(endpointFromName(result))} → ${esc(endpointToName(result))}（${esc(formatDateLabel(result.date))} ${esc(baseTimeLabel(result))}）</p>` : ''}
         ${preferenceNoticeHtml(result.preferences)}
         ${clearPreferencesButton}
         ${suggestionButton}

@@ -42,9 +42,11 @@ services:
       # コンテナのローカルタイムをJST（Asia/Tokyo）に固定する。アプリのコードは
       # 時刻をすべて明示的に Asia/Tokyo で扱う（backend/src/utils/time.js）ため
       # 挙動には影響せず、効くのはログ・スタックトレースの時刻表記だけ。
-      # ※ db コンテナ側の TZ は CURRENT_DATE / now()::date の評価に影響し、便の
-      #   クローズと掃除のタイミングが変わる（docs/system-review-2026-09.md DB-1）。
-      #   これは本項（D-5）の範囲外なので、db 側には設定していない。
+      # ※ db コンテナには TZ を設定していない。運行日の日付比較は
+      #   (now() AT TIME ZONE 'Asia/Tokyo')::date に統一してあり DBセッションのTZに
+      #   依存しない（docs/system-review-2026-09.md DB-1）。postgres:16-alpine は
+      #   tzdata を同梱しない可能性があり、named TZ が解決できないと無言でUTCに
+      #   落ちるため、あえて設定しない。
       TZ: Asia/Tokyo
     depends_on:
       db:

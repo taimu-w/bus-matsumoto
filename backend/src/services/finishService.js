@@ -409,10 +409,13 @@ async function finishTrips() {
     }
 
     // 運行日が過ぎてもクローズされていない便を掃除する（仕様書 10.5：
-    // 便の終了は既存のGTFS運行日の扱いに準ずる）
+    // 便の終了は既存のGTFS運行日の扱いに準ずる）。
+    // service_date はJST基準で書かれるため、比較の「今日」もJSTで評価する
+    // （素の CURRENT_DATE はDBセッションのTZ＝composeではUTCで、JST 00:00〜09:00 の間
+    //  前日扱いになり、前日の未クローズ便のアーカイブ・区間統計反映が最大9時間ずれる）。
     const staleTrips = await client.query(
       `SELECT id FROM daily_trips
-       WHERE closed_at IS NULL AND service_date < CURRENT_DATE
+       WHERE closed_at IS NULL AND service_date < (now() AT TIME ZONE 'Asia/Tokyo')::date
        ORDER BY id ASC
        LIMIT 200`
     );

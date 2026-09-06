@@ -9,7 +9,7 @@
 - 重大度は known-issues.md の基準（利用者に見える誤情報を出すか／復旧に人手が要るか）に、
   **セキュリティ**と**プロダクトとしての完成度**の観点を加えています。
 
-> **S-1〜S-7 と B-1 / B-3 / B-4 / B-7 / B-8 / B-9 / B-10 / B-12、P-1 / P-3 / P-4 / P-5 / P-6 / P-7、G-1 / G-2 / G-4 / G-5 / G-6、A-1 / A-2 / A-3 / A-4 / A-5 / A-6、F-1、D-1 / D-4 / D-5 / D-6 / D-8 / D-9、F-4、F-6、F-7 は対応済みです。** 各項目の見出しに ✅ を付け、本文を
+> **S-1〜S-7 と B-1 / B-3 / B-4 / B-7 / B-8 / B-9 / B-10 / B-12、P-1 / P-3 / P-4 / P-5 / P-6 / P-7、G-1 / G-2 / G-4 / G-5 / G-6、A-1 / A-2 / A-3 / A-4 / A-5 / A-6、F-1、D-1 / D-4 / D-5 / D-6 / D-8 / D-9、F-4、F-6、F-7、DB-1 / DB-2 / DB-3 / DB-4 / DB-5 は対応済みです。** 各項目の見出しに ✅ を付け、本文を
 > 「現在どうなっているか」と「それでも残っている課題」に書き換えてあります。
 > F-3 は静的CSS化そのものは見送りましたが、見送りの根拠（動的なTailwindクラス構築が
 > 存在しないことの確認）を追記してあります。P-2 も同様に、単一DB接続での直列処理という
@@ -43,6 +43,7 @@
 - GTFS取り込み・当日便生成: 6 件（うち **G-1 / G-2 / G-4 / G-5 / G-6 の5件は対応済み**、残り1件は G-3）
 - API層: 6 件（うち **A-1 / A-2 / A-3 / A-4 / A-5 / A-6 の6件は対応済み**）
 - フロントエンド: 7 件（うち **F-1 / F-4 / F-6 / F-7 の4件は対応済み**）
+- データ整合性・DBスキーマ: 5 件（**DB-1 / DB-2 / DB-3 / DB-4 / DB-5 の5件すべて対応済み**）
 - デプロイ・インフラ・可観測性: 9 件（うち **D-1 / D-4 / D-5 / D-6 / D-8 / D-9 の6件は対応済み**）
 - テスト・品質保証: 4 件
 - プロダクトとしての欠陥: 8 件
@@ -425,7 +426,8 @@ push通知」と同根）。現状は5分ごとに再試行しつつ警告ログ
 - アラート自体は始発時刻から120分間は従来どおり出る。「候補ゼロだった」という運用上の事実を
   隠さずに、翌日まで残るノイズだけを消すのが狙い。
 
-*残っている課題*: 候補ゼロになる原因そのもの（GPS途絶・系統表示の切り替わり＝M-9 など）は別問題。
+*残っている課題*: 候補ゼロになる原因のうち系統表示の切り替わり（旧 M-9）は DB-5 で対応した
+（`findCandidates` の fallback）。GPS途絶（B-2）はまだ別問題。
 
 ### B-8 ✅ 深夜帯に車両割り当て（④）が動かないが、複数のドキュメントは「動く」と書いている（中・新規）— 対応済み
 
@@ -1268,48 +1270,171 @@ HTTP/1.1環境では「1本ダウンロード→実行→次の1本をダウン�
 
 ## 7. データ整合性・DBスキーマ
 
-### DB-1 `CURRENT_DATE` がDBサーバのTZで評価される（中）— 既知 M-1
+### DB-1 ✅ `CURRENT_DATE` がDBサーバのTZで評価される（中）— 既知 M-1 — 対応済み
 
-*場所*: [backend/src/services/finishService.js:411-416](../backend/src/services/finishService.js#L411-L416)、[backend/src/services/dailyTripBuilder.js:315-317](../backend/src/services/dailyTripBuilder.js#L315-L317)
+*場所*: [backend/src/services/finishService.js](../backend/src/services/finishService.js)（運行日終了の掃除）、[backend/src/services/dailyTripBuilder.js](../backend/src/services/dailyTripBuilder.js)（`purgeOldDailyTrips`）、[docker-compose.yml](../docker-compose.yml)、README §8（`TZ`）
 
-`service_date` はJST基準で書くのに、比較対象の `CURRENT_DATE` はDBセッションのTZ（compose では
-`db` コンテナに `TZ` 未設定＝UTC）で評価される。前日の未クローズ便がJST 09:00まで残り、
-アーカイブと区間統計反映がずれる。`(now() AT TIME ZONE 'Asia/Tokyo')::date` にするか、
-アプリ側で計算した日付をパラメータで渡す。`db` コンテナに `TZ: Asia/Tokyo` も。
+**指摘だった状態**: `daily_trips.service_date` はJST基準で書くのに、比較対象の `CURRENT_DATE` は
+DBセッションのTZ（compose では `db` コンテナに `TZ` 未設定＝UTC）で評価される。JST 00:00〜09:00 の間は
+`CURRENT_DATE` が前日を指すため、前日の未クローズ便のアーカイブと区間統計反映が最大9時間ずれ、
+保持期間掃除（`purgeOldDailyTrips`）の境界も最大1日ずれる。
 
-### DB-2 当日便生成の運行日判定に有効期間チェックがない（中）— 既知 M-2
+**現在**: 「今日」の評価を、DBセッションのTZに依存しない `(now() AT TIME ZONE 'Asia/Tokyo')::date` に
+統一した（既に `spotSearch.js` / `touristSpots.js` / `api.js` で使われている当プロジェクトの既定の書き方）。
 
-*場所*: [backend/src/services/gtfsCalendar.js:97-113](../backend/src/services/gtfsCalendar.js#L97-L113)
+- `finishService.finishTrips()` の運行日終了掃除: `service_date < CURRENT_DATE` →
+  `service_date < (now() AT TIME ZONE 'Asia/Tokyo')::date`。
+- `dailyTripBuilder.purgeOldDailyTrips()`: `service_date < (CURRENT_DATE - $1::int)` →
+  `service_date < ((now() AT TIME ZONE 'Asia/Tokyo')::date - $1::int)`。
+- これで**コード側が完全にTZ非依存**になったため、`db` コンテナの `TZ` は正しさに影響しなくなった。
+  `TZ: Asia/Tokyo` を `db` にも設定する案は見送った（`postgres:16-alpine` は `tzdata` を
+  同梱しない可能性があり、named TZ が解決できないと無言でUTCに落ちる。コード修正で不要になったので
+  リスクを取らない）。compose と README の該当コメントを「DB-1 はコードで解消済み・`db` の TZ は
+  正しさに無関係」に更新した。
 
-`gtfsTimetable.getActiveServices()` は `start_date` / `end_date` を見るが、当日便生成用の
-`getActiveServiceIds()` は見ない。「現行ダイヤ」と「次期ダイヤ」が同じZIPに同梱されると
-両方が同時に有効になり同じ時刻の便が二重生成。期間切れ後は「時刻表は運行なし／当日便は生成継続」のずれ。
+`db` が既定（UTC）のとき、この修正で挙動が変わるのは **JST 00:00〜09:00 の実行のみ**で、
+前日運行日の便のクローズ・掃除がその時間帯でも正しい暦日境界で行われるようになる（＝DB-1 が
+まさに直そうとしていた点）。JST 09:00 以降は `CURRENT_DATE`（UTC）と JST 日付が一致するため
+従来と同じ。深夜帯（`NIGHT_START`〜`NIGHT_END`、既定23:00〜05:00）は `finishTrips()` 自体が
+止まるため、実際に差が出るのは 05:00〜09:00 の窓。
 
-### DB-3 `daily_trips` の一意キーに位置依存の `frequency_index` が含まれる（中・新規）
+*残っている課題*: なし（`db` コンテナ `TZ` の見送りは上記のとおり意図的）。
 
-*場所*: [backend/src/db/schema.sql:405](../backend/src/db/schema.sql#L405) `UNIQUE (service_date, schedule_trip_id, frequency_index)`
+### DB-2 ✅ 当日便生成の運行日判定に有効期間チェックがない（中）— 既知 M-2 — 対応済み
 
-`frequency_index` は `expandFrequencies` が振る連番。frequencies.txt の内容が変わると
-インスタンスの対応がずれ、`ON CONFLICT` で走行中でない仮想便が別インスタンスの内容に更新されうる。
-G-1（`schedule_trips` の trip_index 問題）の frequencies 版。
+*場所*: [backend/src/services/gtfsCalendar.js](../backend/src/services/gtfsCalendar.js)（`getActiveServiceIdsWithStatus` / 新設 `isWithinServicePeriod`）、[backend/test/gtfsCalendar.test.js](../backend/test/gtfsCalendar.test.js)
 
-### DB-4 一意制約・FKの見直し余地（低）
+**指摘だった状態**: `gtfsTimetable.getActiveServices()`（時刻表検索用）は `calendar.txt` の
+`start_date` / `end_date` を見るが、当日便生成用の `getActiveServiceIdsWithStatus()` は見ない。
+「現行ダイヤ」と「次期ダイヤ」が同じZIPに同梱される運用になると、両方が同時に有効になり
+同じ時刻の便が二重生成される。期間切れ後は逆に「時刻表は運行なし／当日便は生成継続」のずれになる。
+現在の2フィードは全 service が同一期間（`20260801`〜`20280331`）のため顕在化していなかった。
 
-- ~~`vehicle_gps_log (vehicle_id, gps_time_ts)` に一意制約なし~~ → **対応済み**（P-4。
-  `ux_vehicle_gps_log_vehicle_time`）。
-- `stops` を参照する多数の子テーブル（`segment_travel_stats` など）が `ON DELETE` 指定なしで
-  `stops(id)` を参照。G-4 で孤児 `stops` を消せない一因。
-- `completed_trips.trip_id` / `daily_trip_id` / `assignment_id` は FK なし（意図的だが、
-  `daily_trip_id`/`assignment_id` は `UNIQUE` のみ）。
+**現在**: `getActiveServiceIdsWithStatus()` の曜日判定に**有効期間の範囲判定を AND で加えた**
+（3つの曜日区分ロジックを統合したのではなく、有効期間の解釈だけ `getActiveServices()` に揃えた）。
 
-### DB-5 `vehicles` の一意キーが `(route_id, car_id)`（中）— 既知 M-9
+- 新設した `isWithinServicePeriod(calRow, yyyymmdd)` が `start_date <= 対象日 <= end_date`
+  （両端含む・`"YYYYMMDD"` の文字列比較）を判定する。
+- `start_date` / `end_date` が8桁数字でない（欠損・書式違い）フィードは**その端の判定をスキップ**し、
+  従来どおり期間で絞らない（安全側フォールバック。GTFS必須項目だが壊れたフィードで当日便を
+  丸ごと止めない）。
+- `calendar_dates.txt` の追加日（`exception_type=1`）は**期間外でも有効**にする。例外日は期間より
+  優先するのが標準の解釈で、`getActiveServices()` の分岐順序とも一致する。この分岐（`hasException`）は
+  元から期間を見ていないので変更なし。
+- 現行データ（全 service が `20260801`〜`20280331`）では対象日が常に範囲内のため、**生成される
+  当日便は1件も変わらない**。回帰テストで「範囲内の平日は従来どおり service_id を返す」ことと
+  「範囲外は空・かつ `complete: true`（＝読み込み失敗ではない）」を固定した。
 
-*場所*: [backend/src/db/schema.sql:300-310](../backend/src/db/schema.sql#L300-L310)、[backend/src/services/tripAssignment.js:97-104](../backend/src/services/tripAssignment.js#L97-L104)
+*残っている課題*: なし。3つの曜日区分ロジックを1つに統合する話は別（CLAUDE.md 記載の
+「用途ごとに独立」方針は維持）。
 
-1台の物理バスが位置情報CSVの系統IDごとに別 `vehicles` 行になる。系統表示が切り替わる前後の
-GPSが「前の系統の車両行」に入っていると、次の便の候補検索（`v.route_id = trip.route_id`）に
-ヒットせず、始発バス停に実際にバスが居るのに `unassigned` になる。
-一意キーを `(feed_id, car_id)` にして物理車両1台＝1行にする案。
+### DB-3 ✅ `daily_trips` の一意キーに位置依存の `frequency_index` が含まれる（中・新規）— 対応済み
+
+*場所*: [backend/src/db/schema.sql](../backend/src/db/schema.sql)（`daily_trips` の `UNIQUE`）、[backend/src/services/dailyTripBuilder.js](../backend/src/services/dailyTripBuilder.js)（`upsertDailyTrip` の `ON CONFLICT` / `buildInstances`）、[backend/src/db/migrate.js](../backend/src/db/migrate.js)（ステップ44）
+
+**指摘だった状態**: `daily_trips` の一意キー `(service_date, schedule_trip_id, frequency_index)` の
+`frequency_index` は `expandFrequencies()` が生成時に振る連番で、便の同一性を表していない。
+frequencies.txt の `start_time` / `headway_secs` が変わると連番の指すインスタンスがずれ、
+`ON CONFLICT` が**走行中でない仮想便の行に当たって定刻が別インスタンスの内容に書き換わる**。
+G-1 の `schedule_trips.trip_index`（位置依存キー）と同型の問題。現在の2フィードは frequencies.txt を
+持たない（仮想便が1件も存在しない）ため未発現。
+
+**現在**: 一意キーを**位置依存の `frequency_index` から、始発時刻オフセット `offset_minutes` へ**移した。
+`offset_minutes` は「元trip の始発時刻からのシフト量（分）」で、前後に何本のインスタンスがあろうと
+「その仮想便の出発時刻」を安定して表す。
+
+- `schema.sql`: `UNIQUE (service_date, schedule_trip_id, offset_minutes)`。通常便は
+  `offset_minutes = 0`（`frequency_index` も 0）なので、schedule_trip あたり1行という既存の
+  一意性はそのまま。
+- `dailyTripBuilder.upsertDailyTrip()`: `ON CONFLICT (... , offset_minutes)`。UPSERT の SET 句からは
+  `offset_minutes`（キーなので常に一致・no-op）を外し、代わりに表示・ログ用のメタ情報になった
+  `frequency_index` を pending の間だけ最新の連番へ追随させる行を足した。
+- `dailyTripBuilder.buildInstances()`: 同じ `offset_minutes` に丸まるインスタンス
+  （`headway_secs` が60の倍数でない場合に起こりうる）は先勝ちで1件にまとめる。定刻は分単位なので
+  同じ分に出る2便は以降の全処理で区別できず、まとめても情報は失われない
+  （実在のバスダイヤの headway は分単位のため、現実には発生しない防御的な処理）。
+- `migrate.js` ステップ44: 既存DBの旧キーを**列構成で特定して**（制約名がPGバージョンで
+  変わっても動くよう）drop し、新キーを張る。新規DBは schema.sql が既に新キーで作るため即 no-op。
+  万一 `(service_date, schedule_trip_id, offset_minutes)` の重複がある既存データでは、
+  移行を見送って旧キーのまま警告だけ出す（migrate 全体の ROLLBACK を避ける。現行運用では発生しえない）。
+  使い捨ての PostgreSQL 16 コンテナで「旧キー→新キーの入替」「再実行の冪等性」「新規DBでの即 no-op」
+  「新キーが静的便の一意性を保つこと」を確認済み。
+- `expandFrequencies()`（純粋関数・テスト固定済み）は**未変更**。連番 `frequencyIndex` はそのまま返し、
+  丸め・キー化は呼び出し側（`buildInstances`・一意キー）の責務にした。
+
+*残っている課題*: 過去に旧キーで生成された仮想便の行は、`offset_minutes` が入っているので
+そのまま新キーに載る（現行運用では仮想便の行自体が存在しない）。frequencies.txt の
+基準始発時刻そのものが GTFS 改正で動いた場合は、G-1 と同じく全インスタンスの `offset_minutes` が
+そろって変わるため、pending の仮想便は新しい内容で作り直される（担当済みの便は当日中は不変。
+`assignment_state = 'pending'` ガードは従来どおり）。
+
+### DB-4 ✅ 一意制約・FKの見直し余地（低）— 対応済み
+
+*場所*: [backend/src/db/schema.sql](../backend/src/db/schema.sql)、[backend/src/db/migrate.js](../backend/src/db/migrate.js)（ステップ46）
+
+**指摘だった3点の現状**:
+
+1. ~~`vehicle_gps_log (vehicle_id, gps_time_ts)` に一意制約なし~~ → **対応済み**（P-4。
+   `ux_vehicle_gps_log_vehicle_time`）。
+2. **`stops(id)` を参照する子テーブルが `ON DELETE` 指定なし** → `daily_trips.start_stop_id` /
+   `daily_trip_stop_times.stop_id` / `trip_stop_progress.stop_id` / `trip_gps_matches.stop_id` /
+   `completed_trip_stop_times.stop_id` / `segment_travel_stats.from_stop_id` / `to_stop_id` の7つに
+   **`ON DELETE NO ACTION` を明示**した（`completed_trips.trip_id` も同様）。挙動は完全に不変
+   （`NO ACTION` は指定なしのときの既定と同じ）で、変えたのは「CASCADE でも SET NULL でもなく
+   意図的に参照を守る。孤児 `stops` の掃除は `seed.js` の `NOT EXISTS` ガード（G-4）が担う」という
+   スキーマ上の意思表示だけ。`migrate.js` ステップ46が既存DBの制約を明示名（`<table>_<col>_stop_fk`）へ
+   張り替える（目標名の存在をガードにして一度きり）。`trip_arrival_predictions` /
+   `trip_arrival_prediction_log` の `stop_id` だけは短命な予測データなので従来どおり `CASCADE`。
+3. **`completed_trips.trip_id` / `daily_trip_id` / `assignment_id` の扱い** → `trip_id` は
+   `ON DELETE NO ACTION` を明示（`seed.js` は消えた `schedule_trips` を削除せず退避する方式なので
+   CASCADE にすると実績アーカイブごと消える＝known-issues H-6）。`daily_trip_id` / `assignment_id` は
+   **意図的に FK なし・`UNIQUE` のみのまま**（参照先が `DAILY_TRIP_RETENTION_DAYS` で
+   `completed_trips` より先に消えうる。`UNIQUE` は二重アーカイブ防止の安全網で、NULL 同士は
+   PostgreSQL の `UNIQUE` 上重複扱いされない）。この理由を `schema.sql` のコメントに明記した。
+
+*残っている課題*: なし。FK を張るか外すかの判断は上記のとおり確定。
+
+### DB-5 ✅ `vehicles` の一意キーが `(route_id, car_id)`（中）— 既知 M-9 — 対応済み
+
+*場所*: [backend/src/db/schema.sql](../backend/src/db/schema.sql)（`vehicles` / `vehicle_gps_log`）、[backend/src/db/migrate.js](../backend/src/db/migrate.js)（ステップ45）、[backend/src/services/vehicleAssigner.js](../backend/src/services/vehicleAssigner.js)（`getOrCreateVehicle`）、[backend/src/services/tripAssignment.js](../backend/src/services/tripAssignment.js)（`findCandidates`）、[backend/src/config/feeds.js](../backend/src/config/feeds.js)（`getLocationFeedIdsForRoute`）
+
+**指摘だった状態**: `vehicles` の一意キーが `(route_id, car_id)` のため、1台の物理バスが位置情報CSVの
+系統IDごとに別 `vehicles` 行になる（実データでも 373 行のうち 56 台が複数行に割れていた）。折り返しで
+車載器の系統表示が次の系統へ変わる前のGPSが「前の系統の車両行」に入っていると、次の便の候補検索
+（`v.route_id = trip.route_id`）にヒットせず、始発バス停に実際にバスが居るのに `unassigned` になる。
+
+**現在**: 物理車両1台＝1行にし、系統は測位ごとの観測値として持つ。
+
+- **`vehicles` の一意キーを `(feed_id, car_id)` へ**（`feed_id` = 位置情報フィードID）。`migrate.js`
+  ステップ45が、既存の `car_id` ごとの重複行を「直近GPSが最も新しい行」に畳み、
+  `trip_vehicle_assignments` / `daily_trips.assigned_vehicle_id` / `vehicle_gps_log` の参照を
+  付け替える（`(feed_id, car_id)` の UNIQUE がまだ無いことをガードにして一度きり）。開発環境の
+  実DBで、マージ後も**全割り当ての `(便, 物理車両, 役割, 状態)` と全GPSログの `(物理車両, 時刻, 座標)` が
+  マージ前とバイト単位で一致**することを確認済み（56台をマージ・衝突削除0件）。
+- **系統は `vehicle_gps_log.route_id`（測位ごとの観測値）へ**。`vehicles.route_id` /
+  `direction_id` は「直近に観測した値」として残す（表示・既存クエリ互換用）。移行時は各
+  `vehicles` 行が単一 `route_id` 固定だったため、その値をログ全行へバックフィルすれば正確。
+- **`findCandidates()` は2段構え**:
+  - *primary* … `vehicle_gps_log.route_id = trip.route_id` の測位を持つ車両を車両ごとに最新1点。
+    従来の「`vehicles.route_id = trip.route_id`」と**同じ候補集合**（各系統の測位は元々その系統の
+    行にしか入らなかったため）。担当が付いている便の割り当ては一切変わらない。
+  - *fallback* … primary が距離判定後に1台も残らないときだけ、同じ位置情報フィード
+    （`getLocationFeedIdsForRoute()` で解決）の車両で、系統表示が別系統のまま始発バス停100m以内に
+    来ているものを拾う。これが M-9 の修正で、**今まで `unassigned` になっていた便だけに効く**。
+- `getOrCreateVehicle()` は `(feed_id, car_id)` で引き、測位ごとに `vehicle_gps_log.route_id` を
+  書く。移行直後などで `feed_id` 未確定（NULL）の行があれば、その観測フィードで確定させて
+  新しい行を作らない。
+
+*残っている課題*:
+
+- **direction 条件が「直近に観測した方向」で判定される**（マージ前は「その系統の行での直近方向」）。
+  現行は `route_direction_rules` が空＝全路線 `ignore` で direction 条件自体が働かないため差は出ない。
+  将来 `map` 設定を入れる場合はこの解釈差に注意。
+- **`finishService.finishTrips()` のGPS途絶判定が物理車両単位になる**（マージ前は系統行単位）。
+  1台が同時刻帯を跨いで複数便の担当・候補を持つことは稀なため現行データで差は出ないが、
+  fallback 経由で別系統の便の担当も持っている物理車両がGPS途絶すると、その両方の割り当てが終了する。
+- fallback は「同一路線の候補ゼロ」時のみ効くが、始発バス停を共有する別路線のバスが居合わせた場合に
+  それを拾う理論上の余地がある（direction 条件・距離順・同時刻帯重複チェックで抑制）。
 
 ---
 
@@ -1416,9 +1541,11 @@ push 通知がない。夜間・早朝の障害が翌朝まで放置される。
   なることを確認済み）。ローカルタイムに依存する箇所は `seed.js` の `new Date().getFullYear()`
   1か所だけで、これは祝日データを翌年ぶんまで先読み投入するためのもので年末の数時間だけ
   「翌々年ぶんの先読みが1時間遅れる」程度の差（実害なし。JST基準の方がむしろ正しい）。
-- **`db` コンテナの `TZ`（DB-1 の一因）は据え置き** → こちらは `CURRENT_DATE` / `now()::date` の評価が
-  変わり、便のクローズと保持期間掃除のタイミングが動く（＝挙動の変更）ため、DB-1 の範囲とした。
-  compose のコメントにも理由を残してある。
+- **`db` コンテナの `TZ` は据え置き** → DB-1 をコード側で解消した（便のクローズ・保持期間掃除の
+  「今日」を `(now() AT TIME ZONE 'Asia/Tokyo')::date` で評価）ため、`db` コンテナの `TZ` は
+  正しさに影響しなくなった。`postgres:16-alpine` は `tzdata` を同梱しない可能性があり、
+  named TZ が解決できないと無言でUTCに落ちるため、あえて設定しない。compose と README の
+  コメントも「DB-1 はコードで解消済み」に更新した。→ DB-1 参照。
 - ~~`backend` に healthcheck がない（`db` にはある）~~ → **対応済み**（D-8。`GET /healthz` と
   `backend` サービスの healthcheck）。
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD` を compose 本体に書いていない点は意図どおり（秘密情報を
@@ -1428,7 +1555,7 @@ push 通知がない。夜間・早朝の障害が翌朝まで放置される。
 known-issues.md L-10 は G-5 の解消により削除した。
 
 *残っている課題*: TLS終端はいまもリバースプロキシの仕事で、compose にプロキシは含めていない（S-5）。
-`db` 側の `TZ` は DB-1 待ち。
+`db` 側の `TZ` は設定しない（DB-1 をコードで解消したため不要。DB-1 参照）。
 
 ### D-6 ✅ ビルドの再現性がない（`package-lock.json` を使っていない）（中・新規）— 対応済み
 
@@ -1563,7 +1690,8 @@ CLAUDE.md も「lint設定は存在しません」と明記。ESLint + Prettier�
 
 ### X-1 「割り当て不確実」状態が利用者に伝わらない（中）
 
-GPSはあるが割り当てに失敗した便（DB-5/M-9）、GPS途絶でクローズされた便（B-2/H-2）は
+GPSはあるが割り当てに失敗した便（系統表示の切り替わりは DB-5 で対応したが、それ以外の理由で
+候補ゼロになるケースは残る）、GPS途絶でクローズされた便（B-2/H-2）は
 利用者画面で単に「バスがありません」。**物理的にバスが走っているのに情報が消える**のが
 最悪の体験。「接近中（位置概算）」「一時的に追跡不能・最終確認 X時Y分 Z付近」のような
 中間表現を持たせるべき。
@@ -1658,7 +1786,7 @@ API を複数インスタンスにできない（パイプラインが多重に�
 10. ~~**P-1 / P-4**: 区間統計の一括読み込み、`vehicle_gps_log` の一意制約~~ → ✅ 対応済み
 11. ~~**S-2**: 管理画面をサーバーセッション（httpOnly Cookie）へ~~ → ✅ 対応済み
 12. ~~**S-3**: `/api/admin/*` と `/api/route-search` にレートリミット~~ → ✅ 対応済み
-13. **DB-1**: `CURRENT_DATE` 比較のJST化、`db` コンテナに `TZ`
+13. ~~**DB-1 / DB-2 / DB-3**: `CURRENT_DATE` 比較のJST化、当日便生成の有効期間チェック、`daily_trips` 一意キーを `offset_minutes` へ~~ → ✅ 対応済み（`db` コンテナ `TZ` はコード修正で不要になり見送り）
 
 ### 設計判断が要る（四半期）
 

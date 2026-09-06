@@ -729,10 +729,19 @@ router.get('/admin/vehicle-labels', requireAdminAuth, async (req, res) => {
          FROM vehicle_labels vl
          ORDER BY vl.name ASC NULLS LAST, vl.car_id ASC`
       ),
+      // vehicles は (feed_id, car_id) で物理車両1台1行になったため、路線名は「直近に観測した系統」
+      // だけになる。運用者が車両を識別しやすいよう、直近の運行履歴（vehicle_operation_history、
+      // car_id × 曜日区分ごとの直近1日分）の路線も併せて集める。履歴が無ければ直近観測系統にフォールバック。
       pool.query(
         `SELECT v.car_id,
                 MAX(v.last_gps_at) AS last_gps_at,
-                array_agg(DISTINCT r.name) FILTER (WHERE r.name IS NOT NULL) AS route_names
+                COALESCE(
+                  (SELECT array_agg(DISTINCT r2.name)
+                   FROM vehicle_operation_history voh
+                   JOIN routes r2 ON r2.id = voh.route_id
+                   WHERE voh.car_id = v.car_id),
+                  array_remove(array_agg(DISTINCT r.name), NULL)
+                ) AS route_names
          FROM vehicles v
          LEFT JOIN routes r ON r.id = v.route_id
          GROUP BY v.car_id
@@ -1764,7 +1773,7 @@ router.get('/admin/vehicle-positions-map', requireAdminAuth, async (req, res) =>
                LIMIT 1) AS assignment_id
        FROM vehicle_positions_raw vpr
        LEFT JOIN routes r ON r.id = vpr.route_id
-       LEFT JOIN vehicles v ON v.car_id = vpr.car_id AND v.route_id = vpr.route_id
+       LEFT JOIN vehicles v ON v.car_id = vpr.car_id AND (v.feed_id = vpr.feed_id OR v.feed_id IS NULL)
        WHERE vpr.gps_time_ts >= now() - interval '3 minutes'
        ORDER BY vpr.car_id, vpr.gps_time_ts DESC, vpr.id DESC`
     );

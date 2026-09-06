@@ -15,6 +15,7 @@ const { haversineDistanceMeters } = require('../utils/geo');
 const { computeDelayMinutes, computeSignedDelayMinutes, getServiceDateString } = require('../utils/time');
 const { isDirectionIgnored } = require('./directionRules');
 const { getRuntimeSetting } = require('./runtimeSettings');
+const { getLocationFeedIdsForRoute } = require('../config/feeds');
 
 function assignRadiusMeters() {
   return getRuntimeSetting('ASSIGN_RADIUS_METERS');
@@ -85,46 +86,85 @@ async function getStartStop(client, trip) {
  * その範囲内で車両ごとに最新の1点を使う（仕様書 4.2）。
  * 「GPS取得時刻が始発時刻の3分以内」という条件はこのウィンドウと同義のため、
  * 追加の判定は行わない。
+ *
+ * 2段構え（system-review-2026-09 DB-5 / 旧 known-issues M-9）:
+ *   primary  … この便の系統として届いた測位（vehicle_gps_log.route_id = trip.route_id）を
+ *              持つ車両。従来の「vehicles.route_id = trip.route_id」と同じ候補集合。
+ *   fallback … primary が1台も居ないときだけ、同じ位置情報フィードの車両で、系統表示が
+ *              別系統のまま始発バス停に来ているもの（＝折り返しで車載器の系統表示が
+ *              切り替わる前）を位置で拾う。primary が居る便の結果は一切変えない。
  */
 async function findCandidates(client, trip, startStop) {
   const startAt = new Date(trip.start_at);
   const windowStart = new Date(startAt.getTime() - gpsWindowMinutes() * 60 * 1000);
-
-  const res = await client.query(
-    `SELECT DISTINCT ON (v.id)
-            v.id AS vehicle_id, v.car_id, v.direction_id,
-            g.id AS gps_log_id, g.lat, g.lon, g.gps_time, g.gps_time_ts
-     FROM vehicles v
-     JOIN vehicle_gps_log g ON g.vehicle_id = v.id
-     WHERE v.route_id = $1
-       AND g.gps_time_ts >= $2
-       AND g.gps_time_ts <= $3
-     ORDER BY v.id, g.gps_time_ts DESC`,
-    [trip.route_id, windowStart, startAt]
-  );
-
   const radius = assignRadiusMeters();
   const ignoreDirection = isDirectionIgnored(trip.route_id);
-  const candidates = [];
 
-  for (const row of res.rows) {
-    // direction条件（route_direction_rules。管理画面「方向マッピング」で編集）。
-    // 方向を使わない設定の路線（既定）、または車両側の方向が不明（位置情報CSVに
-    // 方向列が無い等）の場合は方向で絞り込まない。
+  // direction条件（route_direction_rules。管理画面「方向マッピング」で編集）＋始発バス停100m以内。
+  // 方向を使わない設定の路線（既定）、または車両側の方向が不明（位置情報CSVに方向列が無い等）は
+  // 方向で絞り込まない。条件を満たせば候補オブジェクト、外れれば null。
+  const toCandidate = (row) => {
     if (!ignoreDirection && row.direction_id !== null && row.direction_id !== undefined) {
-      if (row.direction_id !== trip.direction_id) continue;
+      if (row.direction_id !== trip.direction_id) return null;
     }
-
     const distance = haversineDistanceMeters(row.lat, row.lon, startStop.lat, startStop.lon);
-    if (distance > radius) continue;
-
-    candidates.push({
+    if (distance > radius) return null;
+    return {
       vehicleId: row.vehicle_id,
       carId: row.car_id,
       distance,
       gpsTime: row.gps_time,
       gpsTimeTs: row.gps_time_ts
-    });
+    };
+  };
+
+  const candidates = [];
+  const seenVehicleIds = new Set();
+
+  const primary = await client.query(
+    `SELECT DISTINCT ON (v.id)
+            v.id AS vehicle_id, v.car_id, v.direction_id,
+            g.lat, g.lon, g.gps_time, g.gps_time_ts
+     FROM vehicles v
+     JOIN vehicle_gps_log g ON g.vehicle_id = v.id
+     WHERE g.route_id = $1
+       AND g.gps_time_ts >= $2
+       AND g.gps_time_ts <= $3
+     ORDER BY v.id, g.gps_time_ts DESC`,
+    [trip.route_id, windowStart, startAt]
+  );
+  for (const row of primary.rows) {
+    const c = toCandidate(row);
+    if (c) {
+      candidates.push(c);
+      seenVehicleIds.add(c.vehicleId);
+    }
+  }
+
+  if (candidates.length === 0) {
+    const feedIds = getLocationFeedIdsForRoute(trip.route_id);
+    if (feedIds.length > 0) {
+      const fallback = await client.query(
+        `SELECT DISTINCT ON (v.id)
+                v.id AS vehicle_id, v.car_id, v.direction_id,
+                g.lat, g.lon, g.gps_time, g.gps_time_ts
+         FROM vehicles v
+         JOIN vehicle_gps_log g ON g.vehicle_id = v.id
+         WHERE v.feed_id = ANY($1::text[])
+           AND g.gps_time_ts >= $2
+           AND g.gps_time_ts <= $3
+         ORDER BY v.id, g.gps_time_ts DESC`,
+        [feedIds, windowStart, startAt]
+      );
+      for (const row of fallback.rows) {
+        if (seenVehicleIds.has(row.vehicle_id)) continue;
+        const c = toCandidate(row);
+        if (c) {
+          candidates.push(c);
+          seenVehicleIds.add(c.vehicleId);
+        }
+      }
+    }
   }
 
   // 始発バス停からの距離が近い順（仕様書 7）

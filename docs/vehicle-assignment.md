@@ -24,9 +24,11 @@ daily_trips（当日の便。例：8:00発）
   実績のコピーやマージは一切発生しません。
 - 「最も進んでいる車両を採用する」というマージは**やってはいけません**。別経路をたまたま走っていた
   車両を誤って採用する事故につながります。距離が最も近い候補を採用するルールを守ってください。
-- `vehicles`は「観測されている物理車両」を表すだけで、便との紐付けを持ちません。運行終了しても
-  行は削除せず`status='inactive'`にします（1台が複数便の候補になり得るため、削除するとGPSログが
-  CASCADEで消えて他便の処理まで壊れます）。
+- `vehicles`は「観測されている物理車両」を表すだけで、便との紐付けを持ちません。一意キーは
+  `(feed_id, car_id)`＝位置情報フィード内で`car_id`が指す物理車両1台につき1行で、系統ごとに
+  行を割りません。系統は測位ごとの観測値として`vehicle_gps_log.route_id`に持ち、`vehicles.route_id`は
+  「直近に観測した系統」の表示用です。運行終了しても行は削除せず`status='inactive'`にします
+  （1台が複数便の候補になり得るため、削除するとGPSログがCASCADEで消えて他便の処理まで壊れます）。
 
 ## `assignPendingTrips()` — 初回の割り当て（パイプライン④）
 
@@ -36,13 +38,13 @@ daily_trips（当日の便。例：8:00発）
 
 | 条件 | 実装 |
 |---|---|
-| 同じ路線 | `vehicles.route_id`（qualified route id なのでGTFS側と直接比較できる） |
+| 同じ系統の測位 | **primary**: `vehicle_gps_log.route_id = trip.route_id` の測位を持つ車両（従来の「`vehicles.route_id` 一致」と同じ候補集合）。**fallback**: primary が距離判定後に1台も残らないときだけ、同じ位置情報フィード（`config/feeds.js` の `getLocationFeedIdsForRoute()`）の車両で、系統表示が別系統のまま始発バス停に来ているものを拾う（折り返しで車載器の系統表示が切り替わる前の車両。旧 known-issues M-9 / system-review DB-5） |
 | 始発時刻直前の最新GPS | **始発時刻の3分前〜始発時刻（閉区間）** に存在する最新の1点。始発時刻を1秒でも過ぎたGPSは無効 |
 | 始発バス停から100m以内 | `ASSIGN_RADIUS_METERS`（既定100m）。通過判定の120mとは別の設定値 |
 | direction条件 | `route_direction_rules`（管理画面「方向マッピング」で編集、`services/directionRules.js`が参照）。**既定（行が無い路線）・`mode:'ignore'`の路線、および車両側の方向が不明（NULL）の場合は方向で絞り込まない** |
 | 同時刻帯の別便の担当でない | `hasSamePeriodConflict()`（下記） |
 
-距離が最も近い車両を担当車両（`role = 'assigned'`）にし、残りも候補車両（`role = 'candidate'`）として記録します。候補がゼロなら`assignment_state = 'unassigned'`とし、その便は時刻表上のデータとしては存続しつつリアルタイム情報を持たない扱いになります。
+距離が最も近い車両を担当車両（`role = 'assigned'`）にし、残りも候補車両（`role = 'candidate'`）として記録します。候補がゼロなら`assignment_state = 'unassigned'`とし、その便は時刻表上のデータとしては存続しつつリアルタイム情報を持たない扱いになります。fallback は「従来なら `unassigned` になっていた便」だけに効き、primary で候補が見つかる便の割り当ては変えません。
 
 `ASSIGN_DELAY_SEC`（既定60秒）は、位置情報フィードの配信遅れを吸収するための待ち時間です。**判定に使うGPSの時間窓（始発時刻の3分前〜始発時刻）は変わらず**、遅らせるのは評価タイミングだけです。
 

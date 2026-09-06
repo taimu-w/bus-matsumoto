@@ -199,8 +199,10 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
   "found": true,
   "date": "2026-08-11",
   "baseTime": "09:00",
-  "from": { "stopKey": "100", "name": "松本バスターミナル", ... },
-  "to":   { "stopKey": "263", "name": "信州大学前", ... },
+  "from": { "stopKey": "100", "name": "松本バスターミナル", ... },  // 実際に乗車するバス停
+  "to":   { "stopKey": "263", "name": "信州大学前", ... },          // 実際に降車するバス停
+  "viaSpotFrom": null,                  // 観光スポットを出発地にした場合 { spotId, name, walkMinutes?, distanceMeters? }
+  "viaSpotTo": null,                    // 観光スポットを目的地にした場合（同上）。見出しの地点名はこれを優先する
   "fuzzy": false,                       // 自由文字列であいまい一致したか
   "journeys": [
     {
@@ -251,6 +253,21 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
 - **観光スポットを出発地／目的地にした場合**は、「スポット⇔実際に乗降するバス停」の徒歩を
   `legs` の先頭／末尾に組み込む（`attachSpotWalkLegs()`）。この徒歩レグの端点は
   `stopKey`/`busstopUrl` を持たず、代わりに `spotId` を持つ疑似バス停参照になる。
+  - **元スポットは `viaSpotFrom` / `viaSpotTo`（`spotId`＋`name`）でレスポンスに返す。成否にかかわらず返す**
+    （`common` に載せる）。成立した検索では実際に採用したバス停までの `walkMinutes` / `distanceMeters` も付く。
+    `from` / `to` は**実際に乗降するバス停**を指すので、見出しの地点名（`endpointHeadingHtml()`）は
+    スポット起点／終点なら `viaSpotFrom` / `viaSpotTo` の `name` を優先する（`from.name` を使うと
+    「松本城 → 丸の内」のように目的地がバス停名で出てしまう）。
+  - **`attachSpotWalkLegs()` はリアルタイム重ね合わせ（5.7）の後に呼ばれる。** 末尾（目的地スポット）の
+    徒歩は、最後のバス区間がリアルタイムで遅れていればその**予測到着**を起点にする
+    （`legDisplayArrivalSeconds()`。定刻の `journey.arrivalSeconds` を起点にすると、遅延ぶんが
+    末尾の徒歩・スポット到着へ伝わらず「バスの時刻だけ遅れて徒歩以降は定刻のまま」という
+    ちぐはぐな表示になる）。`journey.arrivalTime`・`journey.durationMinutes` も遅延を含んだ値へ更新する。
+  - 先頭（出発地スポット）の徒歩は逆に**定刻の発車に間に合う時刻**を起点にする。遅延ぶん後ろ倒しすると、
+    バスが定刻へ戻ったときに乗り遅れる案内になるため。
+  - `journey.arrivalSeconds` / `journey.departureSeconds` 自体は**定刻ベースのまま**保持する
+    （「1本前／1本後」の再検索アンカー（6.3.1）が定刻前提のため）。遅延を反映するのは表示用の
+    時刻文字列と所要時間、および各徒歩レグの秒だけ。
 - **連続する徒歩レグは1本にまとめて返す（`mergeConsecutiveWalkLegs()`）。** 探索自体は
   徒歩の連鎖を禁止している（5.3）が、上記のスポットの徒歩が探索側の乗り継ぎの徒歩と
   隣り合うと徒歩が2連続で並ぶ（例：清水で降車 → 徒歩で蚕糸公園 → 徒歩で県ケ丘高校）。
@@ -310,6 +327,12 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
 - 見つかれば `buildBusEntry()` で停車進捗・到着予測・車両位置を取得し、
   **バス停名の一致**で乗車停・降車停・各通過停に予測時刻／通過実績を割り当てる（`busStopApproaching.js` と同じ方針。DBの `stops` は標柱を持たないため名前一致が唯一の接点）。
 - 予測が引けた区間だけ `realtime.hasRealtime = true` とし、引けなくても**定刻で成立させる**（区間ごと落とさない）。
+- **バス区間の遅延は、その後ろに続く徒歩区間・経路全体の到着時刻へも伝播させる。** バスの予測到着で
+  繰り下がった時刻を、直後の乗り継ぎ徒歩レグの発・着（秒ごと）と `journey.arrivalTime` /
+  `journey.durationMinutes` に反映する。反映しないと「バス停の時刻だけ遅れて、乗り換えの徒歩や
+  目的地到着は定刻のまま」というちぐはぐな表示になる（着＜発の逆転が起きることもある）。
+  目的地スポットまでの末尾徒歩は `attachRealtime()` の後に足されるため、`attachSpotWalkLegs()` 側でも
+  同じ起点合わせを行う（5.5）。
 - 同一割り当ての取得はリクエスト内でキャッシュし、同じ便を何度も引かない。
 - **管理画面「リアルタイム休止」中の路線を含む区間は重ね合わせをスキップし、定刻のまま返す**
   （`findLiveAssignment()` が休止路線に `null` を返すため。加えて `attachRealtime()` が
@@ -480,6 +503,10 @@ RAPTOR（ラウンド型）方式を採用する。ダイクストラではな�
 - バッジ（`journeyBadges()`）・運賃文言（`journeyFareText()`）・所要時間バー（`renderDurationBar()`）・
   ヘッダーの地点名（`endpointHeadingHtml()`）は一覧と詳細で**同じ関数を共用する**。同じ経路が
   2画面で違う見た目・違う運賃表記になるのを防ぐため。
+  - `endpointHeadingHtml()` の地点名は `endpointFromName()` / `endpointToName()` が解決し、
+    観光スポット起点／終点なら `viaSpotFrom` / `viaSpotTo` の `name`（スポット名）を、
+    それ以外は `from.name` / `to.name`（バス停名）を出す。「見つからない」表示（6.6）の
+    地点名も同じ関数を使う。
 
 ### 6.4 バス停タップと通過バス停
 

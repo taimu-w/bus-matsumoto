@@ -100,7 +100,8 @@
 
 ## 経路検索：結果画面でのスポット詳細ポップアップ
 
-- 出発地/目的地に観光スポットを指定して検索したとき、結果ヘッダーのスポット名（`viaSpotFrom.name`/`viaSpotTo.name`）をタップすると、写真（カルーセル。「写真表示」節）・営業時間・滞在時間目安・説明文・URLを表示するポップアップを開く。公式サイトリンクのタップは `POST /api/tourist-spots/:id/link-click` へ記録する
+- 出発地/目的地に観光スポットを指定して検索したとき、経路詳細のタイムライン上のスポット名（スポット⇔バス停の徒歩レグの端点。`spotId` を持つ疑似バス停参照）をタップすると、写真（カルーセル。「写真表示」節）・営業時間・滞在時間目安・説明文・URLを表示するポップアップを開く（`spotNameButtonHtml()` / `data-role="rs-spot-name"`）。公式サイトリンクのタップは `POST /api/tourist-spots/:id/link-click` へ記録する
+  - 結果ヘッダーの「出発地 → 目的地」も、スポット起点／終点なら `viaSpotFrom.name`/`viaSpotTo.name`（スポット名）で表示する（実際に乗降するバス停名ではなく）。ヘッダー側はタップ対象ではない
 - ポップアップは`index.html`内の`rs-spot-modal`（既存の`bs-map-modal`等と同じ`window.openModal`/`closeModal`方式）を使い回す
 - 詳細取得は`GET /api/tourist-spots/:id`（`display_tag`の値は問わない、公開API）。経路検索結果の`viaSpotFrom`/`viaSpotTo`は`spotId`・`name`・徒歩情報しか持たないため、タップ時に都度この単発取得APIを呼ぶ
 - 取得に失敗してもポップアップ内にエラー文言を出すだけに留める（soft-fail。経路検索結果自体の表示は妨げない）
