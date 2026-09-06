@@ -1,6 +1,7 @@
 // touristSpots.js のうち、DBアクセスを伴わない純粋関数（parseTouristSpotsText）の回帰テスト。
 // 1列目のID（識別子）のバリデーション、別称（5列目）を "," 区切りで受け付ける挙動、
-// 写真URLを "," 区切りで複数枚受け付ける挙動、タブ区切り17列のバリデーションを固定する。
+// 写真URLを "," 区切りで複数枚受け付ける挙動、タグ（16列目）を "," 区切りで受け付け「近い」を
+// 予約タグとして弾く挙動、タブ区切り17列のバリデーションを固定する。
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { parseTouristSpotsText } = require('../src/services/touristSpots');
@@ -9,7 +10,7 @@ const { parseTouristSpotsText } = require('../src/services/touristSpots');
 function row(overrides = {}) {
   const cols = [
     'id', 'name', 'kana', 'romaji', 'aliases', 'lat', 'lng', 'url', 'hours', 'stayDuration', 'description',
-    'hoursEn', 'stayDurationEn', 'descriptionEn', 'photoUrls', 'category', 'displayTag'
+    'hoursEn', 'stayDurationEn', 'descriptionEn', 'photoUrls', 'tags', 'displayTag'
   ];
   const base = { id: 'matsumotojo', name: '松本城', lat: '36.2381', lng: '137.9686' };
   const merged = { ...base, ...overrides };
@@ -62,12 +63,30 @@ test('parseTouristSpotsText: 別称列が空なら aliases は null', () => {
 });
 
 test('parseTouristSpotsText: 別称の位置はローマ字と緯度の間（他の列がずれない）', () => {
-  const result = parseTouristSpotsText(row({ aliases: 'からす城', category: '史跡', displayTag: '観光' }));
+  const result = parseTouristSpotsText(row({ aliases: 'からす城', tags: '史跡', displayTag: '観光' }));
   assert.equal(result.ok, true);
   assert.equal(result.spots[0].lat, 36.2381);
   assert.equal(result.spots[0].lng, 137.9686);
-  assert.equal(result.spots[0].category, '史跡');
+  assert.equal(result.spots[0].tags, '史跡');
   assert.equal(result.spots[0].displayTag, '観光');
+});
+
+test('parseTouristSpotsText: タグを "," 区切りで受け取り前後空白・空要素を落として連結する', () => {
+  const result = parseTouristSpotsText(row({ tags: ' 神社 , パワースポット ,,史跡' }));
+  assert.equal(result.ok, true);
+  assert.equal(result.spots[0].tags, '神社,パワースポット,史跡');
+});
+
+test('parseTouristSpotsText: タグ列が空なら tags は null', () => {
+  const result = parseTouristSpotsText(row());
+  assert.equal(result.ok, true);
+  assert.equal(result.spots[0].tags, null);
+});
+
+test('parseTouristSpotsText: タグに「近い」があるとエラー（予約タグ）', () => {
+  const result = parseTouristSpotsText(row({ tags: '神社,近い' }));
+  assert.equal(result.ok, false);
+  assert.match(result.errors[0].reason, /タグに「近い」は使えません/);
 });
 
 test('parseTouristSpotsText: 写真URLを "," 区切りで複数枚受け付ける', () => {

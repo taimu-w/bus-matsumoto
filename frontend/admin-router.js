@@ -31,6 +31,7 @@ const SECTION_LOADERS = {
   'realtime-suspension': () => window.AdminRuntimeSuspension.load(),
   'runtime-settings': () => window.AdminRuntimeSettings.load(),
   'tourist-spots': () => window.AdminTouristSpots.load(),
+  'spot-tags': () => window.AdminSpotTags.load(),
   'tourist-spot-clicks': () => window.AdminTouristSpotClicks.load(),
   'vehicle-labels': () => window.AdminVehicleLabels.load(),
   viewers: () => window.AdminViewers.load(),

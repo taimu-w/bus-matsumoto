@@ -16,6 +16,7 @@ const pool = require('../config/db');
 const { normalizeSearchText } = require('../utils/kana');
 const gtfsTimetable = require('./gtfsTimetable');
 const touristSpots = require('./touristSpots');
+const spotTags = require('./spotTags');
 
 // 付近のバス停を探す既定の半径・件数（観光スポット情報機能の findNearbySpots と同じ初期値）。
 const DEFAULT_NEARBY_RADIUS_METERS = 500;
@@ -25,6 +26,10 @@ const MAX_NEARBY_LIMIT = 20;
 // searchNearbyStops は「近い順に N 件」で半径を取らないため、半径内を取りこぼさないよう
 // 多めに取ってから距離でフィルタする（市内の 500m 圏に 80 停留所は入らない）。
 const NEARBY_SCAN_LIMIT = 80;
+
+// タグ検索（by-tags）が一度に返すスポット件数の既定・上限。
+const DEFAULT_TAG_RESULT_LIMIT = 100;
+const MAX_TAG_RESULT_LIMIT = 200;
 
 // 検索回数集計（spot_search_counts）の保持日数。tourist_spot_link_clicks と揃える
 // （1年ルックバックが常に成立するよう13か月弱）。scheduler.js の1時間掃除から呼ばれる。
@@ -293,6 +298,66 @@ function notFound(reason, query) {
 }
 
 // ==========================================================
+// タグ検索（docs/spot-search.md）。名称を使わず、管理画面で各スポットに付けたタグ
+// （tourist_spots.tags）で絞り込む。複数タグはAND（すべて満たすスポット）。
+// 「近い」は予約タグで、現在地から半径500m以内へ絞り込む（管理画面の登録は不要）。
+// 検索回数（spot_search_counts）はここでは増やさない。結果カードをタップして
+// スポットのページ（/api/spot-search?spotId=...）へ移動したときに従来どおり +1 される。
+// ==========================================================
+
+/** タグ検索のタグ一覧。spot_tags を並び順で返し、予約タグ「近い」を別枠で添える。 */
+async function listSearchTags() {
+  const tags = await spotTags.listTagsWithCounts();
+  return {
+    tags,
+    nearTag: { name: spotTags.NEAR_TAG, radiusMeters: spotTags.NEAR_TAG_RADIUS_METERS }
+  };
+}
+
+/**
+ * タグ検索の実行。tags（配列 or "," 区切り文字列）をすべて満たすスポットをカード用に返す。
+ * 「近い」を含むときは lat/lon 必須で、半径500m以内へ絞り込む（距離昇順・徒歩分数つき）。
+ */
+async function searchByTags({ tags, lat, lon, limit } = {}) {
+  const rawList = Array.isArray(tags) ? tags : String(tags || '').split(',');
+  const tagList = [];
+  for (const entry of rawList) {
+    const value = String(entry || '').trim();
+    if (value && !tagList.includes(value)) tagList.push(value);
+  }
+  if (tagList.length === 0) return { found: false, reason: 'no-tags' };
+
+  const near = tagList.includes(spotTags.NEAR_TAG);
+  const realTags = tagList.filter((t) => t !== spotTags.NEAR_TAG);
+
+  const latN = Number.parseFloat(lat);
+  const lonN = Number.parseFloat(lon);
+  const hasOrigin = Number.isFinite(latN) && Number.isFinite(lonN);
+  if (near && !hasOrigin) {
+    return { found: false, reason: 'no-location', tags: tagList, near: true };
+  }
+
+  const spotLimit = clampInt(limit, 1, MAX_TAG_RESULT_LIMIT, DEFAULT_TAG_RESULT_LIMIT);
+  const { spots, total } = await touristSpots.findSpotsByTags(realTags, {
+    lat: near ? latN : undefined,
+    lon: near ? lonN : undefined,
+    radiusMeters: near ? spotTags.NEAR_TAG_RADIUS_METERS : undefined,
+    limit: spotLimit
+  });
+
+  return {
+    found: true,
+    tags: tagList,
+    near,
+    radiusMeters: near ? spotTags.NEAR_TAG_RADIUS_METERS : null,
+    count: spots.length,
+    total,
+    truncated: total > spots.length,
+    spots
+  };
+}
+
+// ==========================================================
 // 検索回数の計測（spot_search_counts、docs/spot-search.md）
 // 「観光スポットの掲載が有用かどうか」を、リンクのタップ回数と並べて管理者が判断するための集計。
 // tourist_spot_link_clicks と同じく Asia/Tokyo 基準の日別カウントで、生ログは持たない。
@@ -400,6 +465,8 @@ module.exports = {
   suggest,
   search,
   searchRoutes,
+  listSearchTags,
+  searchByTags,
   recordSpotSearch,
   getSpotEngagementStats,
   purgeOldSpotSearchCounts,

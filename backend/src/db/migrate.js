@@ -453,16 +453,14 @@ async function migrate() {
     `);
 
     // ==========================================================
-    // 23. tourist_spots に category（カテゴリ、フリーテキスト・情報のみで現時点は検索/表示に未使用）と
-    //     display_tag（表示。空欄、または「観光」「観光スポット」を含まない値のときは
-    //     バス停ページの周辺観光スポット表示からのみ除外する）を追加。
+    // 23. tourist_spots に display_tag（表示。空欄、または「観光」「観光スポット」を含まない値の
+    //     ときはバス停ページの周辺観光スポット表示からのみ除外する）を追加。
     //     地点名検索・詳細ポップアップ取得は display_tag の影響を受けない
     //     （経路検索の地点としては使うが観光スポットではない登録＝学校・病院等への対策）。
     //     新規環境ではschema.sqlのCREATE TABLEに既に含まれているため実質no-op。
+    //     ※ 同時に追加していた category 列は step 47 で tags 列へ改名したため、ここでの
+    //       再追加はしない（毎起動で空の category 列が復活してしまうのを防ぐ）。
     // ==========================================================
-    await client.query(`
-      ALTER TABLE tourist_spots ADD COLUMN IF NOT EXISTS category TEXT
-    `);
     await client.query(`
       ALTER TABLE tourist_spots ADD COLUMN IF NOT EXISTS display_tag TEXT
     `);
@@ -1176,6 +1174,51 @@ async function migrate() {
         END LOOP;
         RAISE NOTICE '[migrate] ステップ46完了: stops/schedule_trips 参照FKに ON DELETE NO ACTION を明示しました';
       END $$;
+    `);
+
+    // ==========================================================
+    // 47. スポット検索の「タグ検索」（docs/spot-search.md）。
+    //     tourist_spots.category（情報保持のみで未使用だった列）を tags へ改名し、
+    //     スポット検索のタグ絞り込みに使う（"," 区切りで複数）。タグの並び順は
+    //     新規テーブル spot_tags（管理画面「タグ管理」）で編集する。
+    //     列の改名は既存データを保つためリネームで行う（step33 photo_url→photo_urls と同型の
+    //     「条件付き一度きり移行」）。新規環境では schema.sql が既に tags 列なので IF で no-op。
+    // ==========================================================
+    await client.query(`
+      DO $$ BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'tourist_spots' AND column_name = 'category')
+           AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'tourist_spots' AND column_name = 'tags') THEN
+          ALTER TABLE tourist_spots RENAME COLUMN category TO tags;
+        END IF;
+      END $$;
+    `);
+    // 改名対象の category 列が無い極端なケース（新規DBはschema.sqlが作成済み）向けの保険。
+    await client.query(`ALTER TABLE tourist_spots ADD COLUMN IF NOT EXISTS tags TEXT`);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS spot_tags (
+        name        TEXT PRIMARY KEY,
+        sort_order  INTEGER NOT NULL DEFAULT 0,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_spot_tags_sort ON spot_tags (sort_order, name)
+    `);
+    // spot_tags が空のとき（＝この移行の初回、または新規DB）だけ、既存の tourist_spots.tags に
+    // 現れるタグを取り込み、名前順で sort_order を採番する。以後は replaceAllTouristSpots が
+    // 同期する（新規タグは末尾へ・未使用タグは削除）。予約タグ「近い」は取り込まない。
+    await client.query(`
+      INSERT INTO spot_tags (name, sort_order)
+      SELECT t.name, row_number() OVER (ORDER BY t.name)
+        FROM (
+          SELECT DISTINCT btrim(tag) AS name
+            FROM tourist_spots, unnest(string_to_array(COALESCE(tags, ''), ',')) AS tag
+           WHERE btrim(tag) <> '' AND btrim(tag) <> '近い'
+        ) AS t
+       WHERE NOT EXISTS (SELECT 1 FROM spot_tags)
+      ON CONFLICT (name) DO NOTHING
     `);
 
     await client.query('COMMIT');

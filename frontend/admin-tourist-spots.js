@@ -41,6 +41,9 @@
         <div class="p-3 space-y-2">
           <p class="font-mono text-[11px] text-slate-400 truncate">ID: ${escapeHtml(s.spotId)}</p>
           <p class="font-bold text-sm truncate">${escapeHtml(s.name)}</p>
+          ${Array.isArray(s.tags) && s.tags.length
+            ? `<p class="flex flex-wrap gap-1">${s.tags.map((t) => `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5">${escapeHtml(t)}</span>`).join('')}</p>`
+            : ''}
           <div class="flex items-center justify-end gap-2">
             <button data-id="${escapeHtml(s.spotId)}" class="spot-delete-btn text-red-600 hover:text-red-800 hover:underline font-bold text-xs">削除</button>
           </div>

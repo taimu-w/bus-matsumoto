@@ -2,7 +2,14 @@
 
 ## 1. 概要
 
-スポット検索は「簡易的な路線・バス停検索」です。利用者が地名（観光スポット・その他のスポット）・
+スポット検索には2つのモードがある。
+
+- **名称検索**（`/spotsearch`）: 地名・バス停・路線を1つ入力して、スポット情報＋付近のバス停＋周辺路線を表示する（この章の 2〜7 節）。スポット検索を開くと最初に出るのはこの画面。
+- **タグ検索**（`/spotsearch?tags=...`）: 名称を使わず、管理画面で各スポットに付けた **タグ** で絞り込む（8節）。名称検索フォームの中のボタンから遷移する（「スポット検索 → 機能選択 → 名称/タグ」という段は挟まない）。
+
+### 名称検索
+
+「簡易的な路線・バス停検索」です。利用者が地名（観光スポット・その他のスポット）・
 バス停・路線を **1つだけ** 入力すると、
 
 - 観光スポット／その他のスポットに解決したときは、そのスポット情報（写真・営業時間・滞在目安・
@@ -106,12 +113,15 @@ GTFSインメモリインデックス（`gtfsTimetable.js`）と `tourist_spots`
 時刻表検索・バス停検索・経路検索と同じく History API（パス）でルーティングする。
 
 ```
-/spotsearch                 検索フォーム
+/spotsearch                 名称検索フォーム
 /spotsearch?spot={id}       観光スポットを対象にした結果
 /spotsearch?stop={stopKey}  バス停を対象にした結果
 /spotsearch?q={文字列}       自由文字列の結果（あいまい一致）
+/spotsearch?tags=a,b        タグ検索（8節）。tags パラメータの「有無」でモードを判定する
 ```
 
+- `readState()` は `tags` パラメータが **存在すれば**（空 `?tags=` でも）タグ検索モードとみなす。
+  `render()` はその場合 `renderTagSearch()` へ分岐し、名称検索フォームは描画しない。
 - ホームメニューの「スポット検索」は `/spotsearch` へのリンク（`data-spa`）。下部タブには入れない
   （5枠が埋まっているため。時刻表検索と同じ扱いで、この画面では下部タブをどれも点灯させない）。
 - 直リンク・リロードでも復帰できる（サーバーは `/api` 以外を `index.html` へフォールバック）。
@@ -142,7 +152,11 @@ GTFSインメモリインデックス（`gtfsTimetable.js`）と `tourist_spots`
    白背景に埋もれないよう帯の縁に薄い暗色の輪郭を重ねる）。タップでリアルタイム時刻表。
 4. 「周辺のバス停」— `primaryStop` ＋ 付近のバス停カード。バス停名 → `/busstop/{stopKey}`（`data-spa`）、
    路線チップ → リアルタイム時刻表（こちらは省スペースのため路線カラーのチップのまま）
+5. スポット情報カードの説明文の下に、そのスポットのタグを `#タグ名` のチップで並べる。
+   タップするとそのタグ1つでタグ検索へ遷移する（`buildUrl({ tagMode:true, tags:[name] })`）。
 
+- 名称検索フォームには「名称がわからないときはタグで探す」ボタンがあり、`/spotsearch?tags=`
+  （タグ未選択のタグ検索）へ `pushState` で遷移する。
 - 検索欄が空のときは、経路検索・バス停検索と同じくお気に入りバス停・近くのバス停を初期候補に出す
   （soft-fail：取れなければ何も出さない）。
 - 路線カラー・コントラスト（`parseHexColor` / `chipTextColor`）は `timetable.js` / `busstop.js` /
@@ -154,9 +168,40 @@ GTFSインメモリインデックス（`gtfsTimetable.js`）と `tourist_spots`
 |---|---|---|
 | GET | `/api/spot-search/suggest?q=&limit=` | 入力候補。`{ stops, spots, routes }`（`stops`＝`gtfsTimetable.searchStops` の結果、`spots`＝`touristSpots.searchTouristSpots` の結果〔`serializeRow` ＋一致度 `matchScore`。別称一致のスポットも含むが別称そのものは返さない〕、`routes`＝`{ qualifiedId, feedId, routeId, name, shortName, color, textColor }`） |
 | GET | `/api/spot-search?spotId=\|stopKey=\|q=&radius=&limit=` | スポット検索の実行。対象がスポットに確定したら検索回数を +1。`{ found, resolvedFrom, origin, spot, primaryStop, nearbyStops, routes, radiusMeters }`、路線解決時は `{ found:true, resolvedFrom:'route', route }`、不一致時は `{ found:false, reason, suggestions:{ stops, spots } }` |
+| GET | `/api/spot-search/tags` | タグ検索のタグ一覧。`{ tags:[{ name, sortOrder, spotCount }], nearTag:{ name:'近い', radiusMeters:500 } }`。`tags` は `spot_tags` の並び順。 |
+| GET | `/api/spot-search/by-tags?tags=a,b&lat=&lon=&limit=` | タグ検索の実行。`tags` を **すべて** 満たすスポットを `serializeRow` 形式で返す（AND、`limit=1..200`（既定100））。`{ found:true, tags, near, radiusMeters, count, total, truncated, spots }`（`total`＝limit前の該当件数、`truncated`＝打ち切られたか）。`spots` は「近い」選択時（`lat`/`lon` 必須）は距離昇順で `distanceMeters`/`walkMinutes` つき、そうでなければ名称順。`tags` 空は `{ found:false, reason:'no-tags' }`、「近い」入りで座標なしは `{ found:false, reason:'no-location' }`。**検索回数は増やさない**（結果カードのタップで `/api/spot-search?spotId=` へ遷移した時に +1 される）。 |
+| GET / PUT | `/api/admin/spot-tags` | （管理）「タグ管理」。GET は `{ tags:[{ name, sortOrder, spotCount }] }`。PUT は `{ order:[タグ名...] }` を表示順として `sort_order` を採番し直す（一覧が古い＝未知・欠落・重複があれば 400）。 |
 | GET | `/api/admin/tourist-spots/link-clicks?from=&to=` | （管理）検索回数とリンクタップ回数のマージ集計。[5節](#5-検索回数の計測spot_search_counts) |
 
-## 8. 実装上の制約
+## 8. タグ検索（`frontend/spotsearch.js` の `renderTagSearch` / `services/spotSearch.js` の `searchByTags`）
+
+名称を使わず、管理画面で各スポットに付けた **タグ**（`tourist_spots.tags`、「,」区切り）で絞り込む。
+
+- **1画面ライブ絞り込み**。上部にタグのチップ一覧（予約タグ「近い」＋ `spot_tags` の並び順）と
+  タグの絞り込み入力を常時出し、チップをタップするたびに URL（`?tags=...`、`replaceState`）を更新して
+  下の結果を取り直す。「検索」ボタンは無い。
+- **複数タグは AND**。選んだタグを **すべて** 満たすスポットだけを、スポットカードで縦に並べる。
+  カードのタップで `/spotsearch?spot={id}`（名称検索と同じスポットのページ）へ `pushState` 遷移する。
+  そのページ表示で検索回数（`spot_search_counts`）が +1 される（タグ検索の一覧表示自体では増やさない）。
+- **タグ検索の対象は `tourist_spots` 全件**（`display_tag` で絞らない。名称検索と同じ）。タグが
+  付いていれば「その他のスポット」（学校・病院など）もヒットする＝何を出すかは管理者のタグ付けで決まる。
+- **「近い」は予約タグ**。`spot_tags` には入らず（`parseTouristSpotsText` がタグ名としての登録を弾く）、
+  常にチップ一覧の先頭に出る。選ぶと現在地（`window.getUserLocation()`）を要求し、許可されれば
+  半径 **500m** 以内へ絞り込む（`by-tags` に `lat`/`lon` を渡す）。許可されなければ選択しない。
+  他のタグと併用でき、その場合も AND（500m 以内かつ全タグを満たす）。
+
+### タグの並び順レジストリ（`spot_tags` テーブル / `services/spotTags.js` / 管理画面「タグ管理」）
+
+- `spot_tags(name PK, sort_order, updated_at)` は「タグ検索のタグ一覧に出す順序」だけを持つ。
+- タグの実体は `tourist_spots.tags`。**全件洗い替え（`replaceAllTouristSpots`）のたびに**
+  `spotTags.syncTagRegistry()` が「1件以上のスポットが付けているタグ」へこの表を同期する
+  （新規タグは既存の最大 `sort_order` の後ろへ名前順で採番、どのスポットも付けなくなったタグは削除）。
+- 管理画面「タグ管理」（`admin-spot-tags.js` / `section-spot-tags`）は `sort_order` だけを
+  ▲▼で並べ替えて `PUT /api/admin/spot-tags` で保存する（タグの追加・削除はしない）。
+- 依存の向きは `spotSearch.js` → `touristSpots.js` → `spotTags.js`、`spotTags.js` は
+  `config/db` しか見ない（循環参照なし）。
+
+## 9. 実装上の制約
 
 - **`gtfsTimetable.js` の公開関数のシグネチャは変えない**（時刻表検索・バス停検索・経路検索と
   インデックスを共用）。スポット検索は `searchStops` / `searchNearbyStops` /
@@ -166,7 +211,12 @@ GTFSインメモリインデックス（`gtfsTimetable.js`）と `tourist_spots`
   `spotSearch.js` → `touristSpots.js` の一方向のみ。検索回数とタップ回数のマージは
   `spotSearch.getSpotEngagementStats()` が担う）。
 - 検索回数の記録は「対象が観光スポット／その他のスポット／バス停に解決したとき」だけ。
-  サジェスト（`/api/spot-search/suggest`）では記録しない。
+  サジェスト（`/api/spot-search/suggest`）・タグ検索の一覧（`/api/spot-search/by-tags`）では記録しない。
+- **「近い」はタグ名として使えない予約語**。`parseTouristSpotsText` が弾き、`spot_tags` にも入れない。
+  `searchByTags` は選択タグに「近い」があれば現在地フィルタ（半径500m）として解釈し、残りを
+  実タグの AND 条件にする。予約語を増やすときは `spotTags.NEAR_TAG` の近くにまとめること。
+- **`spot_tags` に外部キーを張らない**（タグの実体は `tourist_spots.tags` の文字列で、
+  同期は `replaceAllTouristSpots` の中の `syncTagRegistry()` が一手に担う）。
 - **別称（`tourist_spots.aliases`）は `serializeRow` に含めない**＝サジェスト・結果・
   単発取得（`/api/tourist-spots/:id`）のどのレスポンスにも出さない。候補一致専用。
   別称でしか一致しないスポットを自由文字列で解決できるよう、`searchTouristSpots()` は

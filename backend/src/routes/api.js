@@ -42,6 +42,7 @@ const { listLinkableTrips, linkVehicleToTrip, unlinkAssignment } = require('../s
 const { SUCCESS_END_REASONS } = require('../services/finishService');
 const touristSpots = require('../services/touristSpots');
 const spotSearch = require('../services/spotSearch');
+const spotTags = require('../services/spotTags');
 const busstopNotices = require('../services/busstopNotices');
 const { invalidateHolidayCache } = require('../services/holidayCalendar');
 const { invalidateRouteExternalIdCache } = require('../services/routeExternalIdMapping');
@@ -1159,6 +1160,33 @@ router.delete('/admin/tourist-spots/:id', requireAdminAuth, async (req, res) => 
   }
 });
 
+// GET /api/admin/spot-tags -> 管理画面「タグ管理」。タグ検索のタグを並び順・スポット件数つきで返す。
+router.get('/admin/spot-tags', requireAdminAuth, async (req, res) => {
+  try {
+    res.json({ tags: await spotTags.listTagsWithCounts() });
+  } catch (err) {
+    console.error('[api] /admin/spot-tags 取得エラー:', err);
+    res.status(500).json({ error: 'タグ一覧の取得に失敗しました。' });
+  }
+});
+
+// PUT /api/admin/spot-tags -> タグの並び順を保存（{ order: [タグ名...] } を表示順とみなす）。
+// タグの追加・削除はスポット登録（tourist_spots.tags の全件洗い替え）側で行うため、ここでは並び順だけ。
+router.put('/admin/spot-tags', requireAdminAuth, async (req, res) => {
+  const order = (req.body && req.body.order) || null;
+  if (!Array.isArray(order)) {
+    return res.status(400).json({ error: 'order（タグ名の配列）を指定してください。' });
+  }
+  try {
+    const result = await spotTags.reorderTags(order);
+    if (!result.ok) return res.status(400).json(result);
+    res.json(result);
+  } catch (err) {
+    console.error('[api] /admin/spot-tags 保存エラー:', err);
+    res.status(500).json({ error: 'タグの並び順の保存に失敗しました。' });
+  }
+});
+
 // ==========================================================
 // バス停お知らせ配信（docs/busstop-notices.md）。
 // バス停詳細ページの「このバス停でできること」の下に出す。
@@ -1732,6 +1760,34 @@ router.get('/spot-search/suggest', async (req, res) => {
   } catch (err) {
     console.error('[api] /spot-search/suggest エラー:', err);
     res.status(500).json({ error: 'スポット候補の取得に失敗しました。' });
+  }
+});
+
+// GET /api/spot-search/tags -> タグ検索のタグ一覧（並び順つき）＋予約タグ「近い」。
+router.get('/spot-search/tags', async (req, res) => {
+  try {
+    res.json(await spotSearch.listSearchTags());
+  } catch (err) {
+    console.error('[api] /spot-search/tags エラー:', err);
+    res.status(500).json({ error: 'タグ一覧の取得に失敗しました。' });
+  }
+});
+
+// GET /api/spot-search/by-tags?tags=a,b&lat=&lon=&limit= -> タグ検索の実行。
+// tags をすべて満たすスポットをカード用に返す（AND）。「近い」は lat/lon 必須で半径500m以内へ絞る。
+// 検索回数（spot_search_counts）は増やさない（結果カードのタップでスポットページへ遷移した時に +1 される）。
+router.get('/spot-search/by-tags', async (req, res) => {
+  try {
+    const result = await spotSearch.searchByTags({
+      tags: req.query.tags || '',
+      lat: req.query.lat,
+      lon: req.query.lon,
+      limit: req.query.limit
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[api] /spot-search/by-tags エラー:', err);
+    res.status(500).json({ error: 'タグ検索に失敗しました。' });
   }
 });
 

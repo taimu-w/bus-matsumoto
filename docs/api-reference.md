@@ -36,12 +36,15 @@
 
 ## スポット検索
 
-「簡易的な路線・バス停検索」。地名（観光スポット・その他のスポット）・バス停・路線を1つ入力すると、スポット情報＋付近のバス停＋周辺を通る路線を返す。詳細は[spot-search.md](spot-search.md)。
+「簡易的な路線・バス停検索」。**名称検索**（地名・バス停・路線を1つ入力→スポット情報＋付近のバス停＋周辺路線）と、**タグ検索**（管理画面で各スポットに付けたタグで絞り込み）の2モード。詳細は[spot-search.md](spot-search.md)。
 
 | メソッド | パス | 概要 |
 |---|---|---|
 | GET | `/api/spot-search/suggest` | 入力候補（`q`・`limit`）。`{ stops, spots, routes }` をまとめて返す（バス停・観光スポットは時刻表検索／経路検索と同じ検索、路線は`routes`テーブルの名称一致） |
-| GET | `/api/spot-search` | **1IPあたり`COUNT_RATE_LIMIT_PER_MIN`件/分の上限あり（既定240。検索回数を増やす副作用があるため）。** スポット検索の実行（`spotId`／`stopKey`／`q` のいずれか、`radius=100..3000`（既定500）、`limit=1..20`（既定8））。対象が観光スポット／その他のスポット／バス停に解決したら検索回数を+1する（`spot_search_counts`）。路線に解決した場合は`{ found:true, resolvedFrom:'route', route }`を返し、フロントがリアルタイム時刻表へ遷移する |
+| GET | `/api/spot-search` | **1IPあたり`COUNT_RATE_LIMIT_PER_MIN`件/分の上限あり（既定240。検索回数を増やす副作用があるため）。** スポット検索（名称検索）の実行（`spotId`／`stopKey`／`q` のいずれか、`radius=100..3000`（既定500）、`limit=1..20`（既定8））。対象が観光スポット／その他のスポット／バス停に解決したら検索回数を+1する（`spot_search_counts`）。路線に解決した場合は`{ found:true, resolvedFrom:'route', route }`を返し、フロントがリアルタイム時刻表へ遷移する |
+| GET | `/api/spot-search/tags` | タグ検索のタグ一覧。`{ tags:[{ name, sortOrder, spotCount }], nearTag:{ name:'近い', radiusMeters:500 } }`（`tags`は`spot_tags`の並び順） |
+| GET | `/api/spot-search/by-tags` | タグ検索の実行（`tags=a,b`＝AND、`lat`/`lon`＝「近い」選択時に必須、`limit=1..200`（既定100））。`{ found, tags, near, radiusMeters, count, total, truncated, spots }`。`spots`は`serializeRow`形式（「近い」時は距離昇順＋`distanceMeters`/`walkMinutes`）。`display_tag`では絞らない。**検索回数は増やさない**（結果カードのタップで`/api/spot-search?spotId=`へ遷移した時に+1） |
+| GET / PUT | `/api/admin/spot-tags` | （管理）「タグ管理」。GET＝`{ tags:[{ name, sortOrder, spotCount }] }`、PUT＝`{ order:[タグ名...] }`を表示順として`sort_order`を採番し直す（一覧が古いと400。タグの追加・削除はしない） |
 
 ## 時刻表検索・バス停検索
 

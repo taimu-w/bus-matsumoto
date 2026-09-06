@@ -9,10 +9,12 @@
  * バス停名タップでバス停ページ（/busstop/{stopKey}）へ遷移する。
  *
  * 画面とURL:
- *   /spotsearch                 検索フォーム
+ *   /spotsearch                 名称検索フォーム
  *   /spotsearch?spot={id}       観光スポットを対象にした結果
  *   /spotsearch?stop={stopKey}  バス停を対象にした結果
  *   /spotsearch?q={文字列}       自由文字列の結果（あいまい一致）
+ *   /spotsearch?tags=a,b        タグ検索（管理画面で各スポットに付けたタグで絞り込み。
+ *                               「近い」は現在地から半径500m以内。1画面ライブ絞り込み）
  *
  * 時刻表検索・バス停検索・経路検索と同じくHistory API（パス）でルーティングする。
  * data-spa の委任クリックリスナーは timetable.js が document 全体へ登録済みなので
@@ -33,6 +35,10 @@
   // 「近くのバス停」候補。位置情報の許可ダイアログを毎回出さないよう使い回す。
   let nearbyStopsCache = null;
   let nearbyStopsPromise = null;
+  // タグ検索：タグ一覧（/api/spot-search/tags）と、「近い」タグ用の現在地。使い回す。
+  let tagListCache = null;
+  let tagSearchLocation = null;
+  let tagSearchSeq = 0;
 
   /* ---------- 小さなヘルパー ---------- */
   function esc(value) {
@@ -149,15 +155,19 @@
     return {
       spotId: params.get('spot') || '',
       stopKey: params.get('stop') || '',
-      q: params.get('q') || ''
+      q: params.get('q') || '',
+      // tags パラメータの「有無」でタグ検索モードを判定する（空 ?tags= はモード入口）。
+      tagMode: params.has('tags'),
+      tags: (params.get('tags') || '').split(',').map((s) => s.trim()).filter(Boolean)
     };
   }
 
-  function buildUrl({ spotId, stopKey, q } = {}) {
+  function buildUrl({ spotId, stopKey, q, tagMode, tags } = {}) {
     const params = new URLSearchParams();
     if (spotId) params.set('spot', spotId);
     else if (stopKey) params.set('stop', stopKey);
     else if (q) params.set('q', q);
+    else if (tagMode) params.set('tags', (tags || []).join(','));
     const qs = params.toString();
     return `/spotsearch${qs ? `?${qs}` : ''}`;
   }
@@ -193,6 +203,13 @@
     setTitle('スポット検索', 'Spot Search');
 
     const state = readState();
+
+    // タグ検索モード（?tags= の有無で判定）は専用画面へ。
+    if (state.tagMode) {
+      await renderTagSearch(state, seq);
+      return;
+    }
+
     const hasTarget = state.spotId || state.stopKey || state.q;
 
     root().innerHTML = `
@@ -207,11 +224,18 @@
                class="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-emerald-500 focus:outline-none font-bold">
         <p class="text-[11px] text-gray-500 font-bold mt-2">1文字でも候補が出ます。観光スポットを選ぶと、そのスポット情報と付近のバス停・路線を表示します。</p>
         <div id="ss-suggest" class="mt-3 space-y-1"></div>
+        <button type="button" data-role="ss-go-tags"
+                class="mt-3 w-full flex items-center justify-center gap-1.5 text-sm font-bold text-emerald-800 bg-emerald-50 border-2 border-emerald-200 rounded-xl px-4 py-2.5 hover:bg-emerald-100 active:scale-[0.99] transition-all">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M7 7h.01M7 3h5a2 2 0 011.414.586l7 7a2 2 0 010 2.828l-5 5a2 2 0 01-2.828 0l-7-7A2 2 0 013 10V5a2 2 0 012-2z"/></svg>
+          名称がわからないときはタグで探す
+        </button>
       </div>
       <div id="ss-result" class="mt-6"></div>
     `;
 
     bindForm(state);
+    const goTags = root().querySelector('[data-role="ss-go-tags"]');
+    if (goTags) goTags.addEventListener('click', () => navigate(buildUrl({ tagMode: true, tags: [] })));
 
     if (hasTarget) await runSearch(state, seq);
   }
@@ -477,6 +501,11 @@
           ${spot.hours ? `<p class="text-xs text-gray-500 mt-2">営業時間：${esc(spot.hours)}</p>` : ''}
           ${spot.stayDuration ? `<p class="text-xs text-gray-500">滞在目安：${esc(spot.stayDuration)}</p>` : ''}
           ${spot.description ? `<p class="text-sm text-gray-700 mt-2 leading-relaxed">${esc(spot.description)}</p>` : ''}
+          ${Array.isArray(spot.tags) && spot.tags.length ? `
+            <div class="flex flex-wrap gap-1.5 mt-2.5">
+              ${spot.tags.map((tag) => `<button type="button" data-role="ss-tag-link" data-tag="${esc(tag)}"
+                   class="text-[11px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-1 hover:bg-emerald-100">#${esc(tag)}</button>`).join('')}
+            </div>` : ''}
           ${spot.url ? `
             <a href="${esc(spot.url)}" target="_blank" rel="noopener noreferrer" data-spot-link="${esc(spot.spotId)}"
                class="inline-flex items-center gap-1 mt-3 text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-full px-3 py-1 hover:bg-indigo-100">
@@ -600,7 +629,245 @@
     container.querySelectorAll('[data-role="ss-use-spot"]').forEach((button) => {
       button.addEventListener('click', () => navigate(buildUrl({ spotId: button.dataset.id })));
     });
+    container.querySelectorAll('[data-role="ss-tag-link"]').forEach((button) => {
+      button.addEventListener('click', () => navigate(buildUrl({ tagMode: true, tags: [button.dataset.tag] })));
+    });
     if (window.SpotPhotos) window.SpotPhotos.hydrate(container);
+  }
+
+  /* ==========================================================
+   * タグ検索（1画面ライブ絞り込み） / docs/spot-search.md
+   *   ・上部に「登録されているタグ」＋予約タグ「近い」をチップで一覧表示（タグ自体も絞り込める）
+   *   ・タグをタップするたび URL（?tags=...）を replaceState で更新し、下の結果を再取得
+   *   ・複数タグは AND（すべて満たすスポット）。結果はスポットカードで縦に並べる
+   *   ・カードのタップで /spotsearch?spot={id}（名称検索と同じスポットのページ）へ。
+   *     そのページ表示で検索回数（spot_search_counts）が +1 される
+   * ========================================================== */
+  async function renderTagSearch(state, seq) {
+    if (!root()) return;
+    let selectedTags = state.tags.slice();
+
+    root().innerHTML = `
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold text-emerald-900">タグ検索</h2>
+        <button type="button" data-role="ss-back-name" class="text-sm font-bold text-emerald-700">名称検索へ</button>
+      </div>
+      <div class="bg-white rounded-2xl shadow-sm border-2 border-emerald-200 p-5">
+        <p class="text-sm font-bold text-gray-700">タグでスポットを絞り込む</p>
+        <p class="text-[11px] text-gray-500 font-bold mt-1">タグを選ぶと下に結果が出ます。複数選ぶと「すべてに当てはまる」スポットに絞られます。</p>
+        <input id="ss-tag-filter" type="search" autocomplete="off" placeholder="タグを絞り込む"
+               class="mt-3 w-full px-3 py-2 border-2 border-gray-200 rounded-xl focus:border-emerald-500 focus:outline-none font-bold text-sm">
+        <div id="ss-tag-chips" class="mt-3 flex flex-wrap gap-2"></div>
+        <div id="ss-tag-selected" class="mt-3"></div>
+      </div>
+      <div id="ss-tag-result" class="mt-6"></div>
+    `;
+
+    root().querySelector('[data-role="ss-back-name"]').addEventListener('click', () => navigate(buildUrl({})));
+
+    const filterInput = document.getElementById('ss-tag-filter');
+    filterInput.addEventListener('input', () => renderTagChips(filterInput.value.trim()));
+
+    // タグ一覧の取得（soft-fail：取れなければその旨だけ出す）
+    if (!tagListCache) {
+      try {
+        tagListCache = await fetchJson(`${API_BASE}/spot-search/tags`);
+      } catch (err) {
+        tagListCache = null;
+      }
+    }
+    if (seq !== renderSeq) return;
+
+    function currentTags() { return selectedTags; }
+
+    function setTags(next) {
+      selectedTags = next;
+      // ?tags= の履歴を積まない（トグルのたびに戻るが1回で名称検索へ帰れるように）
+      window.history.replaceState({}, '', buildUrl({ tagMode: true, tags: selectedTags }));
+      renderTagChips(filterInput.value.trim());
+      renderTagSelected();
+      runTagSearch(selectedTags, ++tagSearchSeq);
+    }
+
+    async function toggleTag(name) {
+      const has = selectedTags.includes(name);
+      if (has) {
+        if (name === '近い') tagSearchLocation = null;
+        setTags(selectedTags.filter((t) => t !== name));
+        return;
+      }
+      if (name === '近い') {
+        // 「近い」は現在地が必要。許可されなければ選択しない。
+        const chip = document.querySelector('[data-role="ss-tag-chip"][data-tag="近い"]');
+        if (chip) chip.textContent = '近い（現在地を取得中…）';
+        const loc = typeof window.getUserLocation === 'function' ? await window.getUserLocation() : null;
+        if (seq !== renderSeq) return; // 待っている間に画面が変わっていたら何もしない
+        if (!loc) {
+          renderTagChips(filterInput.value.trim());
+          const box = document.getElementById('ss-tag-selected');
+          box.innerHTML = '<p class="text-xs font-bold text-red-600">現在地を取得できませんでした。端末の位置情報を許可してから「近い」を選んでください。</p>';
+          return;
+        }
+        tagSearchLocation = loc;
+      }
+      setTags(selectedTags.concat([name]));
+    }
+
+    function renderTagChips(filterText) {
+      const box = document.getElementById('ss-tag-chips');
+      if (!box) return;
+      if (!tagListCache) {
+        box.innerHTML = '<p class="text-xs font-bold text-gray-400">タグ一覧を取得できませんでした。</p>';
+        return;
+      }
+      const nq = (filterText || '').toLowerCase();
+      const near = tagListCache.nearTag || { name: '近い' };
+      const dbTags = (tagListCache.tags || []);
+      const items = [];
+      if (!nq || near.name.toLowerCase().includes(nq)) {
+        items.push({ name: near.name, special: true });
+      }
+      for (const t of dbTags) {
+        if (!nq || t.name.toLowerCase().includes(nq)) items.push({ name: t.name, spotCount: t.spotCount });
+      }
+      if (items.length === 0) {
+        box.innerHTML = '<p class="text-xs font-bold text-gray-400">一致するタグがありません。</p>';
+        return;
+      }
+      box.innerHTML = items.map((item) => {
+        const on = currentTags().includes(item.name);
+        const base = 'text-xs font-bold rounded-full px-3 py-1.5 border-2 active:scale-95 transition-all';
+        const cls = item.special
+          ? (on ? 'bg-amber-500 border-amber-500 text-white' : 'bg-amber-50 border-amber-300 text-amber-800 hover:bg-amber-100')
+          : (on ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-gray-200 text-gray-700 hover:border-emerald-400');
+        const count = !item.special && Number.isFinite(item.spotCount) ? `<span class="opacity-60 ml-0.5">${item.spotCount}</span>` : '';
+        return `<button type="button" data-role="ss-tag-chip" data-tag="${esc(item.name)}" aria-pressed="${on}"
+                   class="${base} ${cls}">${item.special ? '📍 ' : ''}${esc(item.name)}${count}</button>`;
+      }).join('');
+      box.querySelectorAll('[data-role="ss-tag-chip"]').forEach((btn) => {
+        btn.addEventListener('click', () => toggleTag(btn.dataset.tag));
+      });
+    }
+
+    function renderTagSelected() {
+      const box = document.getElementById('ss-tag-selected');
+      if (!box) return;
+      if (currentTags().length === 0) {
+        box.innerHTML = '<p class="text-[11px] font-bold text-gray-400">タグを1つ以上選んでください。</p>';
+        return;
+      }
+      box.innerHTML = `
+        <div class="flex items-center justify-between gap-2">
+          <p class="text-[11px] font-bold text-gray-500 truncate">選択中：${currentTags().map((t) => `#${esc(t)}`).join(' ')}</p>
+          <button type="button" data-role="ss-tag-clear" class="text-[11px] font-bold text-emerald-700 shrink-0">すべて解除</button>
+        </div>`;
+      box.querySelector('[data-role="ss-tag-clear"]').addEventListener('click', () => { tagSearchLocation = null; setTags([]); });
+    }
+
+    renderTagChips('');
+    renderTagSelected();
+    if (selectedTags.length > 0) {
+      // 直リンク・リロードで「近い」入りのURLが来たら現在地を取り直す
+      if (selectedTags.includes('近い') && !tagSearchLocation && typeof window.getUserLocation === 'function') {
+        tagSearchLocation = await window.getUserLocation();
+        if (seq !== renderSeq) return;
+      }
+      runTagSearch(selectedTags, ++tagSearchSeq);
+    } else {
+      const container = document.getElementById('ss-tag-result');
+      if (container) container.innerHTML = '';
+    }
+  }
+
+  async function runTagSearch(tags, seq) {
+    const container = document.getElementById('ss-tag-result');
+    if (!container) return;
+    if (!tags || tags.length === 0) { container.innerHTML = ''; return; }
+
+    container.innerHTML = `
+      <div class="bg-emerald-50 border-2 border-emerald-200 rounded-2xl p-4">
+        <p class="text-sm font-bold text-emerald-900">絞り込んでいます...</p>
+      </div>`;
+
+    const params = new URLSearchParams();
+    params.set('tags', tags.join(','));
+    if (tags.includes('近い') && tagSearchLocation) {
+      params.set('lat', tagSearchLocation.lat);
+      params.set('lon', tagSearchLocation.lng);
+    }
+
+    let result;
+    try {
+      result = await fetchJson(`${API_BASE}/spot-search/by-tags?${params.toString()}`);
+    } catch (err) {
+      if (seq !== tagSearchSeq) return;
+      container.innerHTML = `
+        <div class="bg-red-50 border-2 border-red-300 rounded-2xl p-4">
+          <p class="text-sm font-bold text-red-900">タグ検索に失敗しました：${esc(err.message)}</p>
+        </div>`;
+      return;
+    }
+    if (seq !== tagSearchSeq) return;
+
+    if (!result.found && result.reason === 'no-location') {
+      container.innerHTML = `
+        <div class="bg-yellow-50 border-2 border-yellow-300 rounded-2xl p-4">
+          <p class="text-sm font-bold text-yellow-900">「近い」で絞り込むには現在地が必要です。端末の位置情報を許可してください。</p>
+        </div>`;
+      return;
+    }
+
+    const spots = (result.found && result.spots) || [];
+    if (spots.length === 0) {
+      container.innerHTML = `
+        <div class="bg-yellow-50 border-2 border-yellow-300 rounded-2xl p-4">
+          <p class="text-sm font-bold text-yellow-900">選んだタグ（${tags.map((t) => `#${esc(t)}`).join(' ')}）にすべて当てはまるスポットはありませんでした。</p>
+        </div>`;
+      return;
+    }
+
+    const countLabel = result.truncated
+      ? `条件に合うスポット ${result.total}件のうち${spots.length}件を表示`
+      : `条件に合うスポット ${spots.length}件`;
+    container.innerHTML = `
+      <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-100 p-4">
+        <p class="text-xs font-bold text-gray-500 mb-2">
+          ${countLabel}${result.near ? `（現在地から半径${Math.round(result.radiusMeters)}m）` : ''}
+          <span class="block text-[10px] font-bold text-gray-400 mt-0.5">カードをタップするとそのスポットのページ（付近のバス停・路線）へ移動します${result.truncated ? '。件数が多いときはタグを追加で絞り込んでください' : ''}</span>
+        </p>
+        <div class="space-y-2">${spots.map(tagResultCardHtml).join('')}</div>
+      </div>`;
+
+    container.querySelectorAll('[data-role="ss-tag-spot"]').forEach((card) => {
+      card.addEventListener('click', () => navigate(buildUrl({ spotId: card.dataset.id })));
+    });
+    container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  function tagResultCardHtml(spot) {
+    const photo = Array.isArray(spot.photoUrls) && spot.photoUrls[0] ? spot.photoUrls[0] : '';
+    const reading = [spot.kana, spot.romaji].filter(Boolean).join(' / ');
+    const distance = Number.isFinite(spot.walkMinutes)
+      ? `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1 shrink-0">徒歩約${spot.walkMinutes}分（${spot.distanceMeters}m）</span>`
+      : '';
+    const tagChips = Array.isArray(spot.tags) && spot.tags.length
+      ? `<span class="flex flex-wrap gap-1 mt-1.5">${spot.tags.slice(0, 6).map((t) => `<span class="text-[10px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">#${esc(t)}</span>`).join('')}</span>`
+      : '';
+    return `
+      <button type="button" data-role="ss-tag-spot" data-id="${esc(spot.spotId)}"
+              class="w-full text-left bg-white border-2 border-gray-100 rounded-xl p-3 hover:border-emerald-400 active:scale-[0.99] transition-all flex gap-3">
+        ${photo ? `<img src="${esc(photo)}" alt="" class="w-14 h-14 rounded-lg object-cover shrink-0">` : ''}
+        <span class="min-w-0 flex-1">
+          <span class="flex items-start justify-between gap-2">
+            <span class="font-bold text-gray-900 truncate">${esc(spot.name)}</span>
+            ${distance}
+          </span>
+          ${reading ? `<span class="block text-[11px] text-gray-400 truncate">${esc(reading)}</span>` : ''}
+          ${spot.hours ? `<span class="block text-[11px] text-gray-500 mt-0.5 truncate">営業時間：${esc(spot.hours)}</span>` : ''}
+          ${tagChips}
+        </span>
+        <svg class="w-4 h-4 text-gray-300 shrink-0 self-center" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>
+      </button>`;
   }
 
   window.SpotSearchView = { render, isSpotSearchPath, navigate };

@@ -10,6 +10,7 @@
 const pool = require('../config/db');
 const { haversineDistanceMeters, estimateWalkMinutes } = require('../utils/geo');
 const { kanaToRomaji, capitalizeRomaji, normalizeSearchText } = require('../utils/kana');
+const spotTags = require('./spotTags');
 
 const DEFAULT_NEARBY_RADIUS_METERS = 500; // バス停統合しきい値400mを参考にした初期値
 const DEFAULT_NEARBY_LIMIT = 5;
@@ -58,7 +59,8 @@ function serializeRow(row) {
     stayDurationEn: row.stay_duration_en,
     descriptionEn: row.description_en,
     photoUrls: splitPhotoUrls(row.photo_urls),
-    category: row.category,
+    // スポット検索の「タグ検索」で使うタグ（"," 区切り）。並び順は spot_tags テーブル。
+    tags: spotTags.splitTags(row.tags),
     displayTag: row.display_tag
   };
 }
@@ -178,6 +180,58 @@ async function searchTouristSpots(query, limit = 10) {
     .filter(Boolean);
 }
 
+/**
+ * スポット検索の「タグ検索」用。指定タグ（正規化して比較）を **すべて** 付けているスポットを返す。
+ * lat/lon（＋ radiusMeters）を渡すと、その円内へ絞り込み（BBoxで候補を絞ってから haversine）、
+ * 各要素に直線距離（distanceMeters）と徒歩分数の概算（walkMinutes）を付けて距離昇順で返す。
+ * 座標なしのときは名称の五十音順。tags が空でも lat/lon があれば「円内の全スポット」を返す
+ * （予約タグ「近い」だけを選んだケース。呼び出し側 spotSearch.searchByTags が解釈する）。
+ * display_tag による絞り込みはしない（名称検索と同じく tourist_spots 全件が対象）。
+ * 戻り値は { spots, total }（total は limit を掛ける前の該当件数）。
+ */
+async function findSpotsByTags(tags, { lat, lon, radiusMeters, limit = 100 } = {}) {
+  const wanted = (tags || []).map((t) => normalizeSearchText(t)).filter(Boolean);
+  const hasOrigin = Number.isFinite(lat) && Number.isFinite(lon);
+  const radius = Number.isFinite(radiusMeters) && radiusMeters > 0 ? radiusMeters : null;
+
+  let sql = 'SELECT * FROM tourist_spots';
+  const params = [];
+  if (hasOrigin && radius) {
+    const box = boundingBoxDegrees(lat, lon, radius);
+    sql += ' WHERE lat BETWEEN $1 AND $2 AND lng BETWEEN $3 AND $4';
+    params.push(box.minLat, box.maxLat, box.minLon, box.maxLon);
+  }
+  const result = await pool.query(sql, params);
+
+  const matched = [];
+  for (const row of result.rows) {
+    const rowTags = new Set(spotTags.splitTags(row.tags).map((t) => normalizeSearchText(t)));
+    if (!wanted.every((t) => rowTags.has(t))) continue;
+    let distanceMeters = null;
+    if (hasOrigin) {
+      distanceMeters = haversineDistanceMeters(lat, lon, Number(row.lat), Number(row.lng));
+      if (radius && distanceMeters > radius) continue;
+    }
+    matched.push({ row, distanceMeters });
+  }
+
+  matched.sort((a, b) => {
+    if (a.distanceMeters != null && b.distanceMeters != null) return a.distanceMeters - b.distanceMeters;
+    return String(a.row.name).localeCompare(String(b.row.name), 'ja');
+  });
+
+  const spots = matched.slice(0, limit).map(({ row, distanceMeters }) => {
+    const spot = serializeRow(row);
+    if (distanceMeters != null) {
+      // 距離は直線距離のまま。徒歩分数だけ迂回・信号待ちを織り込んだ推定にする（utils/geo.js）。
+      spot.distanceMeters = Math.round(distanceMeters);
+      spot.walkMinutes = estimateWalkMinutes(distanceMeters);
+    }
+    return spot;
+  });
+  return { spots, total: matched.length };
+}
+
 /** 観光スポットのID（識別子）を正規化する（前後空白を落とすだけ）。 */
 function normalizeSpotId(value) {
   return String(value == null ? '' : value).trim();
@@ -215,7 +269,7 @@ function splitLine(line) {
   const cols = line.split('\t');
   const [
     id, name, kana, romaji, aliases, latStr, lngStr, url, hours, stayDuration, description,
-    hoursEn, stayDurationEn, descriptionEn, photoUrls, category, displayTag
+    hoursEn, stayDurationEn, descriptionEn, photoUrls, tags, displayTag
   ] = cols;
   return {
     colCount: cols.length,
@@ -236,7 +290,8 @@ function splitLine(line) {
     descriptionEn: (descriptionEn || '').trim(),
     // 写真URLは "," 区切りで複数可。ここでは生文字列のまま受け、parseTouristSpotsText で分解・検証する。
     photoUrlsRaw: (photoUrls || '').trim(),
-    category: (category || '').trim(),
+    // タグ（スポット検索のタグ検索用）は "," 区切りで複数可。生文字列のまま受け、parseTouristSpotsText で分解する。
+    tagsRaw: (tags || '').trim(),
     displayTag: (displayTag || '').trim()
   };
 }
@@ -256,9 +311,11 @@ function isHttpsUrl(value) {
  * 正規化後（前後空白・空要素を除去し "," で連結した文字列）を photoUrls として持つ。
  * 英語版の営業時間・滞在時間目安・説明（hoursEn/stayDurationEn/descriptionEn）は
  * 利用者画面の英語表示には未使用（項目の登録のみに対応。将来対応時のための先行追加）。
- * category（カテゴリ）は情報のみで検索/表示のフィルタには未使用。
+ * タグ（16列目）はスポット検索の「タグ検索」で絞り込みに使う。"," 区切りで複数可。
+ * 前後空白・空要素を落として連結保存する（かな・ローマ字変換はしない）。「近い」は
+ * 現在地から半径500m以内を絞り込む予約タグなので、タグ名としての登録はエラーにする。
  * displayTag（表示）は空欄または「観光」を含まない値のとき、バス停ページの周辺観光スポット
- * 表示（isVisibleOnBusStopPage）からのみ除外される（地点名検索・詳細ポップアップは対象外）。
+ * 表示（isVisibleOnBusStopPage）からのみ除外される（地点名検索・タグ検索・詳細ポップアップは対象外）。
  * 1件でもエラーがあれば全エラーを集約して ok:false で返す（部分成功はしない）。
  */
 function parseTouristSpotsText(text) {
@@ -315,6 +372,11 @@ function parseTouristSpotsText(text) {
       errors.push({ line: lineNo, reason: '写真URLはhttps://で始めてください（複数の場合は「,」で区切ってください）。' });
       return;
     }
+    const tagList = spotTags.splitTags(parsed.tagsRaw);
+    if (tagList.includes(spotTags.NEAR_TAG)) {
+      errors.push({ line: lineNo, reason: 'タグに「近い」は使えません（現在地から半径500m以内を絞り込むシステムの予約タグです）。' });
+      return;
+    }
 
     let romaji = parsed.romaji;
     if (!romaji && parsed.kana) {
@@ -337,7 +399,7 @@ function parseTouristSpotsText(text) {
       stayDurationEn: parsed.stayDurationEn || null,
       descriptionEn: parsed.descriptionEn || null,
       photoUrls: photoUrlList.join(',') || null,
-      category: parsed.category || null,
+      tags: tagList.join(',') || null,
       displayTag: parsed.displayTag || null
     });
   });
@@ -355,6 +417,8 @@ function parseTouristSpotsText(text) {
  * 全件洗い替え本体。parseTouristSpotsText→バリデーション→単一トランザクションでUPSERT+削除。
  * 1列目のIDをキーに ON CONFLICT UPDATE する（IDが同じなら名称の変更も同一スポットの改称として反映）。
  * テキストに無いIDの既存行は削除する。
+ * 最後に spotTags.syncTagRegistry() で、タグ検索のタグ並び順レジストリ（spot_tags）を
+ * 「1件以上のスポットが付けているタグ」へ同期する（新規タグは末尾へ・未使用タグは削除）。
  */
 async function replaceAllTouristSpots(text) {
   const parsed = parseTouristSpotsText(text);
@@ -367,7 +431,7 @@ async function replaceAllTouristSpots(text) {
       await client.query(
         `INSERT INTO tourist_spots (
            id, name, kana, romaji, aliases, lat, lng, url, hours, stay_duration, description,
-           hours_en, stay_duration_en, description_en, photo_urls, category, display_tag, updated_at
+           hours_en, stay_duration_en, description_en, photo_urls, tags, display_tag, updated_at
          )
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
          ON CONFLICT (id) DO UPDATE SET
@@ -385,17 +449,18 @@ async function replaceAllTouristSpots(text) {
            stay_duration_en = EXCLUDED.stay_duration_en,
            description_en = EXCLUDED.description_en,
            photo_urls = EXCLUDED.photo_urls,
-           category = EXCLUDED.category,
+           tags = EXCLUDED.tags,
            display_tag = EXCLUDED.display_tag,
            updated_at = now()`,
         [
           spot.id, spot.name, spot.kana, spot.romaji, spot.aliases, spot.lat, spot.lng, spot.url, spot.hours, spot.stayDuration, spot.description,
-          spot.hoursEn, spot.stayDurationEn, spot.descriptionEn, spot.photoUrls, spot.category, spot.displayTag
+          spot.hoursEn, spot.stayDurationEn, spot.descriptionEn, spot.photoUrls, spot.tags, spot.displayTag
         ]
       );
     }
     const ids = parsed.spots.map((s) => s.id);
     await client.query('DELETE FROM tourist_spots WHERE NOT (id = ANY($1::text[]))', [ids]);
+    await spotTags.syncTagRegistry(client, parsed.spots);
     await client.query('COMMIT');
     return { ok: true, count: parsed.spots.length };
   } catch (err) {
@@ -500,6 +565,7 @@ async function purgeOldLinkClicks(retentionDays = LINK_CLICK_RETENTION_DAYS) {
 
 module.exports = {
   findNearbySpots,
+  findSpotsByTags,
   searchTouristSpots,
   getSpotById,
   listTouristSpots,

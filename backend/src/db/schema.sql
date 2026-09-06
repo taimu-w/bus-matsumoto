@@ -245,7 +245,10 @@ CREATE TABLE IF NOT EXISTS tourist_spots (
   -- Cloudinary等の https:// 画像URL。複数枚は "," 区切りで連結して保持する
   -- （管理画面の一括入力の「写真URL」列に "," 区切りで入れる）。表示は先頭から順に横スクロール。
   photo_urls      TEXT,
-  category        TEXT,
+  -- スポット検索の「タグ検索」で使うタグ。"," 区切りで複数持てる（管理画面の一括入力の
+  -- 「タグ」列）。タグの並び順は spot_tags テーブル（管理画面「タグ管理」）で編集する。
+  -- 「近い」は現在地から半径500m以内を絞り込む予約タグなので、タグ名としては登録できない。
+  tags            TEXT,
   -- 空欄、または「観光」「観光スポット」を含まない値は、バス停ページの周辺観光スポット表示
   -- （findNearbySpots）からのみ除外する（学校・病院等、経路検索の地点としては使うが観光スポット
   -- ではない登録への対策）。地点名検索・詳細ポップアップ取得は本フラグの影響を受けない。
@@ -286,6 +289,18 @@ CREATE TABLE IF NOT EXISTS spot_search_counts (
   PRIMARY KEY (spot_id, search_date)
 );
 CREATE INDEX IF NOT EXISTS idx_spot_search_counts_date ON spot_search_counts (search_date);
+
+-- スポット検索の「タグ検索」で使うタグの並び順レジストリ（docs/spot-search.md）。
+-- タグの実体は tourist_spots.tags（"," 区切り）で、全件洗い替え（replaceAllTouristSpots）のたびに
+-- 「1件以上のスポットが付けているタグ」へこの表を同期する（新規タグは末尾に、どのスポットも
+-- 付けなくなったタグは削除）。管理画面「タグ管理」は sort_order だけを編集する。
+-- 予約タグ「近い」（現在地から半径500m以内で絞り込む）はここには入らない。
+CREATE TABLE IF NOT EXISTS spot_tags (
+  name        TEXT PRIMARY KEY,
+  sort_order  INTEGER NOT NULL DEFAULT 0,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_spot_tags_sort ON spot_tags (sort_order, name);
 
 -- バス停お知らせ配信（docs/busstop-notices.md）。管理画面「バス停お知らせ」で編集する。
 -- 1件のお知らせは 見出し・画像・本文（リンク記法対応）を任意に組み合わせて持てる（画像と本文の少なくとも一方）。

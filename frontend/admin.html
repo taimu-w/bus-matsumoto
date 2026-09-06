@@ -93,6 +93,10 @@
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M6 3v18"></path><path d="M6 4.5h12l-3 4 3 4H6z"></path></svg>
               <span>観光スポット管理</span>
             </button>
+            <button data-section="spot-tags" data-label="タグ管理" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M7 7h.01"></path><path d="M11 3h4.5a2 2 0 011.42.59l4.5 4.5a2 2 0 010 2.82l-6.5 6.5a2 2 0 01-2.82 0l-4.5-4.5A2 2 0 015 11.5V7a4 4 0 014-4z"></path></svg>
+              <span>タグ管理</span>
+            </button>
             <button data-section="tourist-spot-clicks" data-label="観光スポットの検索・アクセス数" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M4 20V11"></path><path d="M10 20V4"></path><path d="M16 20v-6"></path><path d="M3 20h18"></path></svg>
               <span>観光スポットの検索・アクセス数</span>
@@ -944,15 +948,16 @@
           <div>
             <h2 class="text-xl font-bold">観光スポット管理</h2>
             <p class="text-sm text-slate-500">
-              1行1件、タブ区切りで貼り付けてください（列順：ID・名称・かな・ローマ字・別称・緯度・経度・URL・営業時間・滞在時間目安・説明・営業時間（英語）・滞在時間目安（英語）・説明（英語）・写真URL・カテゴリ・表示）。<br>
+              1行1件、タブ区切りで貼り付けてください（列順：ID・名称・かな・ローマ字・別称・緯度・経度・URL・営業時間・滞在時間目安・説明・営業時間（英語）・滞在時間目安（英語）・説明（英語）・写真URL・タグ・表示）。<br>
               1列目のIDが観光スポットの識別子です（重複しない任意の文字列。「/」・タブ・改行などの制御文字は不可、64文字以内）。<strong>IDが同じなら名称が変わっても同一スポット</strong>として扱い、名称による名寄せは行いません。IDをキーに全件を洗い替えます（テキストに無いIDの行は削除されます）。ローマ字が空欄の場合はかなから自動生成します。未入力の項目があっても登録できます。英語欄は登録のみ対応しており、利用者画面はまだ英語表示に対応していません。<br>
               別称は「松本城」に対する「からす城」「国宝」のように、別の呼び名でも経路検索の出発地・目的地やスポット検索の候補に出すための検索補助用の項目です。「,」（カンマ）区切りで複数登録でき、<strong>利用者画面には表示されません</strong>（かな・ローマ字への変換も不要です）。<br>
               写真URLは「,」（カンマ）区切りで複数枚登録できます（利用者画面では先頭から順に横スクロールで表示されます）。<br>
-              「表示」欄は空欄のまま、または「観光」「観光スポット」以外を入力すると、バス停ページの周辺観光スポット表示には出ません（学校・病院など、経路検索の目的地としては使いたいが観光スポットではない登録向け）。地点名での経路検索・結果画面での詳細ポップアップ表示は「表示」欄の内容に関わらず従来どおり行えます。
+              タグは、スポット検索の「タグ検索」で絞り込みに使います。「,」（カンマ）区切りで複数登録できます（例：<code>神社,パワースポット</code>）。タグ検索でのタグの並び順は「タグ管理」で変更できます。<strong>「近い」は現在地から半径500m以内を絞り込む予約タグ</strong>なので、タグ名としては登録できません。<br>
+              「表示」欄は空欄のまま、または「観光」「観光スポット」以外を入力すると、バス停ページの周辺観光スポット表示には出ません（学校・病院など、経路検索の目的地としては使いたいが観光スポットではない登録向け）。地点名での経路検索・タグ検索・結果画面での詳細ポップアップ表示は「表示」欄の内容に関わらず従来どおり行えます。
             </p>
           </div>
           <textarea id="spots-textarea" rows="10"
-            placeholder="matsumotojo&#9;松本城&#9;まつもとじょう&#9;Matsumoto-jo&#9;からす城,国宝&#9;36.2381&#9;137.9686&#9;https://...&#9;8:30〜17:00&#9;1時間程度&#9;国宝五重六階の天守&#9;8:30-17:00&#9;About 1 hour&#9;A castle with a five-story, six-floor keep designated as a national treasure&#9;https://res.cloudinary.com/.../a.jpg,https://res.cloudinary.com/.../b.jpg&#9;史跡&#9;観光"
+            placeholder="matsumotojo&#9;松本城&#9;まつもとじょう&#9;Matsumoto-jo&#9;からす城,国宝&#9;36.2381&#9;137.9686&#9;https://...&#9;8:30〜17:00&#9;1時間程度&#9;国宝五重六階の天守&#9;8:30-17:00&#9;About 1 hour&#9;A castle with a five-story, six-floor keep designated as a national treasure&#9;https://res.cloudinary.com/.../a.jpg,https://res.cloudinary.com/.../b.jpg&#9;史跡,城,観光&#9;観光"
             class="w-full border rounded-lg px-3 py-2 font-mono text-xs"></textarea>
           <div class="flex items-center gap-3">
             <button id="save-spots-btn" class="bg-green-700 hover:bg-green-800 text-white font-bold rounded-lg px-4 py-3">登録（全件洗い替え）</button>
@@ -964,6 +969,23 @@
             <h3 class="text-sm font-bold text-slate-600 mb-2">登録済み観光スポット</h3>
             <div id="spots-list" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"></div>
           </div>
+        </section>
+
+        <!-- タグ管理（スポット検索「タグ検索」のタグ並び順） -->
+        <section id="section-spot-tags" class="section hidden space-y-4">
+          <div>
+            <h2 class="text-xl font-bold">タグ管理</h2>
+            <p class="text-sm text-slate-500">
+              スポット検索の「タグ検索」で表示するタグの<strong>並び順</strong>を変更します。<br>
+              タグそのものの追加・削除は「観光スポット管理」のタグ列（全件洗い替え）で行います。どのスポットにも付けられていないタグは自動で一覧から消えます。<br>
+              予約タグ「近い」（現在地から半径500m以内）は常にタグ検索の先頭に表示され、ここには出てきません。
+            </p>
+          </div>
+          <div class="flex items-center gap-3">
+            <button id="save-spot-tags-btn" class="bg-green-700 hover:bg-green-800 text-white font-bold rounded-lg px-4 py-2">並び順を保存</button>
+            <span id="spot-tags-status" class="text-sm font-bold"></span>
+          </div>
+          <div id="spot-tags-list" class="bg-white rounded-xl border divide-y max-w-xl"></div>
         </section>
 
         <!-- 観光スポットの検索・アクセス数（スポット検索の検索回数＋公式サイトリンクのタップ回数） -->
@@ -1119,6 +1141,7 @@
   <script src="/admin-runtime-suspension.js" defer></script>
   <script src="/admin-runtime-settings.js" defer></script>
   <script src="/admin-tourist-spots.js" defer></script>
+  <script src="/admin-spot-tags.js" defer></script>
   <script src="/admin-tourist-spot-clicks.js" defer></script>
   <script src="/admin-vehicle-labels.js" defer></script>
   <script src="/admin-viewers.js" defer></script>
