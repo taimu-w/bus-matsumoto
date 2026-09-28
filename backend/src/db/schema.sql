@@ -42,8 +42,13 @@ CREATE TABLE IF NOT EXISTS feeds (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- 位置情報CSVの外部ID（事業者の系統ID）→ GTFS route_id の対応。
+-- 位置情報CSVの外部ID（事業者の系統ID）⇔ GTFS route_id の対応。1行＝1つの対応。
 -- 管理画面（GET/POST/DELETE /api/admin/route-mappings）から編集する。
+--
+-- 多対多。1つのGTFS路線に複数の外部IDを紐づけられ（系統違いの別IDが同じ路線を指す）、
+-- 1つの外部IDに複数のGTFS路線を紐づけられる（1つの系統IDで往路・復路が別路線として
+-- GTFSに入っている等）。後者では、その外部IDで届いた測位は紐づく全路線の便の
+-- 照合対象になる（始発バス停100m以内・最近傍で1台に絞られる。docs/vehicle-assignment.md）。
 --
 -- route_id は routes.id と同じ「feedId:routeId」形式のqualified route id。
 -- 路線名からのあいまいな解決はしない（「ケ/ヶ」等の表記ゆれ1文字で対応が黙って
@@ -53,15 +58,23 @@ CREATE TABLE IF NOT EXISTS feeds (
 -- route_id が NULL の行は「外部IDは判明しているが、対応するGTFS路線がまだ無い」ことを
 -- 表す（note列に理由を書いて残す）。削除すると、後で該当路線がGTFSに追加された際に
 -- 外部IDを再調査する羽目になるため、行として保持できるようにしてある。
+-- この「未対応」行は同じ external_id の対応行と同居させない（1件でも対応があれば
+-- 未対応ではないため）。整合は保存API（routes/api.js）が保つ。
 --
 -- サービス層は backend/src/services/routeExternalIdMapping.js（TTL付きメモリキャッシュ。
 -- 管理画面からの変更時に invalidateRouteExternalIdCache() で破棄）。
 CREATE TABLE IF NOT EXISTS route_external_ids (
-  external_id   TEXT PRIMARY KEY,
+  external_id   TEXT NOT NULL,
   route_id      TEXT,
   note          TEXT,
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 同じ (外部ID, 路線) を二重登録させない。NULL は UNIQUE 制約では重複扱いにならないため、
+-- 「未対応」行（route_id IS NULL）の外部IDごと1行は別の部分索引で担保する。
+CREATE UNIQUE INDEX IF NOT EXISTS ux_route_external_ids_pair
+  ON route_external_ids (external_id, route_id) WHERE route_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_route_external_ids_unmapped
+  ON route_external_ids (external_id) WHERE route_id IS NULL;
 
 -- 位置情報CSVの「方向列の値」→ GTFS direction_id の対応を路線ごとに持つ。
 -- 管理画面「方向マッピング」（GET/POST/DELETE /api/admin/direction-rules）から編集する。
@@ -145,6 +158,25 @@ CREATE TABLE IF NOT EXISTS stops (
   notice        TEXT,
   timetable_link TEXT,
   UNIQUE (route_id, direction_id, gtfs_stop_id, occurrence)
+);
+
+-- GTFS shapes.txt 由来の路線の線形（路線図マップ `/routemap` の描画専用）。
+-- 1行＝1本のポリライン（GTFSの1 shape_id）で、`points` は shape_pt_sequence 昇順に
+-- 並べた `[[lat, lon], ...]` の配列。
+--
+-- 1点1行に正規化せず配列で持つのは、この列の用途が「地図に1本丸ごと描く」以外に
+-- 無いためである（1路線あたり数百点あり、正規化すると読み出しのたびに数千行の
+-- ORDER BY が要る）。**GPS照合・通過判定・距離計算には一切使わないこと**
+-- （それらの座標の正は stops であり、shapes は描画用の見た目の線でしかない）。
+--
+-- 1つの路線が複数の線形を持つ（往路・復路・枝分かれ）のが普通なので、主キーは
+-- (route_id, shape_id) の複合。shapes.txt を持たないフィード・線形が無い路線は
+-- 単に行が無く、路線図マップに出ないだけで他機能に影響しない。
+CREATE TABLE IF NOT EXISTS route_shapes (
+  route_id      TEXT NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+  shape_id      TEXT NOT NULL,                 -- GTFS shapes.txt の shape_id（フィード内の原文のまま）
+  points        JSONB NOT NULL,                -- [[lat, lon], ...]（shape_pt_sequence昇順）
+  PRIMARY KEY (route_id, shape_id)
 );
 
 -- 時刻表: 便（トリップ）ごと・停留所ごとの定刻。
@@ -405,9 +437,13 @@ CREATE TABLE IF NOT EXISTS vehicle_operation_history (
 );
 
 -- 位置情報フィードから取得した直後の生ログ（未処理分の一時置き場）。
+-- route_id は突合できた外部IDの対応先のうち代表1件（route_id昇順の先頭）。
+-- 外部IDが複数路線に紐づく場合に候補を取りこぼさないよう、突合に使った外部ID自体を
+-- external_id に残し、便の候補検索はそちらを正に使う（vehicle_gps_log へ転記される）。
 CREATE TABLE IF NOT EXISTS vehicle_positions_raw (
   id            BIGSERIAL PRIMARY KEY,
   route_id      TEXT NOT NULL DEFAULT '',
+  external_id   TEXT,               -- 突合に使った外部ID（位置情報CSVの系統ID）
   car_id        TEXT NOT NULL,
   received_time TEXT NOT NULL,      -- 取得日時 H:mm（書式なしテキスト相当）
   gps_time      TEXT NOT NULL,      -- GPS時刻 H:mm
@@ -423,14 +459,17 @@ CREATE INDEX IF NOT EXISTS idx_positions_raw_processed ON vehicle_positions_raw(
 CREATE INDEX IF NOT EXISTS idx_positions_raw_carid ON vehicle_positions_raw(car_id);
 
 -- 車両ごとに整理された走行ログ。
--- route_id は「その測位が位置情報CSV上でどの系統として届いたか」の観測値（qualified route id）。
--- 車両割り当ての候補検索は vehicles.route_id ではなくこの列を系統一致の正として使う
--- （物理車両1台が複数系統を跨ぐため。system-review-2026-09 DB-5）。過去分のバックフィル漏れで
--- NULL になりうる（その行は系統一致の候補検索に出ないだけ）。
+-- external_id は「その測位が位置情報CSV上でどの系統ID（外部ID）として届いたか」の観測値。
+-- route_id はその外部IDの対応先のうち代表1件（qualified route id）。
+-- 車両割り当ての候補検索は vehicles.route_id ではなくこの2列を系統一致の正として使う
+-- （物理車両1台が複数系統を跨ぐため）。1つの外部IDが複数路線に紐づく場合、代表1件だけでは
+-- もう一方の路線の便を取りこぼすため、候補検索は external_id 側（便の路線に紐づく外部IDの集合）
+-- を主に見る。過去分のバックフィル漏れで NULL になりうる（その行は系統一致の候補検索に出ないだけ）。
 CREATE TABLE IF NOT EXISTS vehicle_gps_log (
   id                BIGSERIAL PRIMARY KEY,
   vehicle_id        INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
   route_id          TEXT,
+  external_id       TEXT,
   received_time     TEXT NOT NULL,
   gps_time          TEXT NOT NULL,
   gps_time_ts       TIMESTAMPTZ NOT NULL,
@@ -444,8 +483,9 @@ CREATE TABLE IF NOT EXISTS vehicle_gps_log (
 -- migrate.jsのステップ42が削除する前」に索引作成が走ってしまい、
 -- 重複データが残る既存環境で毎回失敗する。新規DB・既存DBのどちらも
 -- migrate.js（重複削除→索引作成の順を保証する）側で作成する。
--- 系統別の候補検索用インデックス idx_gps_log_route_time も migrate.js 側で作成する
--- （既存DBには route_id 列が無い状態で schema.sql が流れるため）。
+-- 系統別の候補検索用インデックス idx_gps_log_route_time・idx_gps_log_external_time も
+-- migrate.js 側で作成する（既存DBには route_id / external_id 列が無い状態で
+-- schema.sql が流れるため）。
 
 -- ==========================================================
 -- 便起点の車両割り当て（GTFS便を先に生成し、車両を後から割り当てる）

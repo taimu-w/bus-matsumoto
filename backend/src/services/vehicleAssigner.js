@@ -6,9 +6,8 @@
 // status = 'inactive' にして再利用する。
 //
 // 車両行の一意キーは (feed_id, car_id)＝位置情報フィード内で car_id が指す物理車両1台1行。
-// 系統（route_id）は物理車両の属性ではなく測位ごとの観測値なので vehicle_gps_log.route_id へ
-// 記録し、vehicles.route_id / direction_id は「直近に観測した値」を保持するだけ
-// （system-review-2026-09 DB-5 / 旧 known-issues M-9）。
+// 系統（route_id）と外部ID（external_id）は物理車両の属性ではなく測位ごとの観測値なので
+// vehicle_gps_log へ記録し、vehicles.route_id / direction_id は「直近に観測した値」を保持するだけ。
 const pool = require('../config/db');
 const { getRuntimeSetting } = require('./runtimeSettings');
 
@@ -66,7 +65,7 @@ async function getOrCreateVehicle(client, row) {
  */
 async function processBatch(client) {
   const pending = await client.query(
-    `SELECT id, route_id, feed_id, direction_id, direction_raw, car_id, received_time, gps_time, gps_time_ts, lat, lon
+    `SELECT id, route_id, external_id, feed_id, direction_id, direction_raw, car_id, received_time, gps_time, gps_time_ts, lat, lon
      FROM vehicle_positions_raw
      WHERE processed = FALSE
      ORDER BY id ASC
@@ -89,12 +88,14 @@ async function processBatch(client) {
       // 同一車両・同一GPS時刻の測位はvehicle_gps_logへ重複挿入しない
       // （フィード更新間隔がポーリング間隔より長いと同じ測位が繰り返し届くため。既知 M-7）。
       // 一意制約（ux_vehicle_gps_log_vehicle_time）に任せてDO NOTHINGで無視する。
-      // route_id はこの測位が位置情報CSV上でどの系統として届いたか（候補検索の系統一致の正）。
+      // route_id / external_id はこの測位が位置情報CSV上でどの系統・どの系統ID（外部ID）として
+      // 届いたか（候補検索の系統一致の正）。1つの外部IDが複数路線に紐づく場合、route_id は
+      // その代表1件でしかないため、候補検索は external_id 側を主に使う。
       const insertRes = await client.query(
-        `INSERT INTO vehicle_gps_log (vehicle_id, route_id, received_time, gps_time, gps_time_ts, lat, lon)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `INSERT INTO vehicle_gps_log (vehicle_id, route_id, external_id, received_time, gps_time, gps_time_ts, lat, lon)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (vehicle_id, gps_time_ts) DO NOTHING`,
-        [vehicleId, row.route_id, row.received_time, row.gps_time, row.gps_time_ts, row.lat, row.lon]
+        [vehicleId, row.route_id, row.external_id, row.received_time, row.gps_time, row.gps_time_ts, row.lat, row.lon]
       );
       await client.query('UPDATE vehicle_positions_raw SET processed = TRUE WHERE id = $1', [row.id]);
       await client.query('COMMIT');

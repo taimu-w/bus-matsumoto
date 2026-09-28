@@ -6,6 +6,10 @@
 <title>路線バス運行状況（アルピコ交通） | バスタイム</title>
 <meta name="description" content="アルピコ交通（松本地区）の路線バス運行状況を、バスタイムがまとめて表示します。">
 <meta name="theme-color" content="#1e40af">
+<!-- 配色テーマ（ライト／ダーク／端末設定に追従）の確定。
+     body の描画前に <html> の data-theme を決める必要があるため、
+     defer も async も付けずにここで同期読み込みする。 -->
+<script src="/theme.js"></script>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%231e40af'/%3E%3Cpath fill='%23fff' d='M18,11H6V6h12M16.5,17A1.5,1.5 0 0,1 15,15.5A1.5,1.5 0 0,1 16.5,14A1.5,1.5 0 0,1 18,15.5A1.5,1.5 0 0,1 16.5,17M7.5,17A1.5,1.5 0 0,1 6,15.5A1.5,1.5 0 0,1 7.5,14A1.5,1.5 0 0,1 9,15.5A1.5,1.5 0 0,1 7.5,17M4,16c0,0.88 0.39,1.67 1,2.22V20a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1h8v1a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1.78c0.61-0.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8,0.5-8,4V16Z'/%3E%3C/svg%3E">
 <!-- Tailwindはfrontend/vendor/に同梱したものを配信する（docs/system-review-2026-09.md S-6）。 -->
 <script src="/vendor/tailwind/tailwind-3.4.17.js"></script>
@@ -23,12 +27,19 @@
       <p class="text-[10px] opacity-90 font-bold uppercase tracking-widest">Alpico Traffic Status</p>
     </div>
     <div class="flex items-center gap-2 flex-wrap justify-end shrink-0">
-      <a href="/" class="bg-white text-blue-800 px-3 py-2 rounded-lg hover:bg-blue-50 transition shadow-md text-xs font-bold">トップへ</a>
-      <button id="refresh-btn" class="bg-white text-blue-800 p-2 rounded-lg hover:bg-blue-50 transition shadow-md flex items-center gap-1">
+      <a href="/" class="on-brand-btn bg-white text-blue-800 px-3 rounded-lg shadow-md text-xs font-bold flex items-center">トップへ</a>
+      <button id="refresh-btn" class="on-brand-btn bg-white text-blue-800 px-2.5 rounded-lg shadow-md flex items-center gap-1">
         <svg id="refresh-icon" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
         </svg>
         <span class="text-xs font-bold">更新</span>
+      </button>
+      <!-- 配色切替（端末の設定に追従 → ライト → ダーク の順に巡回）。
+           ラベルとアイコンの出し分けは theme.js / style.css が行う。 -->
+      <button type="button" class="on-brand-btn theme-toggle shadow-md" aria-label="配色を切り替えます">
+        <svg data-theme-icon="auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none"/></svg>
+        <svg data-theme-icon="light" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4.25"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.2 5.2l1.6 1.6M17.2 17.2l1.6 1.6M18.8 5.2l-1.6 1.6M6.8 17.2l-1.6 1.6"/></svg>
+        <svg data-theme-icon="dark" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.5 14.9A8.6 8.6 0 0 1 9.1 3.5a8.6 8.6 0 1 0 11.4 11.4z"/></svg>
       </button>
     </div>
   </div>

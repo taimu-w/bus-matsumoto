@@ -334,6 +334,46 @@ router.get('/routes', async (req, res) => {
   }
 });
 
+// GET /api/route-shapes -> 路線図マップ用の路線の線形（GTFS shapes.txt 由来）
+//
+// 線形（route_shapes）を1本も持たない路線は返さない。GTFSのshapes.txtに載っていない
+// 路線は「地図に描く線が存在しない」ので、路線名だけの空の項目を返しても
+// フロント側で描くものが無く、絞り込みセレクトに選べない選択肢が並ぶだけになる。
+//
+// リアルタイム休止（route_realtime_suspensions）では除外しない。ここが返すのは
+// GTFSの静的な線形＝「この路線がどこを通るか」であって運行状況ではなく、
+// 休止中でも路線の経路そのものは変わらないため（時刻表表示と同じ扱い）。
+router.get('/route-shapes', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT r.id, r.name, r.short_name, r.color, r.text_color, s.shape_id, s.points
+       FROM route_shapes s
+       JOIN routes r ON r.id = s.route_id
+       ORDER BY r.id ASC, s.shape_id ASC`
+    );
+
+    const routesById = new Map();
+    for (const row of result.rows) {
+      if (!routesById.has(row.id)) {
+        routesById.set(row.id, {
+          id: row.id,
+          name: row.name,
+          short_name: row.short_name,
+          color: row.color,
+          text_color: row.text_color,
+          shapes: []
+        });
+      }
+      routesById.get(row.id).shapes.push({ shapeId: row.shape_id, points: row.points });
+    }
+
+    res.json({ routes: [...routesById.values()] });
+  } catch (err) {
+    console.error('[api] /route-shapes エラー:', err);
+    res.status(500).json({ error: '路線図の取得に失敗しました。' });
+  }
+});
+
 // GET /api/display-abbreviations -> 表示テキスト（系統名・行き先）の略称辞書
 // 公開API（バスマップ・バス停時刻表・接近中のバスパネルが直接読む。認証不要）。
 // original文字数の降順（フロントエンドでの部分文字列置換の優先順位に使う）。
@@ -382,12 +422,15 @@ router.get('/admin/settings', requireAdminAuth, async (req, res) => {
 
 // 外部ID ⇔ GTFS route_id の対応表の取得・編集API（route_external_ids）。
 //
+// 1行＝1つの (external_id, route_id) の対応で、多対多。1つのGTFS路線に複数の外部IDを、
+// 1つの外部IDに複数のGTFS路線を紐づけられる。
+//
 // 路線名によるあいまいな解決はしない（「ケ/ヶ」等の表記ゆれ1文字で対応が黙って欠落する
 // 事故が過去にあったため）。保存時にroutesテーブルへの実在チェックを行い、
 // 存在しないroute_idは拒否する（管理画面での入力ミスをその場で弾く）。
 // 対応するGTFS路線がまだ無い外部IDは、route_idを空にして備考に理由を書けば登録できる
-// （旧route_external_idsテーブル削除時に失われかけた「路線未対応の外部ID」の記録を、
-// 再び行として保持できるようにするため）。詳細はdocs/外部IDマッピングのコード化_仕様書.md参照。
+// （「路線未対応の外部ID」を行として残しておくため）。この「未対応」行は同じ外部IDの
+// 対応行と同居させない（1件でも対応があれば未対応ではないため）。
 //
 // 路線データ編集（バス停座標・時刻表の直接編集。GET/PUT /admin/route-data）は削除済みのまま。
 // バス停座標・時刻表はGTFSフィード由来のマスタなので、変更はGTFSフィード側の更新で行う。
@@ -399,7 +442,7 @@ router.get('/admin/route-mappings', requireAdminAuth, async (req, res) => {
       `SELECT m.external_id, m.route_id, m.note, m.updated_at, r.name AS route_name
        FROM route_external_ids m
        LEFT JOIN routes r ON r.id = m.route_id
-       ORDER BY m.route_id ASC NULLS LAST, m.external_id ASC`
+       ORDER BY m.external_id ASC, m.route_id ASC NULLS LAST`
     );
     res.json({
       mappings: result.rows.map((row) => ({
@@ -416,12 +459,19 @@ router.get('/admin/route-mappings', requireAdminAuth, async (req, res) => {
   }
 });
 
-// POST /api/admin/route-mappings -> 追加・更新（external_idキーのUPSERT）
+// POST /api/admin/route-mappings -> 追加・更新（(external_id, route_id) 単位）
+//
+// originalRouteId を付けると「その1行の付け替え（編集）」、付けなければ
+// 「その (外部ID, 路線) の対応を追加（既にあれば備考の更新）」になる。
+// 管理画面の「編集」ボタンは originalRouteId を送る（空文字＝未対応行が編集対象）。
 router.post('/admin/route-mappings', requireAdminAuth, async (req, res) => {
-  const { externalId, routeId, note } = req.body || {};
+  const { externalId, routeId, note, originalRouteId } = req.body || {};
   const trimmedExternalId = typeof externalId === 'string' ? externalId.trim() : '';
   const trimmedRouteId = typeof routeId === 'string' ? routeId.trim() : '';
   const trimmedNote = typeof note === 'string' ? note.trim() : '';
+  // キー自体が無い（undefined）＝新規追加。文字列なら編集で、空文字は未対応行が編集対象。
+  const isEdit = typeof originalRouteId === 'string';
+  const trimmedOriginalRouteId = isEdit ? originalRouteId.trim() : '';
 
   if (!trimmedExternalId) {
     return res.status(400).json({ error: '外部IDを入力してください。' });
@@ -430,9 +480,10 @@ router.post('/admin/route-mappings', requireAdminAuth, async (req, res) => {
     return res.status(400).json({ error: '対応する路線がまだ無い場合は、備考に理由を入力してください。' });
   }
 
+  const client = await pool.connect();
   try {
     if (trimmedRouteId) {
-      const routeCheck = await pool.query('SELECT 1 FROM routes WHERE id = $1', [trimmedRouteId]);
+      const routeCheck = await client.query('SELECT 1 FROM routes WHERE id = $1', [trimmedRouteId]);
       if (routeCheck.rows.length === 0) {
         return res.status(400).json({
           error: `指定の路線ID「${trimmedRouteId}」は現在のGTFSデータに存在しません。候補一覧から選択してください。`
@@ -440,26 +491,128 @@ router.post('/admin/route-mappings', requireAdminAuth, async (req, res) => {
       }
     }
 
-    await pool.query(
-      `INSERT INTO route_external_ids (external_id, route_id, note, updated_at)
-       VALUES ($1, $2, $3, now())
-       ON CONFLICT (external_id) DO UPDATE
-         SET route_id = EXCLUDED.route_id, note = EXCLUDED.note, updated_at = now()`,
-      [trimmedExternalId, trimmedRouteId || null, trimmedNote || null]
+    await client.query('BEGIN');
+
+    const unmapped = await client.query(
+      `SELECT 1 FROM route_external_ids WHERE external_id = $1 AND route_id IS NULL`,
+      [trimmedExternalId]
     );
+    const mapped = await client.query(
+      `SELECT route_id FROM route_external_ids WHERE external_id = $1 AND route_id IS NOT NULL`,
+      [trimmedExternalId]
+    );
+
+    if (!trimmedRouteId) {
+      // 「対応する路線がまだ無い」として登録する。既に対応が付いている外部IDでその登録を
+      // 許すと、対応を黙って消すことになるため拒否する（編集で唯一の対応行を外す場合だけ許す）。
+      const others = mapped.rows.filter((row) => !(isEdit && row.route_id === trimmedOriginalRouteId));
+      if (others.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error: `外部ID「${trimmedExternalId}」には既に ${others.length} 件の路線が対応づけられています。未対応として登録するには、先にその対応を削除してください。`
+        });
+      }
+      if (isEdit && trimmedOriginalRouteId && unmapped.rows.length > 0) {
+        // 既に未対応行がある（本来は同居しない）。対応行を消して未対応行に寄せる。
+        await client.query(
+          `DELETE FROM route_external_ids WHERE external_id = $1 AND route_id = $2`,
+          [trimmedExternalId, trimmedOriginalRouteId]
+        );
+        await client.query(
+          `UPDATE route_external_ids SET note = $2, updated_at = now()
+           WHERE external_id = $1 AND route_id IS NULL`,
+          [trimmedExternalId, trimmedNote || null]
+        );
+      } else if (isEdit && trimmedOriginalRouteId) {
+        await client.query(
+          `UPDATE route_external_ids SET route_id = NULL, note = $3, updated_at = now()
+           WHERE external_id = $1 AND route_id = $2`,
+          [trimmedExternalId, trimmedOriginalRouteId, trimmedNote || null]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO route_external_ids (external_id, route_id, note, updated_at)
+           VALUES ($1, NULL, $2, now())
+           ON CONFLICT (external_id) WHERE route_id IS NULL DO UPDATE
+             SET note = EXCLUDED.note, updated_at = now()`,
+          [trimmedExternalId, trimmedNote || null]
+        );
+      }
+    } else {
+      // 付け替え先が既に登録済みなら、同じ対応の二重登録になるので弾く。
+      if (isEdit && trimmedOriginalRouteId !== trimmedRouteId
+          && mapped.rows.some((row) => row.route_id === trimmedRouteId)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error: `外部ID「${trimmedExternalId}」と路線「${trimmedRouteId}」の対応は既に登録されています。`
+        });
+      }
+
+      // 編集なら対象の1行を付け替える。対象行が他から消されていた場合（rowCount 0）は
+      // 付け替えが成立しないので、下の「追加」に落とす（意図はこの対応を残すことなので）。
+      let done = false;
+      if (isEdit && trimmedOriginalRouteId) {
+        const edited = await client.query(
+          `UPDATE route_external_ids SET route_id = $3, note = $4, updated_at = now()
+           WHERE external_id = $1 AND route_id = $2`,
+          [trimmedExternalId, trimmedOriginalRouteId, trimmedRouteId, trimmedNote || null]
+        );
+        done = edited.rowCount > 0;
+      }
+
+      if (!done && unmapped.rows.length > 0) {
+        // 「対応する路線がまだ無い」と記録してあった外部IDに対応が付いた。未対応行を
+        // その対応行に書き換える（未対応行と対応行を同居させないため）。
+        await client.query(
+          `UPDATE route_external_ids SET route_id = $2, note = $3, updated_at = now()
+           WHERE external_id = $1 AND route_id IS NULL`,
+          [trimmedExternalId, trimmedRouteId, trimmedNote || null]
+        );
+      } else if (!done) {
+        await client.query(
+          `INSERT INTO route_external_ids (external_id, route_id, note, updated_at)
+           VALUES ($1, $2, $3, now())
+           ON CONFLICT (external_id, route_id) WHERE route_id IS NOT NULL DO UPDATE
+             SET note = EXCLUDED.note, updated_at = now()`,
+          [trimmedExternalId, trimmedRouteId, trimmedNote || null]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
     invalidateRouteExternalIdCache();
     res.json({ ok: true });
   } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (rollbackErr) { /* トランザクション外なら何もしない */ }
     console.error('[api] /admin/route-mappings 保存エラー:', err);
     res.status(500).json({ error: '外部IDマッピングの保存に失敗しました。' });
+  } finally {
+    client.release();
   }
 });
 
 // DELETE /api/admin/route-mappings/:externalId -> 1件削除
+//
+// クエリ ?routeId=... を付けると、その外部IDとその路線の対応1行だけを削除する
+// （1つの外部IDに複数の路線が紐づくため）。?routeId= （空文字）は未対応行の削除。
+// 省略時はその外部IDの対応を全件削除する。
 router.delete('/admin/route-mappings/:externalId', requireAdminAuth, async (req, res) => {
   const { externalId } = req.params;
+  const { routeId } = req.query;
   try {
-    await pool.query('DELETE FROM route_external_ids WHERE external_id = $1', [externalId]);
+    if (typeof routeId === 'string' && routeId.trim()) {
+      await pool.query(
+        'DELETE FROM route_external_ids WHERE external_id = $1 AND route_id = $2',
+        [externalId, routeId.trim()]
+      );
+    } else if (typeof routeId === 'string') {
+      await pool.query(
+        'DELETE FROM route_external_ids WHERE external_id = $1 AND route_id IS NULL',
+        [externalId]
+      );
+    } else {
+      await pool.query('DELETE FROM route_external_ids WHERE external_id = $1', [externalId]);
+    }
     invalidateRouteExternalIdCache();
     res.json({ ok: true });
   } catch (err) {

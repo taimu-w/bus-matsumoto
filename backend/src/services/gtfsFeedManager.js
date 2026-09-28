@@ -39,15 +39,32 @@ const REQUIRED_GTFS_FILES = [
 // feed_info.txt は「GTFSデータの有効期間」（feed_start_date / feed_end_date）の
 // 供給元。経路検索・時刻表検索で「選択された日付が有効期間外」の注意喚起に使う。
 // 持たないフィードでは calendar.txt の期間から推定するため、これも REQUIRED にはしない。
+//
+// shapes.txt は路線図マップ（`/routemap`）が描く路線の線形の供給元。
+// 同じ理由で REQUIRED にはしない。持たないフィード・持たない路線は
+// 路線図マップに出さないだけで、他の機能には一切影響しない。
 const OPTIONAL_GTFS_FILES = [
   'frequencies.txt',
   'translations.txt',
   'fare_attributes.txt',
   'fare_rules.txt',
-  'feed_info.txt'
+  'feed_info.txt',
+  'shapes.txt'
 ];
 
 const MANAGED_GTFS_FILES = [...REQUIRED_GTFS_FILES, ...OPTIONAL_GTFS_FILES];
+
+// 前回の展開で「このコードがどのファイルを管理対象として、実際にどれを配置したか」を
+// 記録しておくマーカー。展開先ディレクトリに置く（GTFS由来のファイルではないので
+// MANAGED_GTFS_FILES には入れない）。
+//
+// ⚠️ これが無いと、MANAGED_GTFS_FILES に**ファイルを追加したときの初回展開が起きない**。
+// 内容不変（304／ハッシュ一致）のスキップ判定は必須ファイルの存在しか見ていないため、
+// 配信元のZIPが変わるまで新しい任意ファイルがディスクへ降りてこず、その機能が
+// 「エラーも出ないのに永久にデータ0件」になる（shapes.txt 追加時に実際に踏んだ）。
+// 管理対象の集合が前回と変わっていればスキップを許さないことで、コード側の変更が
+// 次回の更新で必ず反映される。
+const EXTRACTED_MANIFEST_FILE = '.extracted.json';
 
 // 前回のGTFS更新時刻（プロセス内キャッシュ）
 let lastGtfsUpdateAt = 0;
@@ -58,6 +75,54 @@ let lastGtfsUpdateAt = 0;
 function getGtfsDir(feedId) {
   if (!feedId) return GTFS_BASE_DIR;
   return path.join(GTFS_BASE_DIR, feedId);
+}
+
+/**
+ * 展開マーカー（EXTRACTED_MANIFEST_FILE）を書く。展開が完全に成功した後にだけ呼ぶこと。
+ * @param {string} feedDir
+ * @param {string[]} placedFiles 実際に配置した管理対象ファイル名
+ */
+function writeExtractedManifest(feedDir, placedFiles) {
+  try {
+    fs.writeFileSync(
+      path.join(feedDir, EXTRACTED_MANIFEST_FILE),
+      JSON.stringify({ managedFiles: MANAGED_GTFS_FILES, files: placedFiles }, null, 2)
+    );
+  } catch (err) {
+    // マーカーが書けなくても展開自体は成功している。次回の更新でスキップが
+    // 効かず取り直しになるだけなので、警告にとどめて処理は続ける。
+    console.warn(`[gtfsFeedManager] 展開マーカーの書き込みに失敗しました: ${err.message}`);
+  }
+}
+
+/**
+ * 展開済みのGTFSファイルが、**いまのコードの管理対象どおりに**ディスク上へ揃っているか。
+ *
+ * 「必須ファイルが揃っているか」だけでは不十分である。MANAGED_GTFS_FILES に
+ * ファイルを足した直後は、必須ファイルは揃っているのに新しいファイルだけが無い、
+ * という状態になりうる（EXTRACTED_MANIFEST_FILE のコメント参照）。
+ * マーカーが無い＝この仕組みより前に展開されたディレクトリも、揃っていない扱いにする。
+ */
+function isExtractedSetCurrent(feedDir) {
+  if (!REQUIRED_GTFS_FILES.every((f) => fs.existsSync(path.join(feedDir, f)))) return false;
+
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(path.join(feedDir, EXTRACTED_MANIFEST_FILE), 'utf8'));
+  } catch (err) {
+    return false;
+  }
+  if (!manifest || !Array.isArray(manifest.managedFiles) || !Array.isArray(manifest.files)) return false;
+
+  // 管理対象の集合がコード側と一致していること（順序は問わない）。
+  const recorded = new Set(manifest.managedFiles);
+  if (recorded.size !== MANAGED_GTFS_FILES.length) return false;
+  if (!MANAGED_GTFS_FILES.every((f) => recorded.has(f))) return false;
+
+  // 前回配置したファイルが1つでも消えていれば揃っていない
+  // （ZIPに含まれていなかったファイルは files に入らないので、
+  //   持たないフィードが毎回取り直しになることはない）。
+  return manifest.files.every((f) => fs.existsSync(path.join(feedDir, f)));
 }
 
 /**
@@ -106,9 +171,10 @@ async function commitFeedFingerprint(dbClient, feedId, fingerprint) {
  * 単一のGTFSフィードをダウンロードして展開する。
  * 失敗してもthrowせず、feedsテーブルにエラー情報を記録して `ok: false` を返す。
  *
- * 内容が前回取り込んだZIPと同一（HTTP 304、またはSHA-256一致）で、かつ必須ファイルが
- * ディスク上に揃っている場合は展開自体をスキップし、`{ ok: true, changed: false }` を
- * 返す。呼び出し側はこれを見て seed()（＝全マスタの書き換え）を省ける。
+ * 内容が前回取り込んだZIPと同一（HTTP 304、またはSHA-256一致）で、かつ管理対象ファイルが
+ * いまのコードどおりディスク上に揃っている（isExtractedSetCurrent）場合は展開自体を
+ * スキップし、`{ ok: true, changed: false }` を返す。呼び出し側はこれを見て
+ * seed()（＝全マスタの書き換え）を省ける。
  *
  * @param {object} client - PostgreSQLクライアント
  * @param {object} feed - config/feeds.js のフィード定義
@@ -128,11 +194,11 @@ async function downloadAndExtractGtfsFeed(client, feed, options = {}) {
     // フィードディレクトリを作成
     fs.mkdirSync(feedDir, { recursive: true });
 
-    // 内容不変のスキップ判定は「必須ファイルがディスク上に揃っている」ときだけ許す。
-    // ファイルが欠けている状態（コンテナ再作成直後など）でスキップすると、
-    // 時刻表インデックスの構築が復旧できないまま固定される。
-    const filesPresent = REQUIRED_GTFS_FILES.every((f) => fs.existsSync(path.join(feedDir, f)));
-    const canSkipUnchanged = !force && filesPresent;
+    // 内容不変のスキップ判定は「いまのコードの管理対象どおりにファイルが揃っている」
+    // ときだけ許す。ファイルが欠けている状態（コンテナ再作成直後など）でスキップすると、
+    // 時刻表インデックスの構築が復旧できないまま固定される。管理対象に新しいファイルを
+    // 足した直後もスキップしない（isExtractedSetCurrent のコメント参照）。
+    const canSkipUnchanged = !force && isExtractedSetCurrent(feedDir);
 
     let previous = { content_hash: null, last_etag: null, last_modified: null };
     if (canSkipUnchanged) {
@@ -265,6 +331,7 @@ async function downloadAndExtractGtfsFeed(client, feed, options = {}) {
     }
 
     // 新規ファイルを配置
+    const placedFiles = [];
     for (const entry of entries) {
       const entryPath = entry.entryName.replace(/\\/g, '/');
       const fileName = entryPath.split('/').pop();
@@ -272,8 +339,11 @@ async function downloadAndExtractGtfsFeed(client, feed, options = {}) {
       // 必須ファイル＋任意ファイルのみ配置（余計なファイルは展開しない）
       if (MANAGED_GTFS_FILES.includes(fileName)) {
         fs.copyFileSync(path.join(tmpExtractDir, entryPath), path.join(feedDir, fileName));
+        placedFiles.push(fileName);
       }
     }
+    // 次回の「内容不変ならスキップ」判定の材料。展開が成功した後にだけ書く。
+    writeExtractedManifest(feedDir, placedFiles);
 
     // 一時ファイル・バックアップをクリーンアップ
     fs.rmSync(tmpExtractDir, { recursive: true, force: true });
@@ -311,15 +381,16 @@ async function downloadAndExtractGtfsFeed(client, feed, options = {}) {
 }
 
 /**
- * 指定フィードのGTFSファイルがディスク上に揃っているか確認し、
- * 1つでも欠けていれば（コンテナ再作成等でdata gtfs/を失った場合など）
- * 更新間隔に関係なく強制的に再取得する。
+ * 指定フィードのGTFSファイルが、いまのコードの管理対象どおりにディスク上へ揃っているか
+ * 確認し（isExtractedSetCurrent）、揃っていなければ更新間隔に関係なく強制的に再取得する。
+ *
+ * 揃っていないのは、コンテナ再作成等で`data gtfs/`を失った場合のほか、
+ * MANAGED_GTFS_FILES に新しいファイルを追加した直後も該当する。
  * @returns {boolean} ダウンロードを実行したか（何もしなければfalse）
  */
 async function ensureGtfsFilesPresent(client, feed) {
   const feedDir = getGtfsDir(feed.id);
-  const missing = REQUIRED_GTFS_FILES.some((f) => !fs.existsSync(path.join(feedDir, f)));
-  if (!missing) return false;
+  if (isExtractedSetCurrent(feedDir)) return false;
 
   console.log(`[gtfsFeedManager] GTFSファイル欠損を検知、再取得します: ${feed.name} (${feed.id})`);
   // 欠損の復旧なので内容不変の判定は挟まず必ず展開する（force）。

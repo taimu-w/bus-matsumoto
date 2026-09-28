@@ -18,6 +18,7 @@
 | メソッド | パス | 概要 |
 |---|---|---|
 | GET | `/api/routes` | 利用可能な路線一覧（GTFSの`routes.txt`由来） |
+| GET | `/api/route-shapes` | 路線図マップ用の路線の線形（GTFS`shapes.txt`由来。`route_shapes`テーブル）。`{ routes: [{ id, name, short_name, color, text_color, shapes: [{ shapeId, points }] }] }`で、`points`は`[[lat, lon], ...]`（`shape_pt_sequence`昇順・小数6桁）。**線形を1本も持たない路線は返さない**（地図に描く線が無い路線は絞り込みの選択肢にも出さないため）。リアルタイム休止では除外しない（返すのは運行状況ではなく静的な経路のため） |
 | GET | `/api/settings` | 通常のお知らせ（`notices`。最大3件・各要素`{title, body, imageUrl, startDate, endDate}`。**配信期間内のものだけ**を返す）・重要なお知らせ（`importantNotice`＝`{body, imageUrl, startDate, endDate}`。配信期間外なら中身は空） |
 | GET | `/api/server-load` | 現在のサイト閲覧数とサーバー負荷状況（自動更新の自動OFF判定に使用） |
 | GET | `/api/stops` | 全バス停マスタ（時刻表画面・地図表示用） |
@@ -55,7 +56,7 @@
 | GET | `/api/timetable/stops/search` | バス停名のインクリメンタル検索（漢字/ひらがな/カタカナ/ローマ字） |
 | GET | `/api/timetable/stops/map` | バス停マップ用の全バス停一覧（同名で標柱違いは代表点1件に統合済み） |
 | GET | `/api/timetable/stops/:stopKey` | バス停の時刻表（標柱一覧・凡例つき。`?date=YYYY-MM-DD`・`?platform=標柱のstop_id`） |
-| GET | `/api/timetable/trips/:feedId/:routeId/:tripId/:departureTime` | 便の通過時刻一覧（`?stop=`でハイライト対象を指定） |
+| GET | `/api/timetable/trips/:feedId/:routeId/:tripId/:departureTime` | 便の通過時刻一覧（`?stop=`でハイライト対象を指定）。`shapeId`／`shapePoints`（`[[lat, lon], ...]`）は**その便が走る経路の線形**（GTFS`shapes.txt`由来）で、便詳細の「地図で表示」に路線カラーで重ねる描画専用データ。路線の全線形ではなくこの便の1本だけを返す。線形が無い便は両方とも`null` |
 | GET | `/api/timetable/trips/:feedId/:routeId/:tripId/:departureTime/realtime` | 上記便のリアルタイム重ね合わせ（リアルタイム休止中の路線は`available:false`） |
 | GET | `/api/busstop/search` | `/api/timetable/stops/search`と同一データ |
 | GET | `/api/busstop/nearby` | 現在地から近い順のバス停（既定5件） |
@@ -75,7 +76,7 @@
 | GET / PUT | `/api/admin/settings` | お知らせ設定の取得・更新。`notices`（通常のお知らせ配列、最大3件。各要素`{title, body, imageUrl, startDate, endDate}`。`imageUrl`は`https://`のみ、`startDate`/`endDate`は`YYYY-MM-DD`または空＝無期限）と`importantNotice`（`{body, imageUrl, startDate, endDate}`。旧形式の文字列も受理）。GETは配信期間切れも含めた全件を返す |
 | GET / PUT / DELETE | `/api/admin/runtime-settings`（`/:key`） | 運用パラメータ（判定半径・タイムアウト・しきい値等）の取得・上書き保存・上書き解除（既定値へ戻す）。定義一覧は[backend/src/config/runtimeSettingsCatalog.js](../backend/src/config/runtimeSettingsCatalog.js) |
 | GET / POST / DELETE | `/api/admin/holidays`（`/:date`） | 祝日カレンダーの取得・追加・削除（ETA統計の曜日区分に使用） |
-| GET / POST / DELETE | `/api/admin/route-mappings`（`/:externalId`） | 外部ID⇔GTFS route_id対応の取得・追加更新（UPSERT）・削除。`route_id`は`routes`テーブルへの実在チェックあり（路線名による解決はしない） |
+| GET / POST / DELETE | `/api/admin/route-mappings`（`/:externalId?routeId=`） | 外部ID⇔GTFS route_id対応の取得・追加更新・削除。多対多（1行＝1つの`(外部ID, 路線)`）。POSTは`originalRouteId`を付けるとその1行の付け替え、付けなければ対応の追加（既存なら備考の更新）。DELETEは`?routeId=`でその1行だけ（空文字は「未対応」行、省略時はその外部IDの対応を全件）。`route_id`は`routes`テーブルへの実在チェックあり（路線名による解決はしない） |
 | GET / POST / DELETE | `/api/admin/direction-rules`（`/:routeId`） | 方向マッピング（位置情報CSVの方向値⇔GTFS `direction_id`）の取得・追加更新（UPSERT）・削除。`mode`は`ignore`/`map`、`map`時は`valueMap`（`{CSV値: 0|1}`）と`fallback`（`0`/`1`/`null`）。`routeId`は`routes`テーブルへの実在チェックあり。行が無い路線は既定`ignore`。定義は[backend/src/config/directionMapping.js](../backend/src/config/directionMapping.js) |
 | GET / POST / DELETE | `/api/admin/realtime-suspensions`（`/:routeId`） | リアルタイム休止（路線ごとの「リアルタイム運行情報の表示」一時停止）の取得・追加更新（UPSERT）・削除（＝再開）。`{routeId, reason, note}`。`routeId`は`routes`テーブルへの実在チェックあり。行があるとその路線は公開画面でリアルタイムを出さず定刻表示に落ちる（時刻表・経路探索・管理画面の運行監視は影響なし）。詳細は[realtime-suspension.md](realtime-suspension.md) |
 | GET / PUT / DELETE | `/api/admin/tourist-spots`（`/:id`） | 観光スポット情報の一覧・テキスト一括登録（1列目のIDをキーにした全件洗い替え）・1件削除。`:id`は管理画面で指定する識別子（TEXT） |

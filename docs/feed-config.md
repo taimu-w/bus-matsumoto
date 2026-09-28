@@ -4,11 +4,21 @@
 
 ## (1) 外部ID（位置情報CSVの系統ID）⇔ GTFS route_id の対応
 
-`route_external_ids`テーブル（DB、`external_id`が主キー、`route_id`は`feedId:routeId`形式のqualified route id）で管理し、管理画面「外部IDマッピング」（`GET/POST/DELETE /api/admin/route-mappings`）から追加・変更・削除できます。運用担当者が随時追加・修正するため、DB管理・管理画面編集にしています。
+`route_external_ids`テーブル（DB）で管理し、管理画面「外部IDマッピング」（`GET/POST/DELETE /api/admin/route-mappings`）から追加・変更・削除できます。運用担当者が随時追加・修正するため、DB管理・管理画面編集にしています。
+
+**1行＝1つの`(external_id, route_id)`の対応で、多対多です。**（`route_id`は`feedId:routeId`形式のqualified route id）
+
+- 1つのGTFS路線に複数の外部ID：同じ路線に系統違いの別IDが振られているケース。
+- 1つの外部IDに複数のGTFS路線：1つの系統IDで往路・復路が別路線としてGTFSに入っているケース（「信大横田循環線」と「横田信大循環線」など）。
+
+一意性は部分索引2本で担保します。`ux_route_external_ids_pair`（`(external_id, route_id)` WHERE `route_id IS NOT NULL`）が同じ対応の二重登録を防ぎ、`ux_route_external_ids_unmapped`（`(external_id)` WHERE `route_id IS NULL`）が「未対応」行を外部IDごと1行に保ちます（`NULL`はUNIQUE制約では重複扱いにならないため索引を分けています）。
 
 - **路線名による解決はしません。** `route_id`を直接保存するため、GTFS側の路線名表記ゆれ（「ケ/ヶ」等）で対応が黙って欠落することがありません。管理画面は路線を`/api/routes`の候補一覧から選ばせる方式で、保存API側も`route_id`が`routes`テーブルに実在するかを検証し、存在しなければ拒否します。
-- `route_id`が`NULL`の行は「外部IDは判明しているが対応するGTFS路線がまだ無い」ことを表し、`note`に理由を残します。消さずに残すことで、路線が後から追加された際に再調査せずに済みます。
-- 実行時の参照は`backend/src/services/routeExternalIdMapping.js`（TTL1時間のメモリキャッシュ）経由です。管理画面から編集した際は`invalidateRouteExternalIdCache()`で即時破棄します。
+- `route_id`が`NULL`の行は「外部IDは判明しているが対応するGTFS路線がまだ無い」ことを表し、`note`に理由を残します。消さずに残すことで、路線が後から追加された際に再調査せずに済みます。この「未対応」行は同じ外部IDの対応行と同居させません（1件でも対応があれば未対応ではないため）。対応が付いた外部IDを未対応で上書き保存しようとすると、保存APIが400で拒否します。
+- 実行時の参照は`backend/src/services/routeExternalIdMapping.js`（TTL1時間のメモリキャッシュ）経由です。管理画面から編集した際は`invalidateRouteExternalIdCache()`で即時破棄します。外部ID→`route_id`は**配列**（`loadExternalIdMap()`）、その逆引きは`getExternalIdsForRoute(routeId)`で引きます。
+- **1つの外部IDに複数の路線を紐づけると、その外部IDで届いた測位は紐づけた全路線の便の照合対象になります。** 位置情報は便ではなく車両（`car_id`）単位で届くため測位自体は増えませんが、便の候補検索にかかる便が増えます。最終的にどの便の担当になるかは、従来どおり「始発時刻直前のGPSが始発バス停100m以内」かつ「最も近い1台」で決まります（[vehicle-assignment.md](vehicle-assignment.md)）。
+- 測位側は、突合した外部IDを`vehicle_positions_raw.external_id`→`vehicle_gps_log.external_id`に残します。`route_id`列には紐づく路線のうち代表1件（`route_id`昇順の先頭）しか入らないため、便の候補検索は外部ID側を正に使います。これが無いと、代表でない方の路線の便に車両が永久に割り当たりません。
+- 1つの外部IDに紐づく路線どうしで方向マッピング（(2)）の変換結果が割れる場合、その測位の`direction_id`は`NULL`（方向不明＝方向で絞り込まない）にします。どれか1つを採ると、採らなかった路線の便で「方向が違う」と誤って候補から外れるためです。紐づく路線が1つだけなら、従来どおりその路線の変換結果そのものです。
 - 起動時（`seed.js`の`validateCodeConfig()`）に、`route_external_ids.route_id`が実際の`routes`テーブルに存在するかを検証し、存在しなければ警告ログを出します（起動は止めません）。
 
 ## (2) 位置情報CSVの方向値 ⇔ GTFS direction_id の対応

@@ -920,7 +920,7 @@ function setPageTitle(title, subtitle) {
 }
 
 function hideAllPages() {
-  ['section-home', 'section-favorites', 'section-route-list', 'section-realtime', 'section-routesearch', 'section-spotsearch', 'section-map', 'section-busmap', 'section-stopmap', 'section-timetable', 'section-busstop', 'notices'].forEach((id) => {
+  ['section-home', 'section-favorites', 'section-route-list', 'section-realtime', 'section-routesearch', 'section-spotsearch', 'section-map', 'section-busmap', 'section-stopmap', 'section-routemap', 'section-timetable', 'section-busstop', 'notices'].forEach((id) => {
     const el = $(id);
     if (el) el.style.display = 'none';
   });
@@ -1022,6 +1022,7 @@ function parseHashRoute() {
 // isXxxPath() をそのまま使う（判定ロジックを二重に持たない）。
 function currentNavPage() {
   if (window.StopMapView && window.StopMapView.isStopMapPath()) return 'map';
+  if (window.RouteMapView && window.RouteMapView.isRouteMapPath()) return 'map';
   if (window.BusStopView && window.BusStopView.isBusStopPath()) return 'busstop';
   if (window.RouteSearchView && window.RouteSearchView.isRouteSearchPath()) return 'routesearch';
   // 時刻表検索・スポット検索は下部タブに無いので、ホームからの導線経由で来ても
@@ -1374,6 +1375,11 @@ async function renderCurrentRoute() {
   // バス停マップも同様にパス（/stopmap）でルーティングする。
   if (window.StopMapView && window.StopMapView.isStopMapPath()) {
     await window.StopMapView.render();
+    return;
+  }
+  // 路線図マップも同様にパス（/routemap）でルーティングする。
+  if (window.RouteMapView && window.RouteMapView.isRouteMapPath()) {
+    await window.RouteMapView.render();
     return;
   }
   // バス停検索（バス停情報の総合ポータル）も同様にパス（/busstop）でルーティングする。

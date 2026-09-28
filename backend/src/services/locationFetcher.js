@@ -3,11 +3,11 @@
 // vehicle_positions_raw に追記する。
 // 各フィードは独立したtry/catchで処理され、1つの事業者の取得失敗が他に影響しない。
 // 位置情報フィードの一覧とGTFSフィードとの対応は config/feeds.js（コード）が唯一の情報源。
-// 外部ID→route_idの対応は route_external_ids（DB）を services/routeExternalIdMapping.js が
+// 外部ID⇔route_idの対応は route_external_ids（DB）を services/routeExternalIdMapping.js が
 // TTLキャッシュ付きで読む。管理画面から編集した際はキャッシュを即時破棄するため、
 // 反映まで最大60秒（次回ポーリング）で済む。
-// （旧: feed_mappings テーブルによるconfidence推測は廃止。route_external_idsは
-//   一時期コード管理化したが、厳格な検証を維持したままDB管理・管理画面編集に戻した）
+// 1つの外部IDに複数のGTFS路線が紐づくことがあるため、突合した外部ID自体を
+// vehicle_positions_raw.external_id に残す（便の候補検索はこれを正に使う）。
 const fetch = require('cross-fetch');
 const pool = require('../config/db');
 const { formatNowNoFormat, formatTimeNoFormat, parseGpsTimeToDate } = require('../utils/time');
@@ -156,17 +156,23 @@ async function fetchLocationFeed(client, feed, freshnessMin, nowLabel) {
   for (const row of rows) {
     if (row.length < 4) continue;
     const joined = row.join(',');
-    let matchedRouteId = null;
-    for (const [externalId, routeId] of effectiveExternalIdMap.entries()) {
+    let matchedExternalId = null;
+    let matchedRouteIds = null;
+    for (const [externalId, routeIds] of effectiveExternalIdMap.entries()) {
       if (joined.includes(externalId)) {
-        matchedRouteId = routeId;
+        matchedExternalId = externalId;
+        matchedRouteIds = routeIds;
         break;
       }
     }
-    if (!matchedRouteId) {
+    if (!matchedRouteIds) {
       skippedNoRouteMatch++;
       continue;
     }
+    // 観測系統として記録する代表の路線（route_id昇順の先頭。キャッシュ側で並びを固定済み）。
+    // 外部IDが複数路線に紐づく場合、この1件だけでは便の候補検索でもう一方の路線を
+    // 取りこぼすため、突合した外部IDも併せて残す。
+    const matchedRouteId = matchedRouteIds[0];
 
     routeMatched++;
     const carId = row[0].trim();
@@ -192,14 +198,26 @@ async function fetchLocationFeed(client, feed, freshnessMin, nowLabel) {
     // 方向列（5列目 / row[4]）を読み取り、路線別の方向マッピング（route_direction_rules。
     // 管理画面「方向マッピング」で編集）で direction_id に変換する。
     // 方向を使わない路線（既定）・値が空の場合は null（方向不明）になり、便判定では方向で絞り込まない。
+    //
+    // 外部IDが複数路線に紐づく場合、路線ごとに方向マッピングが違えば変換結果も割れる。
+    // 割れたときは null（方向不明＝方向で絞り込まない）にする。どれか1つを選ぶと、
+    // 選ばれなかった路線の便で「方向が違う」と誤って候補から外れるため。
+    // 紐づく路線が1つだけのとき（従来）は、その路線の変換結果そのもの。
     const directionCsvValue = row[4] ? row[4].trim() : '';
-    const directionId = resolveDirectionId(matchedRouteId, directionCsvValue);
+    let directionId = resolveDirectionId(matchedRouteId, directionCsvValue);
+    for (const routeId of matchedRouteIds) {
+      if (resolveDirectionId(routeId, directionCsvValue) !== directionId) {
+        directionId = null;
+        break;
+      }
+    }
 
     const prev = latestByCar.get(carId);
     if (!prev || gpsDate > prev.gpsDate) {
       latestByCar.set(carId, {
         carId,
         routeId: matchedRouteId,
+        externalId: matchedExternalId,
         directionId,
         directionRaw: directionCsvValue,
         gpsDate,
@@ -219,10 +237,11 @@ async function fetchLocationFeed(client, feed, freshnessMin, nowLabel) {
       continue;
     }
     await client.query(
-      `INSERT INTO vehicle_positions_raw (route_id, direction_id, direction_raw, car_id, received_time, gps_time, gps_time_ts, lat, lon, feed_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      `INSERT INTO vehicle_positions_raw (route_id, external_id, direction_id, direction_raw, car_id, received_time, gps_time, gps_time_ts, lat, lon, feed_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         e.routeId || '',
+        e.externalId || null,
         e.directionId,
         e.directionRaw || null,
         e.carId,

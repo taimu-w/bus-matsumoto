@@ -742,7 +742,7 @@
       marker.bindPopup(
         `<div style="font-weight:700">${esc(platformLabel(platform))}</div>` +
         (destinations ? `<div style="font-size:11px">${esc(destinations)}方面</div>` : '') +
-        '<div style="font-size:11px;color:#4f46e5;font-weight:700;margin-top:4px">この乗り場を見る</div>'
+        '<div style="font-size:11px;color:var(--acc-indigo-text);font-weight:700;margin-top:4px">この乗り場を見る</div>'
       );
       marker.on('click', () => {
         navigate(busStopUrl(data.stop.stopKey, { platform: platform.stopId }));
@@ -857,7 +857,7 @@
         marker.bindPopup(
           `<div style="font-weight:700">${esc(platformLabel(platform))}</div>` +
           (destinations ? `<div style="font-size:11px">${esc(destinations)}方面</div>` : '') +
-          (navigable ? '<div style="font-size:11px;color:#0d9488;font-weight:700;margin-top:4px">この乗り場の詳細を見る</div>' : '')
+          (navigable ? '<div style="font-size:11px;color:var(--acc-emerald-text);font-weight:700;margin-top:4px">この乗り場の詳細を見る</div>' : '')
         );
         if (navigable) {
           marker.on('click', () => {

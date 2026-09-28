@@ -2,3 +2,6 @@ node_modules/
 .env
 *.log
 .DS_Store
+
+# GTFS展開マーカー（gtfsFeedManager.js が data gtfs/<feedId>/ に書く、ローカルの展開状態の記録）
+.extracted.json

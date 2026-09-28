@@ -90,7 +90,7 @@ app.get('/howto.html', (req, res) => {
 // SPAのパスルーティング画面（frontend/*.js の isXxxPath() が受理するパスと同一に保つこと）。
 // これ以外の未知パスは、監視・SEO・404計測が機能するよう本物の404を返す
 // （以前は '*' が無条件に index.html を200で返しており、存在しないURLも200になっていた）。
-const SPA_PATH_EXACT = new Set(['/', '/stopmap', '/spotsearch']);
+const SPA_PATH_EXACT = new Set(['/', '/stopmap', '/routemap', '/spotsearch']);
 const SPA_PATH_PREFIXES = ['/timetable', '/busstop', '/routesearch'];
 function isKnownSpaPath(pathname) {
   if (SPA_PATH_EXACT.has(pathname)) return true;

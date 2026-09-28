@@ -16,6 +16,7 @@ const CACHE_NAME = 'bustime-shell-v1';
 const SHELL_URLS = [
   '/',
   '/style.css',
+  '/theme.js',
   '/vendor/tailwind/tailwind-3.4.17.js',
   '/vendor/leaflet/leaflet.css',
   '/vendor/leaflet/leaflet.js',
@@ -28,6 +29,7 @@ const SHELL_URLS = [
   '/spot-photos.js',
   '/timetable.js',
   '/stopmap.js',
+  '/routemap.js',
   '/busstop.js',
   '/routesearch.js',
   '/spotsearch.js',

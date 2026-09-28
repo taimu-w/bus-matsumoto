@@ -26,7 +26,8 @@ daily_trips（当日の便。例：8:00発）
   車両を誤って採用する事故につながります。距離が最も近い候補を採用するルールを守ってください。
 - `vehicles`は「観測されている物理車両」を表すだけで、便との紐付けを持ちません。一意キーは
   `(feed_id, car_id)`＝位置情報フィード内で`car_id`が指す物理車両1台につき1行で、系統ごとに
-  行を割りません。系統は測位ごとの観測値として`vehicle_gps_log.route_id`に持ち、`vehicles.route_id`は
+  行を割りません。系統は測位ごとの観測値として`vehicle_gps_log`の`external_id`（届いた外部ID）と
+  `route_id`（その対応先の代表1件）に持ち、`vehicles.route_id`は
   「直近に観測した系統」の表示用です。運行終了しても行は削除せず`status='inactive'`にします
   （1台が複数便の候補になり得るため、削除するとGPSログがCASCADEで消えて他便の処理まで壊れます）。
 
@@ -38,7 +39,7 @@ daily_trips（当日の便。例：8:00発）
 
 | 条件 | 実装 |
 |---|---|
-| 同じ系統の測位 | **primary**: `vehicle_gps_log.route_id = trip.route_id` の測位を持つ車両（従来の「`vehicles.route_id` 一致」と同じ候補集合）。**fallback**: primary が距離判定後に1台も残らないときだけ、同じ位置情報フィード（`config/feeds.js` の `getLocationFeedIdsForRoute()`）の車両で、系統表示が別系統のまま始発バス停に来ているものを拾う（折り返しで車載器の系統表示が切り替わる前の車両。旧 known-issues M-9 / system-review DB-5） |
+| 同じ系統の測位 | **primary**: この便の系統として届いた測位を持つ車両。「この便の系統として届いた」は、測位の外部ID`vehicle_gps_log.external_id`がこの便の路線に紐づく外部ID（`getExternalIdsForRoute(trip.route_id)`）のいずれか、または観測系統`vehicle_gps_log.route_id`が`trip.route_id`と一致すること。**1つの外部IDが複数のGTFS路線に紐づく場合、`route_id`には代表1件しか入らないため、外部ID側で拾わないと代表でない方の路線の便に車両が永久に割り当たりません**（[feed-config.md](feed-config.md)）。**fallback**: primary が距離判定後に1台も残らないときだけ、同じ位置情報フィード（`config/feeds.js` の `getLocationFeedIdsForRoute()`）の車両で、系統表示が別系統のまま始発バス停に来ているものを拾う（折り返しで車載器の系統表示が切り替わる前の車両） |
 | 始発時刻直前の最新GPS | **始発時刻の3分前〜始発時刻（閉区間）** に存在する最新の1点。始発時刻を1秒でも過ぎたGPSは無効 |
 | 始発バス停から100m以内 | `ASSIGN_RADIUS_METERS`（既定100m）。通過判定の120mとは別の設定値 |
 | direction条件 | `route_direction_rules`（管理画面「方向マッピング」で編集、`services/directionRules.js`が参照）。**既定（行が無い路線）・`mode:'ignore'`の路線、および車両側の方向が不明（NULL）の場合は方向で絞り込まない** |

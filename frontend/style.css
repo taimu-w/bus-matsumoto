@@ -1,13 +1,427 @@
-/* Tailwind(CDN)で表現しきれない部分のみ最小限に定義する。
-   本体の配色・余白・角丸などは index.html 側のユーティリティクラスで完結させる。 */
+/* Tailwind(CDN)で表現しきれない部分と、テーマ（配色）の一元管理だけをここに置く。
+   余白・角丸・タイポなどのレイアウトは index.html 側のユーティリティクラスで完結させる。 */
 
 /* ==========================================================
    バスタイム デザイントークン
-   配色そのものはTailwindの青系スケール（blue-50〜blue-900）に統一し、
-   ここではTailwindのユーティリティだけでは表現しづらい挙動のみ定義する。
+   ----------------------------------------------------------
+   配色の実値はすべてここのカスタムプロパティに集約する。
+   ページ側（index.html / servicestatus.html / howto.html と、
+   JSがinnerHTMLで書き出すマークアップ）はこれまでどおり
+   Tailwindの bg-white / text-gray-500 / bg-blue-50 といった
+   具体的な色名クラスを使ったままで構わない。下の「ユーティリティ
+   上書き層」がそれらのクラスをトークン参照に読み替えるため、
+   ダークモードの追加や配色の微調整を数百箇所のクラス書き換え
+   （app.js・timetable.js・routesearch.js 等、合計30万字超）
+   なしで行える。
+
+   ライトモードのトークン値はTailwind既定の実値と同じにしてある。
+   例外は --text-secondary（旧 gray-500）と --text-muted（旧 gray-400）
+   の2つで、コントラスト比がWCAG AAに届いていなかったため意図的に
+   濃くしている（下のコメント参照）。
    ========================================================== */
 :root {
-  --focus-ring: #2563eb; /* Tailwind blue-600 相当。フォーカスリングの色を1箇所に集約 */
+  color-scheme: light;
+
+  /* 面（背景）。数字が大きいほど手前・濃い。 */
+  --canvas: #f0f4f8;        /* body全体の下地 */
+  --surface: #ffffff;       /* カード（bg-white） */
+  --surface-2: #f9fafb;     /* bg-gray-50 */
+  --surface-3: #f3f4f6;     /* bg-gray-100 */
+  --surface-4: #e5e7eb;     /* bg-gray-200 */
+  --surface-5: #d1d5db;     /* bg-gray-300 */
+  --surface-95: rgb(255 255 255 / 0.95); /* 下部ナビ等の半透明面 */
+
+  /* 反転面：塗りボタン・トーストのように「面の上に白文字」を置くもの。
+     ダークモードでは暗くするのではなく地よりも明るくしないとボタンが
+     背景に溶けるため、通常の面トークンとは別に持つ。 */
+  --inverse-surface: #111827;   /* bg-gray-900 / bg-slate-900 */
+  --inverse-surface-2: #374151; /* bg-gray-700 */
+
+  /* 罫線 */
+  --border: #e5e7eb;        /* border-gray-200・色指定なしのborderの既定値 */
+  --border-soft: #f3f4f6;   /* border-gray-100 */
+  --border-strong: #d1d5db; /* border-gray-300 */
+
+  /* 文字。strong→muted の順に弱くなる。 */
+  --text-strong: #111827;   /* text-gray-900 */
+  --text-800: #1f2937;      /* text-gray-800 */
+  --text-body: #374151;     /* text-gray-700 */
+  --text-600: #4b5563;      /* text-gray-600 */
+  /* text-gray-500 は本文の補助説明で126箇所使われているが、Tailwind既定の
+     #6b7280 は白地で4.83:1、--canvas(#f0f4f8)上では4.37:1しかなく、
+     しかも大半が10〜11pxの小さい文字のためWCAG AA（4.5:1）を満たせない。
+     #4f5865 に濃くして白地7.20:1・canvas上6.52:1を確保する。 */
+  --text-secondary: #4f5865; /* text-gray-500 */
+  /* text-gray-400（53箇所）はTailwind既定 #9ca3af で白地2.54:1しかなく、
+     補助文字としてはコントラスト不足だった。#606875 で白地5.62:1。 */
+  --text-muted: #606875;     /* text-gray-400 */
+  --text-faint: #9ca3af;     /* text-gray-300（装飾用途のみ） */
+  --neutral-mark: #9ca3af;   /* bg-gray-400/500：ドット・区切りの小さな塗り */
+
+  /* ブランド（青） */
+  --brand-header: #1e40af;   /* bg-blue-800：ヘッダー・モーダル見出し帯 */
+  --brand-solid: #1d4ed8;    /* bg-blue-700：塗りボタン */
+  --brand-solid-2: #2563eb;  /* bg-blue-600 / bg-blue-500 */
+  --link: #1d4ed8;           /* text-blue-700 */
+  --brand-text-800: #1e40af; /* text-blue-800 */
+  --brand-text-900: #1e3a8a; /* text-blue-900：見出し */
+  --tint-blue: #eff6ff;      /* bg-blue-50：アイコンチップの下地 */
+  --tint-blue-2: #dbeafe;    /* bg-blue-100 */
+  --border-blue-soft: #dbeafe;   /* border-blue-100 */
+  --border-blue: #bfdbfe;        /* border-blue-200 */
+  --border-blue-hover: #93c5fd;  /* border-blue-300：カードのhover枠 */
+  --border-blue-strong: #60a5fa; /* border-blue-400 */
+
+  /* ヒーローカード（ホーム最上段のリアルタイム運行情報） */
+  --hero-from: #2563eb;
+  --hero-to: #1e3a8a;
+
+  /* ヘッダーの帯の上に置くボタン（.on-brand-btn）。面トークンとは別系統。 */
+  --on-brand-btn-bg: #ffffff;
+  --on-brand-btn-bg-hover: #eff6ff;
+  --on-brand-btn-text: #1e40af;
+
+  --focus-ring: #2563eb;    /* フォーカスリング。ダークでは明るい青に差し替える */
+  --shadow-color: rgb(15 23 42 / 0.10);
+
+  /* 状態色（お知らせ・警告・運行状況のカード）。
+     bg-*-50 の下地 / border-*-200 の枠 / text-*-700|800|900 の文字を
+     1組のトークンにまとめ、ダークでは「暗い色地＋明るい文字」に入れ替える。 */
+  --acc-sky-surface: #f0f9ff;     --acc-sky-border: #bae6fd;     --acc-sky-text: #0369a1;
+  --acc-indigo-surface: #eef2ff;  --acc-indigo-border: #c7d2fe;  --acc-indigo-text: #4338ca;
+  --acc-purple-surface: #faf5ff;  --acc-purple-border: #e9d5ff;  --acc-purple-text: #7e22ce;
+  --acc-emerald-surface: #ecfdf5; --acc-emerald-border: #a7f3d0; --acc-emerald-text: #047857;
+  --acc-green-surface: #f0fdf4;   --acc-green-border: #bbf7d0;   --acc-green-text: #15803d;
+  --acc-amber-surface: #fffbeb;   --acc-amber-border: #fde68a;   --acc-amber-text: #b45309;
+  --acc-yellow-surface: #fefce8;  --acc-yellow-border: #fef08a;  --acc-yellow-text: #a16207;
+  --acc-red-surface: #fef2f2;     --acc-red-border: #fecaca;     --acc-red-text: #b91c1c;
+  --acc-rose-surface: #fff1f2;    --acc-rose-border: #fecdd3;    --acc-rose-text: #be123c;
+
+  /* 地図タイル（Leaflet/OSM）。ダークでは反転+色相回転で暗くする。 */
+  --map-tile-filter: none;
+}
+
+/* ----------------------------------------------------------
+   ダークモードのトークン
+   OSの設定に追従しつつ、ヘッダーの切替ボタン（theme.js）で
+   ライト固定／ダーク固定にもできる。
+   - OS追従時は data-theme 属性が付かないので、条件は
+     「ライト固定されていないとき」= :not([data-theme="light"]) にする。
+   - CSSのカスタムプロパティはメディアクエリの中でしか切り替えられないため、
+     OS追従用とdata-theme="dark"用で同じ宣言ブロックを2回書いている
+     （セレクタリストにまとめると片方がメディアクエリ外になってしまう）。
+   すべての文字色トークンは --surface / --surface-3 上で4.5:1以上になる値を選んでいる。
+   ---------------------------------------------------------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --canvas: #080e16;
+    --surface: #151d2b;
+    --surface-2: #1c2536;
+    --surface-3: #253042;
+    --surface-4: #2d3a4f;
+    --surface-5: #3a465c;
+    --surface-95: rgb(21 29 43 / 0.95);
+
+    --inverse-surface: #33415c;
+    --inverse-surface-2: #45526e;
+
+    --border: #2a3445;
+    --border-soft: #222c3c;
+    --border-strong: #3a465c;
+
+    --text-strong: #e9eef6;
+    --text-800: #dde4ee;
+    --text-body: #cbd5e3;
+    --text-600: #b9c5d5;
+    --text-secondary: #a6b3c5;
+    --text-muted: #99a6b8;
+    --text-faint: #6b7789;
+    --neutral-mark: #64748b;
+
+    --brand-header: #16223f;
+    --brand-solid: #1e3f8f;
+    --brand-solid-2: #2450a8;
+    --link: #9cc0ff;
+    --brand-text-800: #a9c6ff;
+    --brand-text-900: #bfd4ff;
+    --tint-blue: #172741;
+    --tint-blue-2: #1d3153;
+    --border-blue-soft: #24395c;
+    --border-blue: #2d4670;
+    --border-blue-hover: #3d5c92;
+    --border-blue-strong: #4a6eaa;
+
+    --hero-from: #1b3a7a;
+    --hero-to: #0f1f45;
+
+    --on-brand-btn-bg: rgb(255 255 255 / 0.14);
+    --on-brand-btn-bg-hover: rgb(255 255 255 / 0.24);
+    --on-brand-btn-text: #ffffff;
+
+    --focus-ring: #7da6ff;
+    --shadow-color: rgb(0 0 0 / 0.55);
+
+    --acc-sky-surface: #122f46;     --acc-sky-border: #114d6f;     --acc-sky-text: #7dd3fc;
+    --acc-indigo-surface: #1e2647;  --acc-indigo-border: #303772;  --acc-indigo-text: #a5b4fc;
+    --acc-purple-surface: #282448;  --acc-purple-border: #493174;  --acc-purple-text: #d8b4fe;
+    --acc-emerald-surface: #133237; --acc-emerald-border: #12554a; --acc-emerald-text: #6ee7b7;
+    --acc-green-surface: #153432;   --acc-green-border: #18593d;   --acc-green-text: #86efac;
+    --acc-amber-surface: #332e27;   --acc-amber-border: #644b1f;   --acc-amber-text: #fcd34d;
+    --acc-yellow-surface: #313126;  --acc-yellow-border: #60521e;  --acc-yellow-text: #fde047;
+    --acc-red-surface: #32222f;     --acc-red-border: #622a34;     --acc-red-text: #fca5a5;
+    --acc-rose-surface: #332132;    --acc-rose-border: #64293d;    --acc-rose-text: #fda4af;
+
+    --map-tile-filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.92) saturate(0.7);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --canvas: #080e16;
+  --surface: #151d2b;
+  --surface-2: #1c2536;
+  --surface-3: #253042;
+  --surface-4: #2d3a4f;
+  --surface-5: #3a465c;
+  --surface-95: rgb(21 29 43 / 0.95);
+
+  --inverse-surface: #33415c;
+  --inverse-surface-2: #45526e;
+
+  --border: #2a3445;
+  --border-soft: #222c3c;
+  --border-strong: #3a465c;
+
+  --text-strong: #e9eef6;
+  --text-800: #dde4ee;
+  --text-body: #cbd5e3;
+  --text-600: #b9c5d5;
+  --text-secondary: #a6b3c5;
+  --text-muted: #99a6b8;
+  --text-faint: #6b7789;
+  --neutral-mark: #64748b;
+
+  --brand-header: #16223f;
+  --brand-solid: #1e3f8f;
+  --brand-solid-2: #2450a8;
+  --link: #9cc0ff;
+  --brand-text-800: #a9c6ff;
+  --brand-text-900: #bfd4ff;
+  --tint-blue: #172741;
+  --tint-blue-2: #1d3153;
+  --border-blue-soft: #24395c;
+  --border-blue: #2d4670;
+  --border-blue-hover: #3d5c92;
+  --border-blue-strong: #4a6eaa;
+
+  --hero-from: #1b3a7a;
+  --hero-to: #0f1f45;
+
+  --on-brand-btn-bg: rgb(255 255 255 / 0.14);
+  --on-brand-btn-bg-hover: rgb(255 255 255 / 0.24);
+  --on-brand-btn-text: #ffffff;
+
+  --focus-ring: #7da6ff;
+  --shadow-color: rgb(0 0 0 / 0.55);
+
+  --acc-sky-surface: #122f46;     --acc-sky-border: #114d6f;     --acc-sky-text: #7dd3fc;
+  --acc-indigo-surface: #1e2647;  --acc-indigo-border: #303772;  --acc-indigo-text: #a5b4fc;
+  --acc-purple-surface: #282448;  --acc-purple-border: #493174;  --acc-purple-text: #d8b4fe;
+  --acc-emerald-surface: #133237; --acc-emerald-border: #12554a; --acc-emerald-text: #6ee7b7;
+  --acc-green-surface: #153432;   --acc-green-border: #18593d;   --acc-green-text: #86efac;
+  --acc-amber-surface: #332e27;   --acc-amber-border: #644b1f;   --acc-amber-text: #fcd34d;
+  --acc-yellow-surface: #313126;  --acc-yellow-border: #60521e;  --acc-yellow-text: #fde047;
+  --acc-red-surface: #32222f;     --acc-red-border: #622a34;     --acc-red-text: #fca5a5;
+  --acc-rose-surface: #332132;    --acc-rose-border: #64293d;    --acc-rose-text: #fda4af;
+
+  --map-tile-filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.92) saturate(0.7);
+}
+
+/* ==========================================================
+   ユーティリティ上書き層
+   ----------------------------------------------------------
+   Tailwind(CDN)が生成する色ユーティリティをトークン参照に読み替える。
+   セレクタに :root を前置しているのは、詳細度を (0,2,0) に上げて
+   Tailwind側の (0,1,0) に必ず勝たせるため。Tailwind CDNは生成した
+   <style>をJSでheadの末尾に挿入するので、同じ詳細度で書くと
+   読み込み順で負ける（このファイルの方が先に来る）。
+   ========================================================== */
+
+/* 色指定なしの border / border-t 等の既定色。TailwindのPreflightが
+   *,::before,::after { border-color: #e5e7eb }（詳細度0,0,0）で当てているため、
+   html *（0,0,1）で上書きする。.border-gray-200 等の明示指定（0,1,0以上）には
+   負けたままにしたいので、ここで詳細度を上げすぎないこと。 */
+html *,
+html ::before,
+html ::after {
+  border-color: var(--border);
+}
+
+/* 面 */
+:root .bg-white { background-color: var(--surface); }
+:root .bg-white\/95 { background-color: var(--surface-95); }
+:root .bg-gray-50 { background-color: var(--surface-2); }
+:root .bg-gray-100 { background-color: var(--surface-3); }
+:root .bg-gray-200 { background-color: var(--surface-4); }
+:root .bg-gray-300 { background-color: var(--surface-5); }
+:root .bg-gray-900,
+:root .bg-slate-900 { background-color: var(--inverse-surface); }
+:root .bg-gray-700 { background-color: var(--inverse-surface-2); }
+:root .bg-gray-400,
+:root .bg-gray-500 { background-color: var(--neutral-mark); }
+
+/* 罫線 */
+:root .border-gray-100 { border-color: var(--border-soft); }
+:root .border-gray-200 { border-color: var(--border); }
+:root .border-gray-300 { border-color: var(--border-strong); }
+
+/* 文字 */
+:root .text-gray-900 { color: var(--text-strong); }
+:root .text-gray-800 { color: var(--text-800); }
+:root .text-gray-700 { color: var(--text-body); }
+:root .text-gray-600 { color: var(--text-600); }
+:root .text-gray-500 { color: var(--text-secondary); }
+:root .text-gray-400 { color: var(--text-muted); }
+:root .text-gray-300 { color: var(--text-faint); }
+
+/* ブランド（青） */
+:root .bg-blue-800 { background-color: var(--brand-header); }
+:root .bg-blue-700 { background-color: var(--brand-solid); }
+:root .bg-blue-600,
+:root .bg-blue-500 { background-color: var(--brand-solid-2); }
+:root .bg-blue-50 { background-color: var(--tint-blue); }
+:root .bg-blue-100 { background-color: var(--tint-blue-2); }
+:root .text-blue-600,
+:root .text-blue-700 { color: var(--link); }
+:root .text-blue-800 { color: var(--brand-text-800); }
+:root .text-blue-900 { color: var(--brand-text-900); }
+:root .border-blue-100 { border-color: var(--border-blue-soft); }
+:root .border-blue-200 { border-color: var(--border-blue); }
+:root .border-blue-300 { border-color: var(--border-blue-hover); }
+:root .border-blue-400 { border-color: var(--border-blue-strong); }
+:root .border-blue-500,
+:root .border-blue-600 { border-color: var(--brand-solid); }
+/* hover/activeで枠を青くするカード（ホームの機能グリッド等）も同じトークンで揃える */
+:root .hover\:border-blue-300:hover,
+:root .active\:border-blue-300:active { border-color: var(--border-blue-hover); }
+:root .hover\:bg-blue-50:hover { background-color: var(--tint-blue); }
+
+/* 状態色。bg-*-50 / border-*-200|300 / text-*-700|800|900 の3点セットで
+   使われているので、まとめてトークンに寄せる。 */
+:root .bg-sky-50 { background-color: var(--acc-sky-surface); }
+:root .border-sky-200 { border-color: var(--acc-sky-border); }
+:root .text-sky-700, :root .text-sky-800, :root .text-sky-900 { color: var(--acc-sky-text); }
+:root .bg-indigo-50, :root .bg-indigo-100 { background-color: var(--acc-indigo-surface); }
+:root .border-indigo-200 { border-color: var(--acc-indigo-border); }
+:root .text-indigo-700, :root .text-indigo-800, :root .text-indigo-900 { color: var(--acc-indigo-text); }
+:root .bg-purple-50, :root .bg-purple-100 { background-color: var(--acc-purple-surface); }
+:root .border-purple-200 { border-color: var(--acc-purple-border); }
+:root .text-purple-700, :root .text-purple-800, :root .text-purple-900 { color: var(--acc-purple-text); }
+:root .bg-emerald-50 { background-color: var(--acc-emerald-surface); }
+:root .border-emerald-100, :root .border-emerald-200 { border-color: var(--acc-emerald-border); }
+:root .text-emerald-700, :root .text-emerald-800, :root .text-emerald-900 { color: var(--acc-emerald-text); }
+:root .bg-green-50 { background-color: var(--acc-green-surface); }
+:root .border-green-200 { border-color: var(--acc-green-border); }
+:root .text-green-700, :root .text-green-800, :root .text-green-900 { color: var(--acc-green-text); }
+:root .bg-amber-50, :root .bg-amber-100 { background-color: var(--acc-amber-surface); }
+:root .border-amber-200, :root .border-amber-300 { border-color: var(--acc-amber-border); }
+:root .text-amber-700, :root .text-amber-800, :root .text-amber-900 { color: var(--acc-amber-text); }
+:root .bg-yellow-50 { background-color: var(--acc-yellow-surface); }
+:root .border-yellow-200, :root .border-yellow-300 { border-color: var(--acc-yellow-border); }
+:root .text-yellow-700, :root .text-yellow-800, :root .text-yellow-900 { color: var(--acc-yellow-text); }
+:root .bg-red-50 { background-color: var(--acc-red-surface); }
+:root .border-red-200, :root .border-red-300 { border-color: var(--acc-red-border); }
+:root .text-red-600, :root .text-red-700, :root .text-red-800, :root .text-red-900 { color: var(--acc-red-text); }
+:root .bg-rose-50 { background-color: var(--acc-rose-surface); }
+:root .border-rose-200 { border-color: var(--acc-rose-border); }
+:root .text-rose-700, :root .text-rose-800, :root .text-rose-900 { color: var(--acc-rose-text); }
+
+/* 影。ダークでは黒い影が地に溶けて段差が消えるため、Tailwindの
+   --tw-shadow-color 機構（--tw-shadow-colored への差し替え）を使って
+   色だけを入れ替える。box-shadow自体を上書きしないのは、
+   ring-1 ring-sky-500（timetable.jsの選択中バス停）のように
+   ring と shadow を合成している箇所を壊さないため。 */
+:root .shadow-sm,
+:root .shadow,
+:root .shadow-md,
+:root .shadow-lg,
+:root .shadow-xl,
+:root .shadow-2xl {
+  --tw-shadow-color: var(--shadow-color);
+  --tw-shadow: var(--tw-shadow-colored);
+}
+
+/* ==========================================================
+   路線カラーで描く文字（時刻表の分・経路検索の行き先）
+   ----------------------------------------------------------
+   路線カラーをそのまま文字色に使えるかは地の色しだいで、地の色は
+   テーマで変わる（ライト＝白／ダーク＝濃紺）。そこで timetable.js /
+   routesearch.js の routeColorStyle() は採用色を1つに決めず、
+   ライト用・ダーク用の2色を要素の --rc-text-l / --rc-text-d に載せる。
+   どちらを使うかをここで選ぶ。
+   JS側が style="color:..." を直接書かないのは、インラインスタイルには
+   このセレクタが勝てないため。
+   ========================================================== */
+.rc-text {
+  color: var(--rc-text-l, inherit);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .rc-text {
+    color: var(--rc-text-d, inherit);
+  }
+}
+:root[data-theme="dark"] .rc-text {
+  color: var(--rc-text-d, inherit);
+}
+
+/* ==========================================================
+   基本設定
+   ========================================================== */
+
+/* body側の bg-[#f0f4f8] をトークンに読み替える（html body = 詳細度0,0,2 では
+   Tailwindの任意値クラス0,1,0に負けるため、:root body で0,2,1にする）。
+   3ページぶんのHTMLを書き換えずに済ませるためここで当てている。 */
+:root body {
+  background-color: var(--canvas);
+  color: var(--text-strong);
+}
+
+/* 可読性：日本語の長文（お知らせ本文・使い方ページ・カードの説明文）の行間を広げる。
+   - body に当てるとボタンやバッジなど高さを詰めたい部品まで背が伸びるので、
+     本文が入る要素（p / li / dd）だけに限定する。
+   - Tailwindの text-sm 等は font-size と一緒に line-height も指定してくる。
+     詳細度が (0,1,0) なので素の `p { }` では勝てず、`:root p` で (0,2,0) にする。
+   - ただし leading-* を明示している箇所はその意図を尊重したいので、
+     :not([class*="leading-"]) で除外する。 */
+:root p:not([class*="leading-"]),
+:root li:not([class*="leading-"]),
+:root dd:not([class*="leading-"]) {
+  line-height: 1.7;
+}
+
+/* 10px/11pxの補助文字が多用されているが、屋外や小さめの端末では
+   読み取りにくいため1pxずつ引き上げる。
+   併せて、この大きさで font-bold（700）まで使うと字面が潰れて
+   かえって読みにくいので500に落とす（太字の階層自体は残したいので
+   HTML側の font-bold は書き換えず、この大きさのときだけ弱める）。 */
+:root .text-\[10px\] { font-size: 11px; }
+:root .text-\[11px\] { font-size: 12px; }
+:root .text-\[10px\].font-bold,
+:root .text-\[11px\].font-bold { font-weight: 500; }
+
+/* Tailwindに text-md は存在しない（text-base が正しい）。
+   3ページの「ご利用にあたって」見出しが親サイズのままになっていたので補う。 */
+:root .text-md { font-size: 1rem; line-height: 1.5rem; }
+
+/* プレースホルダ（経路検索・バス停検索の入力欄）。既定はブラウザ依存で
+   ダーク時に読めなくなるため明示する。 */
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
 }
 
 /* モーダルの表示/非表示はこのクラスの付け外しだけで制御する（app.jsのopenModal/closeModal）。
@@ -59,18 +473,91 @@ textarea:focus-visible,
 
 .line-through-double {
   text-decoration: line-through double;
-  text-decoration-color: #94a3b8;
+  text-decoration-color: var(--text-muted);
 }
 
-html {
-  scroll-behavior: smooth;
+/* スムーススクロールは「動きを減らす」設定の利用者には出さない */
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
 }
+
+/* ==========================================================
+   ブランド色の面の上に置くボタン（ヘッダー・ヒーローカード）
+   ----------------------------------------------------------
+   もともと bg-white / text-blue-800 のユーティリティで「濃い青の帯の上に
+   白いボタン」を作っていたが、この2つはダークモードでは面トークン（暗い灰青）と
+   明るい青文字に読み替わるため、同じく暗いヘッダーの上でボタンの輪郭が消える。
+   ヘッダー上のボタンだけは面トークンではなく「帯に対する相対色」で持つ。
+   詳細度は上のユーティリティ上書き層と同じ(0,2,0)なので、
+   このファイル内でそれより後ろに書いてあることで勝っている。
+   ========================================================== */
+:root .on-brand-btn {
+  background-color: var(--on-brand-btn-bg);
+  color: var(--on-brand-btn-text);
+}
+:root .on-brand-btn:hover {
+  background-color: var(--on-brand-btn-bg-hover);
+}
+/* タップ領域を44px以上に揃える */
+.on-brand-btn {
+  min-height: 2.75rem;
+  transition: background-color 0.15s ease, transform 0.1s ease;
+}
+.on-brand-btn:active {
+  transform: scale(0.94);
+}
+
+/* 配色切替ボタン（theme.js が aria-label とアイコンを制御する） */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.75rem;
+  padding: 0 0.5rem;
+  border-radius: 0.5rem;
+}
+.theme-toggle svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+/* 現在のモードに合うアイコンだけを出す。
+   data-theme が付いていないとき（OS追従）は「自動」を表示する。 */
+.theme-toggle [data-theme-icon] { display: none; }
+:root:not([data-theme]) .theme-toggle [data-theme-icon="auto"] { display: block; }
+:root[data-theme="light"] .theme-toggle [data-theme-icon="light"] { display: block; }
+:root[data-theme="dark"] .theme-toggle [data-theme-icon="dark"] { display: block; }
 
 /* ==========================================================
    バスマップ（Leaflet）
    マーカーのDOMはLeafletが動的に挿入するため、Tailwind(CDN)の
    クラス生成に依存せずここで直接スタイルを定義する。
    ========================================================== */
+
+/* OSMのタイルはライト前提の絵なので、ダークでは反転して地図だけ暗くする。
+   マーカー・経路ポリラインは別ペイン（.leaflet-overlay-pane等）なので色が化けない。 */
+.leaflet-tile-pane {
+  filter: var(--map-tile-filter);
+}
+
+/* Leafletが自前で色を持つ部品（ポップアップ・ズームボタン・帰属表示）を面トークンに揃える */
+.leaflet-container {
+  background: var(--surface-3);
+}
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip,
+.leaflet-bar a,
+.leaflet-control-attribution {
+  background: var(--surface);
+  color: var(--text-body);
+}
+.leaflet-bar a:hover {
+  background: var(--surface-3);
+}
+.leaflet-control-attribution a {
+  color: var(--link);
+}
 
 .bus-marker-wrap {
   display: flex;
@@ -119,31 +606,37 @@ html {
 .tt-hour-row {
   display: flex;
   align-items: stretch;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--border);
 }
 .tt-hour-row:last-child {
   border-bottom: none;
 }
+/* 行を1つおきに薄く染めて、横に長い分タイル列の視線誘導をつくる */
+.tt-hour-row:nth-child(even) {
+  background: var(--surface-2);
+}
 
 /* 時ブロック（行の左端） */
 .tt-hour {
-  flex: 0 0 3.25rem;
+  flex: 0 0 3.5rem;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-direction: column;
-  background: #f1f5f9;
-  border-right: 1px solid #e5e7eb;
+  background: var(--surface-3);
+  border-right: 1px solid var(--border);
   font-weight: 700;
-  font-size: 1.375rem;
-  color: #1e3a8a;
+  font-size: 1.5rem;
+  color: var(--brand-text-900);
   line-height: 1.1;
   padding: 0.5rem 0;
+  /* 時・分の数字は桁幅を揃えて縦の並びを直線に見せる */
+  font-variant-numeric: tabular-nums;
 }
 .tt-hour small {
-  font-size: 0.6rem;
+  font-size: 0.625rem;
   font-weight: 700;
-  color: #64748b;
+  color: var(--text-secondary);
 }
 
 /* 分タイル（横並び・折り返し） */
@@ -159,18 +652,24 @@ html {
 .tt-min {
   position: relative;
   min-width: 2.75rem;
+  min-height: 2.75rem; /* タップ領域を44px以上に揃える */
   max-width: 8rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   padding: 0.25rem 0.4rem 0.3rem;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--border);
   border-bottom-width: 3px;
   border-radius: 0.5rem;
-  background: #fff;
+  background: var(--surface);
   text-align: center;
   cursor: pointer;
-  transition: transform 0.1s ease, box-shadow 0.1s ease;
+  transition: transform 0.1s ease, box-shadow 0.1s ease, border-color 0.1s ease;
 }
 .tt-min:hover {
-  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.15);
+  border-color: var(--border-blue-hover);
+  box-shadow: 0 2px 6px var(--shadow-color);
 }
 .tt-min:active {
   transform: scale(0.94);
@@ -181,12 +680,13 @@ html {
   font-weight: 700;
   line-height: 1.1;
   letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
 }
 .tt-min .tt-min-sub {
   display: block;
-  font-size: 0.6rem;
-  font-weight: 700;
-  color: #475569;
+  font-size: 0.625rem;
+  font-weight: 500;
+  color: var(--text-secondary);
   line-height: 1.2;
   max-width: 7rem;
   overflow: hidden;
@@ -201,12 +701,12 @@ html {
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 9999px;
-  border: 1px solid rgba(15, 23, 42, 0.25);
+  border: 1px solid var(--border-strong);
 }
 
 /* 便詳細で閲覧中のバス停を強調する行 */
 .tt-current-stop {
-  box-shadow: 0 0 0 2px #2563eb inset;
+  box-shadow: 0 0 0 2px var(--focus-ring) inset;
 }
 
 /* ==========================================================
@@ -218,6 +718,11 @@ html {
 #bottom-nav {
   /* iPhoneのホームインジケーター等の下に隠れないようにする（viewport-fit=cover採用のため） */
   padding-bottom: env(safe-area-inset-bottom, 0px);
+  /* 面・罫線・影はHTML側のユーティリティではなくここでトークンから当てる
+     （id指定＝詳細度(1,0,0)なので、ダークモードでも確実に効く）。 */
+  background: var(--surface-95);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -4px 16px var(--shadow-color);
 }
 
 .bn-item {
@@ -226,19 +731,21 @@ html {
   align-items: center;
   justify-content: center;
   gap: 2px;
-  padding: 0.5rem 0.25rem 0.55rem;
-  color: #94a3b8;
-  font-size: 0.63rem;
+  /* 5タブでも1つあたり44px以上の高さを確保する */
+  min-height: 3.25rem;
+  padding: 0.45rem 0.25rem 0.5rem;
+  color: var(--text-muted);
+  font-size: 0.6875rem;
   font-weight: 700;
   line-height: 1.2;
   transition: color 0.15s ease, transform 0.1s ease;
 }
 .bn-item svg {
-  width: 22px;
-  height: 22px;
+  width: 23px;
+  height: 23px;
 }
 .bn-item.active {
-  color: #1d4ed8;
+  color: var(--link);
 }
 .bn-item:active {
   transform: scale(0.92);
@@ -247,7 +754,7 @@ html {
 /* 下部ナビの高さぶん、本文の最後のカードが隠れないよう余白を確保する。
    main要素側の pb-* だけでは可変高フォントで足りない環境があるため二重に確保する。 */
 .has-bottom-nav {
-  padding-bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(5rem + env(safe-area-inset-bottom, 0px));
 }
 
 /* <details>/<summary> の既定の三角マーカーを消す（経路検索の「詳細設定」パネル）。
@@ -265,6 +772,13 @@ summary.list-none::-webkit-details-marker {
 }
 #rs-advanced[open] .rs-adv-close {
   display: inline;
+}
+
+/* 経路検索の「詳細設定」summary もタップ領域を44px以上にする */
+#rs-advanced > summary {
+  min-height: 2.75rem;
+  display: flex;
+  align-items: center;
 }
 
 /* ==========================================================
@@ -291,7 +805,7 @@ summary.list-none::-webkit-details-marker {
    ========================================================== */
 .spot-carousel {
   position: relative;
-  background: #f3f4f6;
+  background: var(--surface-3);
   overflow: hidden;
 }
 .spot-carousel-viewport {
@@ -308,7 +822,7 @@ summary.list-none::-webkit-details-marker {
   width: 100%;
   height: var(--spot-carousel-h, 10rem);
   object-fit: contain;
-  background: #f3f4f6;
+  background: var(--surface-3);
   user-select: none;
   -webkit-user-drag: none;
 }
@@ -316,7 +830,7 @@ summary.list-none::-webkit-details-marker {
   display: block;
 }
 
-/* 左右の送りボタン */
+/* 左右の送りボタン。写真の上に置くので、面トークンではなく常に白のまま。 */
 .spot-carousel-nav {
   position: absolute;
   top: 50%;
@@ -324,14 +838,21 @@ summary.list-none::-webkit-details-marker {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 2rem;
-  height: 2rem;
+  width: 2.25rem;
+  height: 2.25rem;
   border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.82);
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.28);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.32);
   color: #1e293b;
   cursor: pointer;
   transition: background 0.15s ease, transform 0.1s ease;
+}
+/* 見た目は36pxのままタップ判定を44pxに広げる（写真の上なので円自体は大きくしたくない） */
+.spot-carousel-nav::after {
+  content: "";
+  position: absolute;
+  inset: -0.25rem;
+  border-radius: 9999px;
 }
 .spot-carousel-nav:hover {
   background: #ffffff;
@@ -340,8 +861,8 @@ summary.list-none::-webkit-details-marker {
   transform: translateY(-50%) scale(0.9);
 }
 .spot-carousel-nav svg {
-  width: 1.05rem;
-  height: 1.05rem;
+  width: 1.125rem;
+  height: 1.125rem;
 }
 .spot-carousel-prev {
   left: 0.4rem;
@@ -362,6 +883,7 @@ summary.list-none::-webkit-details-marker {
   pointer-events: none;
 }
 .spot-carousel-dot {
+  position: relative;
   width: 0.44rem;
   height: 0.44rem;
   border-radius: 9999px;
@@ -371,15 +893,24 @@ summary.list-none::-webkit-details-marker {
   cursor: pointer;
   transition: background 0.2s ease, transform 0.2s ease;
 }
+/* 7pxの点は指で押せないので、見た目を変えずに判定だけ広げる */
+.spot-carousel-dot::after {
+  content: "";
+  position: absolute;
+  inset: -0.55rem;
+}
 .spot-carousel-dot.is-active {
   background: #ffffff;
   transform: scale(1.3);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .spot-carousel-track {
-    transition: none;
-  }
+/* ==========================================================
+   ホームのヒーローカード（リアルタイム運行情報への導線）
+   グラデーションをHTML側の from-/to- ユーティリティで持つと
+   ダークモードで明るすぎるため、トークン管理に移している。
+   ========================================================== */
+.brand-hero {
+  background-image: linear-gradient(to bottom right, var(--hero-from), var(--hero-to));
 }
 
 /* ==========================================================
@@ -393,6 +924,38 @@ summary.list-none::-webkit-details-marker {
   left: 15px;
   top: 0.5rem;
   bottom: 0.5rem;
-  width: 2px;
-  background: #bfdbfe;
+  width: 3px;
+  border-radius: 9999px;
+  background: var(--border-blue);
+}
+
+/* ==========================================================
+   「動きを減らす」設定への対応
+   バスの遅延点滅・アコーディオン・カルーセル・読み込み中スピナーなど、
+   常時動き続けるものを止める（情報は止めずに動きだけ止める）。
+   ========================================================== */
+@media (prefers-reduced-motion: reduce) {
+  .spot-carousel-track {
+    transition: none;
+  }
+  .delay-highlight {
+    animation: none;
+  }
+  .accordion-content {
+    transition: none;
+  }
+  /* Tailwindの animate-pulse / animate-spin（LIVEバッジ・読み込み中）も止める。
+     スピナーは完全停止だと「固まった」ように見えるのでゆっくり回す。 */
+  :root .animate-pulse {
+    animation: none;
+  }
+  :root .animate-spin {
+    animation-duration: 2.4s;
+  }
+  :root .transition,
+  :root .transition-all,
+  :root .transition-transform,
+  :root .transition-colors {
+    transition-duration: 0.01ms;
+  }
 }

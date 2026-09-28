@@ -51,26 +51,16 @@ async function migrate() {
       ADD COLUMN IF NOT EXISTS direction_id INTEGER DEFAULT 0
     `);
     
-    // 4. stops のユニーク制約を変更 (route_id, seq_order) -> (route_id, direction_id, seq_order)
-    //    まず古い制約を削除
+    // 4. stops の古いユニーク制約 (route_id, seq_order) を削除する。
+    //    現在の stops の一意キーは (route_id, direction_id, gtfs_stop_id, occurrence)
+    //    （循環路線で1便が同じ停留所を複数回通るため。ステップ19.3で作る）。
+    //    ⚠️ ここで (route_id, direction_id, seq_order) のUNIQUEを足してはいけない。
+    //    seq_orderは表示順専用に格下げされており、同じ物理バス停を複数回通る路線では
+    //    重複しうる。足すとステップ19.3以降に到達する前にここで失敗し、
+    //    マイグレーション全体（＝それ以降の全ステップ）が適用できなくなる。
     await client.query(`
       ALTER TABLE stops 
       DROP CONSTRAINT IF EXISTS stops_route_id_seq_order_key
-    `);
-    
-    //    新しい制約を追加（既に存在する場合はスキップ）
-    await client.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint 
-          WHERE conname = 'stops_route_direction_seq_key'
-        ) THEN
-          ALTER TABLE stops 
-          ADD CONSTRAINT stops_route_direction_seq_key 
-          UNIQUE (route_id, direction_id, seq_order);
-        END IF;
-      END $$;
     `);
     
     // 5. stops にインデックス追加
@@ -359,12 +349,10 @@ async function migrate() {
       console.log('[migrate] ステップ19完了: stops/schedule_stop_timesを物理バス停単位の一意キーへ移行し、依存データを再構築対象としてクリアしました。');
     }
 
-    // 19.5 ステップ4が作った stops_route_direction_seq_key（UNIQUE (route_id, direction_id,
-    //      seq_order)）は、seq_orderが表示順専用に格下げされた今では意味を持たない
-    //      過去の制約なので、19.1-19.4のガード対象かどうかによらず常に削除しておく
-    //      （新規DBではschema.sqlの旧CREATE TABLEを経由せず作られないが、ステップ4は
-    //      無条件に毎回このUNIQUE制約を再作成するため、ここで打ち消す必要がある）。
-    //      IF EXISTSなので存在しない場合は無害。
+    // 19.5 stops_route_direction_seq_key（UNIQUE (route_id, direction_id, seq_order)）は、
+    //      seq_orderが表示順専用に格下げされた今では意味を持たない過去の制約なので、
+    //      19.1-19.4のガード対象かどうかによらず常に削除しておく（過去のバージョンで
+    //      作られた既存DBに残っているため）。IF EXISTSなので存在しない場合は無害。
     await client.query(`ALTER TABLE stops DROP CONSTRAINT IF EXISTS stops_route_direction_seq_key`);
 
     // ==========================================================
@@ -1220,6 +1208,25 @@ async function migrate() {
        WHERE NOT EXISTS (SELECT 1 FROM spot_tags)
       ON CONFLICT (name) DO NOTHING
     `);
+
+    // ==========================================================
+    // 48. 外部ID ⇔ route_id を多対多にする（1つの外部IDに複数のGTFS路線を紐づけられるように）。
+    //     往路・復路が別路線としてGTFSに入っているのに車載器の系統IDが1つ、という路線があり、
+    //     external_id を主キーにしていると片方の路線の便に永久に車両が割り当たらない。
+    //     行の実体キーは (external_id, route_id)。「未対応」行（route_id IS NULL）は
+    //     外部IDごと1行に保つ（部分索引。両索引とも schema.sql 側で作成済み）。
+    // ==========================================================
+    await client.query(`ALTER TABLE route_external_ids DROP CONSTRAINT IF EXISTS route_external_ids_pkey`);
+
+    //     測位がどの外部IDとして届いたかを残す。代表1件の route_id だけでは、
+    //     複数路線に紐づく外部IDの測位が「代表でない方の路線」の候補検索から漏れる。
+    //     既存DBには schema.sql 流し込み時点でこの列が無いため、列も索引もここで作る。
+    await client.query(`ALTER TABLE vehicle_positions_raw ADD COLUMN IF NOT EXISTS external_id TEXT`);
+    await client.query(`ALTER TABLE vehicle_gps_log ADD COLUMN IF NOT EXISTS external_id TEXT`);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_gps_log_external_time ON vehicle_gps_log(external_id, gps_time_ts)
+    `);
+    console.log('[migrate] ステップ48完了: 外部ID⇔route_idを多対多にし、測位に外部IDを記録するようにしました。');
 
     await client.query('COMMIT');
     console.log('[migrate] マイグレーション完了');

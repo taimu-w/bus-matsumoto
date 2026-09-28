@@ -16,6 +16,7 @@ const { computeDelayMinutes, computeSignedDelayMinutes, getServiceDateString } =
 const { isDirectionIgnored } = require('./directionRules');
 const { getRuntimeSetting } = require('./runtimeSettings');
 const { getLocationFeedIdsForRoute } = require('../config/feeds');
+const { getExternalIdsForRoute } = require('./routeExternalIdMapping');
 
 function assignRadiusMeters() {
   return getRuntimeSetting('ASSIGN_RADIUS_METERS');
@@ -87,9 +88,13 @@ async function getStartStop(client, trip) {
  * 「GPS取得時刻が始発時刻の3分以内」という条件はこのウィンドウと同義のため、
  * 追加の判定は行わない。
  *
- * 2段構え（system-review-2026-09 DB-5 / 旧 known-issues M-9）:
- *   primary  … この便の系統として届いた測位（vehicle_gps_log.route_id = trip.route_id）を
- *              持つ車両。従来の「vehicles.route_id = trip.route_id」と同じ候補集合。
+ * 2段構え:
+ *   primary  … この便の系統として届いた測位を持つ車両。「この便の系統として届いた」は
+ *              測位の外部ID（vehicle_gps_log.external_id）がこの便の路線に紐づく外部IDの
+ *              いずれかであること、または観測系統（vehicle_gps_log.route_id）が
+ *              trip.route_id と一致すること。1つの外部IDに複数のGTFS路線が紐づく場合、
+ *              route_id には代表1件しか入らないため、外部ID側で拾わないと代表でない方の
+ *              路線の便に永久に車両が割り当たらない。
  *   fallback … primary が1台も居ないときだけ、同じ位置情報フィードの車両で、系統表示が
  *              別系統のまま始発バス停に来ているもの（＝折り返しで車載器の系統表示が
  *              切り替わる前）を位置で拾う。primary が居る便の結果は一切変えない。
@@ -99,6 +104,9 @@ async function findCandidates(client, trip, startStop) {
   const windowStart = new Date(startAt.getTime() - gpsWindowMinutes() * 60 * 1000);
   const radius = assignRadiusMeters();
   const ignoreDirection = isDirectionIgnored(trip.route_id);
+  // この便の路線に紐づく外部ID（位置情報CSVの系統ID）。対応が無ければ空配列＝
+  // 観測系統の一致だけで拾う（従来と同じ候補集合）。
+  const externalIds = await getExternalIdsForRoute(trip.route_id);
 
   // direction条件（route_direction_rules。管理画面「方向マッピング」で編集）＋始発バス停100m以内。
   // 方向を使わない設定の路線（既定）、または車両側の方向が不明（位置情報CSVに方向列が無い等）は
@@ -127,11 +135,11 @@ async function findCandidates(client, trip, startStop) {
             g.lat, g.lon, g.gps_time, g.gps_time_ts
      FROM vehicles v
      JOIN vehicle_gps_log g ON g.vehicle_id = v.id
-     WHERE g.route_id = $1
+     WHERE (g.route_id = $1 OR g.external_id = ANY($4::text[]))
        AND g.gps_time_ts >= $2
        AND g.gps_time_ts <= $3
      ORDER BY v.id, g.gps_time_ts DESC`,
-    [trip.route_id, windowStart, startAt]
+    [trip.route_id, windowStart, startAt, externalIds]
   );
   for (const row of primary.rows) {
     const c = toCandidate(row);

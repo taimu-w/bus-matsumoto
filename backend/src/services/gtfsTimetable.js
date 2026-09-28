@@ -18,6 +18,7 @@ const fs = require('fs');
 const { getGtfsDir } = require('./gtfsFeedManager');
 const { getEnabledGtfsFeedIds, getPlatformDisplayNameFeedPriority } = require('../config/feeds');
 const { readCsv, readCsvIfExists } = require('../utils/csv');
+const { readShapePointsByShapeId, resolveTripShapeId } = require('./gtfsShapes');
 const { readFrequenciesByTripId, expandFrequencies } = require('./gtfsFrequencies');
 const { haversineDistanceMeters, estimateWalkMinutes } = require('../utils/geo');
 const {
@@ -395,11 +396,21 @@ function loadFeed(index, feedId) {
     feedStops.push(stop);
   }
 
+  // --- shapes（任意ファイル。便詳細「地図で表示」に重ねる線形の供給元） ---
+  // 無いフィードでは空のMapが返り、便の shapeId が全部 null になるだけ。
+  const shapePointsByShapeId = readShapePointsByShapeId(feedId, readCsv);
+  for (const [shapeId, points] of shapePointsByShapeId.entries()) {
+    // 2点未満は線にならないので索引に入れない。
+    if (points.length >= 2) index.shapes.set(makeKey(feedId, shapeId), points);
+  }
+
   // --- trips ---
   for (const row of readCsv('trips.txt', feedId)) {
     const tripId = (row.trip_id || '').trim();
     if (!tripId) continue;
     const routeId = (row.route_id || '').trim();
+    // shape_id 列が空のフィードでは jp_pattern_id へフォールバックする（services/gtfsShapes.js）。
+    const shapeId = resolveTripShapeId(row, shapePointsByShapeId);
     index.trips.set(makeKey(feedId, tripId), {
       feedId,
       tripId,
@@ -410,6 +421,8 @@ function loadFeed(index, feedId) {
       serviceKey: makeKey(feedId, (row.service_id || '').trim()),
       directionId: Number.parseInt(row.direction_id || '0', 10) || 0,
       headsign: (row.trip_headsign || '').trim(),
+      shapeId,
+      shapeKey: shapeId ? makeKey(feedId, shapeId) : null,
       firstDepartureSeconds: NaN,
       frequencies: null
     });
@@ -804,6 +817,9 @@ async function buildIndex() {
     routes: new Map(),
     stops: new Map(),
     trips: new Map(),
+    // 線形（shapes.txt）。makeKey(feedId, shapeId) → [[lat, lon], ...]。
+    // 便詳細「地図で表示」にその便の経路を重ねるためだけに持つ（描画専用）。
+    shapes: new Map(),
     stopTimesByTrip: new Map(),
     // 標柱(stop_id)ごとの stop_times。バス停の時刻表を組むときの入口になる。
     stopTimeIndex: new Map(),
@@ -1467,6 +1483,13 @@ async function getTripDetail(feedId, routeId, tripId, departureTime, { stopId } 
     tripHeadsign: trip.headsign || '',
     serviceId: trip.serviceId,
     directionId: trip.directionId,
+    // この便が走る経路の線形（GTFS shapes.txt 由来、`[[lat, lon], ...]`）。
+    // 便詳細の「地図で表示」に路線カラーで重ねる**描画専用**のデータで、
+    // 停車バス停（stops）とは別物。線形を持たない便では null。
+    // 路線の全線形ではなくこの便の1本だけを返すこと（往路・復路や枝分かれを
+    // まとめて重ねると、この便が通らない道まで経路として見えてしまう）。
+    shapeId: trip.shapeId || null,
+    shapePoints: (trip.shapeKey && index.shapes.get(trip.shapeKey)) || null,
     stops
   };
 }

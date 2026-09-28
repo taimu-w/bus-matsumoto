@@ -757,9 +757,10 @@
           <div>
             <h2 class="text-xl font-bold">外部IDマッピング</h2>
             <p class="text-sm text-slate-500">
-              位置情報CSVに含まれる事業者の系統ID（外部ID）と、GTFSの路線との対応を管理します。<br>
+              位置情報CSVに含まれる事業者の系統ID（外部ID）と、GTFSの路線との対応を管理します。1行が1つの対応です。<br>
               表記ゆれによる対応漏れを防ぐため、路線は下の候補一覧から選択してください（路線名の自由入力では解決しません）。<br>
-              対応するGTFS路線がまだ無い外部IDは、路線を選ばずに備考へ理由を書けば登録できます（将来路線が追加されたときのための記録用）。
+              1つの路線に複数の外部IDを、1つの外部IDに複数の路線を対応づけられます（同じ系統IDで往路・復路が別路線としてGTFSに入っている場合など）。外部IDに路線を足すときは、その行の「路線を追加」から登録してください。1つの外部IDに複数の路線を紐づけると、その外部IDで届いた位置情報は紐づけた全路線の便が照合対象になります。<br>
+              対応するGTFS路線がまだ無い外部IDは、路線を選ばずに備考へ理由を書けば登録できます（将来路線が追加されたときのための記録用）。この「未対応」の登録は、その外部IDに対応路線が1件も無いときだけ行えます。
             </p>
           </div>
           <div class="flex gap-2 flex-wrap items-end">
@@ -775,7 +776,9 @@
               <input id="mapping-note" type="text" class="mt-1 border rounded-lg px-3 py-2" placeholder="路線名の系統違いの別ID など" />
             </label>
             <button id="add-mapping-btn" class="bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-lg px-4 py-2">保存</button>
+            <button id="cancel-mapping-edit-btn" class="hidden bg-white border hover:bg-slate-50 text-slate-700 font-bold rounded-lg px-4 py-2">編集をやめる</button>
           </div>
+          <p id="mapping-edit-hint" class="hidden text-sm font-bold text-blue-700"></p>
           <div class="bg-white rounded-xl border overflow-x-auto">
             <table class="w-full text-sm">
               <thead class="bg-slate-50 text-slate-500">

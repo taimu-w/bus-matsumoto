@@ -145,23 +145,49 @@
     return 1.05 / (l + 0.05);
   }
 
+  // ダークモードのカード地（style.css の --surface = #151d2b）に対するコントラスト比。
+  // 路線カラーをそのまま文字に使えるかはテーマによって答えが変わる
+  // （濃紺はライトでは読めるがダークでは沈み、黄色はその逆）ため、両方を測る。
+  const DARK_SURFACE_LUMINANCE = 0.0121;
+
+  function contrastWithDarkSurface(rgb) {
+    const l = relativeLuminance(rgb);
+    return (Math.max(l, DARK_SURFACE_LUMINANCE) + 0.05) / (Math.min(l, DARK_SURFACE_LUMINANCE) + 0.05);
+  }
+
   /**
-   * 白背景の上に路線カラーで数字を描けるかを判定する。
-   * コントラスト比が足りない色（黄色など）は、数字を濃色にして
-   * 路線カラーは下線＋円形バッジで表現する（仕様書 3.4 C 視認性確保）。
+   * カードの地の上に路線カラーで数字を描けるかを判定する。
+   * コントラスト比が足りない色（ライトでの黄色、ダークでの濃紺など）は、
+   * 数字を文字色トークンにして、路線カラーは下線＋円形バッジで表現する
+   * （仕様書 3.4 C 視認性確保）。
+   *
+   * 地の色はライト＝白／ダーク＝濃紺とテーマで変わるので、採用色は1つに
+   * 決めず textLight / textDark の2つを返す。呼び出し側はこれを
+   * --rc-text-l / --rc-text-d のカスタムプロパティとして要素に載せ、
+   * どちらを使うかは style.css の .rc-text がテーマ別に選ぶ。
+   * インラインで color を書いてしまうと詳細度でCSS側から切り替えられない。
    */
   function routeColorStyle(color) {
     const rgb = parseHexColor(color);
     if (!rgb) {
-      return { hex: null, numberColor: '#1f2937', underline: '#cbd5e1', needsBadge: false };
+      return {
+        hex: null,
+        textLight: 'var(--text-strong)',
+        textDark: 'var(--text-strong)',
+        underline: 'var(--border)',
+        needsBadge: false
+      };
     }
     const hex = `#${String(color).replace('#', '')}`;
-    const readable = contrastWithWhite(rgb) >= 3;
+    const readableOnLight = contrastWithWhite(rgb) >= 3;
+    const readableOnDark = contrastWithDarkSurface(rgb) >= 3;
     return {
       hex,
-      numberColor: readable ? hex : '#1f2937',
+      textLight: readableOnLight ? hex : 'var(--text-strong)',
+      textDark: readableOnDark ? hex : 'var(--text-strong)',
       underline: hex,
-      needsBadge: !readable
+      // どちらかのテーマで数字に色を使えないなら、その色を示す丸印を出す
+      needsBadge: !readableOnLight || !readableOnDark
     };
   }
 
@@ -724,10 +750,10 @@
               : '';
             const url = tripUrl(departure, data.stop.stopKey, date, platform);
             return `
-              <a href="${esc(url)}" data-spa class="tt-min" style="border-bottom-color:${esc(style.underline)}"
+              <a href="${esc(url)}" data-spa class="tt-min" style="border-bottom-color:${esc(style.underline)};--rc-text-l:${esc(style.textLight)};--rc-text-d:${esc(style.textDark)}"
                  title="${esc(`${departure.time} ${departure.routeName} ${departure.headsign || ''}`)}">
                 ${style.needsBadge ? `<span class="tt-min-dot" style="background:${esc(style.hex)}"></span>` : ''}
-                <span class="tt-min-num" style="color:${esc(style.numberColor)}">${String(departure.minute).padStart(2, '0')}</span>
+                <span class="tt-min-num rc-text">${String(departure.minute).padStart(2, '0')}</span>
                 ${sub ? `<span class="tt-min-sub" data-abbrev-fit>${esc(platformBadge + sub)}</span>` : ''}
               </a>`;
           })
@@ -900,7 +926,7 @@
       marker.bindPopup(
         `<div style="font-weight:700">${esc(platformLabel(platform))}</div>` +
         (destinations ? `<div style="font-size:11px">${esc(destinations)}方面</div>` : '') +
-        '<div style="font-size:11px;color:#0284c7;font-weight:700;margin-top:4px">この乗り場の時刻表を見る</div>'
+        '<div style="font-size:11px;color:var(--acc-sky-text);font-weight:700;margin-top:4px">この乗り場の時刻表を見る</div>'
       );
       marker.on('click', () => {
         navigate(stopUrl(data.stop.stopKey, { platform: platform.platformKey, date }));
@@ -989,8 +1015,14 @@
    * staticStopsは便詳細の静的停車リスト（data.stops）。bus.stopsと同じGTFS stop_times由来で
    * 並び・件数が一致するため、同じindexのstopKey/platformKeyをそのまま遷移先に使える
    * （renderRealtimeRowsのtt-rt-stopと同じ橋渡し方法）。
+   *
+   * routeは路線図（この便の線形）の描画情報 `{ shapePoints, color }`。shapePointsは
+   * 便詳細APIの`shapePoints`（GTFS shapes.txt由来、`[[lat, lon], ...]`）をそのまま渡す。
+   * **路線の全線形ではなくこの便の1本だけを描くこと**（往路・復路や枝分かれを重ねると、
+   * この便が通らない道まで経路に見える）。線形が無い便では線を描かないだけで、
+   * 従来どおりバスとバス停は表示する。
    */
-  function showLocationPopup(bus, label, staticStops) {
+  function showLocationPopup(bus, label, staticStops, route = {}) {
     const vLat = Number(bus && bus.lat);
     const vLng = Number(bus && bus.lng);
     if (!Number.isFinite(vLat) || !Number.isFinite(vLng)) return;
@@ -1012,6 +1044,20 @@
         attribution: '© OpenStreetMap contributors',
         maxZoom: 19
       }).addTo(tripMapPopupInstance);
+
+      // この便が走る経路を路線カラーで先に描く（バス停・バスのマーカーより下に敷く。
+      // ポリラインはoverlayPane、マーカーはmarkerPaneで、後者が必ず上に来る）。
+      // 淡い路線カラー（水色・黄緑など）が地図の背景に埋もれないよう、白い縁取りを下に重ねる。
+      const shapePoints = Array.isArray(route.shapePoints) ? route.shapePoints : [];
+      if (shapePoints.length >= 2) {
+        const lineColor = parseHexColor(route.color) ? `#${String(route.color).replace('#', '')}` : '#2563eb';
+        window.L.polyline(shapePoints, {
+          color: '#ffffff', weight: 9, opacity: 0.9, lineCap: 'round', lineJoin: 'round', interactive: false
+        }).addTo(tripMapPopupInstance);
+        window.L.polyline(shapePoints, {
+          color: lineColor, weight: 5, opacity: 0.95, lineCap: 'round', lineJoin: 'round', interactive: false
+        }).addTo(tripMapPopupInstance);
+      }
 
       // タップ中（名前表示中）のバス停マーカー。同じマーカーを連続タップしたときだけ遷移させる。
       let openStopMarker = null;
@@ -1397,7 +1443,10 @@
       const mapBtn = root().querySelector('[data-role="tt-map-btn"]');
       if (mapBtn) {
         mapBtn.addEventListener('click', () => {
-          showLocationPopup(bus, data.headsign ? `${data.headsign} 行` : data.routeName, data.stops);
+          showLocationPopup(bus, data.headsign ? `${data.headsign} 行` : data.routeName, data.stops, {
+            shapePoints: data.shapePoints,
+            color: data.routeColor
+          });
         });
       }
       if (mode === 'realtime') {

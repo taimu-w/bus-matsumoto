@@ -1418,6 +1418,10 @@ G-1 の `schedule_trips.trip_index`（位置依存キー）と同型の問題。
   - *primary* … `vehicle_gps_log.route_id = trip.route_id` の測位を持つ車両を車両ごとに最新1点。
     従来の「`vehicles.route_id = trip.route_id`」と**同じ候補集合**（各系統の測位は元々その系統の
     行にしか入らなかったため）。担当が付いている便の割り当ては一切変わらない。
+    （その後、外部ID⇔route_id が多対多になったのに伴い、primary の条件は
+    `vehicle_gps_log.external_id` がその便の路線に紐づく外部IDのいずれか、または
+    `route_id` が一致すること、に拡張された。現行仕様は
+    [vehicle-assignment.md](vehicle-assignment.md)・[feed-config.md](feed-config.md) を参照）
   - *fallback* … primary が距離判定後に1台も残らないときだけ、同じ位置情報フィード
     （`getLocationFeedIdsForRoute()` で解決）の車両で、系統表示が別系統のまま始発バス停100m以内に
     来ているものを拾う。これが M-9 の修正で、**今まで `unassigned` になっていた便だけに効く**。

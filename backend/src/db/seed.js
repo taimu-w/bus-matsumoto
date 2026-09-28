@@ -3,6 +3,7 @@ const path = require('path');
 const pool = require('../config/db');
 const { getGtfsDir, qualifyRouteId, unqualifyRouteId, ensureGtfsFilesPresent } = require('../services/gtfsFeedManager');
 const { readFrequenciesByTripId } = require('../services/gtfsFrequencies');
+const { readShapePointsByShapeId, resolveTripShapeId } = require('../services/gtfsShapes');
 const { getEnabledGtfsFeeds, getAllFeedsForDb, validateFeedConfig } = require('../config/feeds');
 const { getNationalHolidays } = require('../utils/japaneseHolidays');
 
@@ -14,7 +15,7 @@ const { getNationalHolidays } = require('../utils/japaneseHolidays');
 // そのGTFS更新が黙って失敗する）。他の用途とキーが衝突しないよう、この排他制御専用の値。
 const SEED_ADVISORY_LOCK_KEY = 913472201;
 
-// 外部ID（位置情報CSVの系統ID）→ GTFS route_id の初期値。
+// 外部ID（位置情報CSVの系統ID）⇔ GTFS route_id の初期値（1件＝1つの対応）。
 // 新規DB（route_external_idsが空）のときだけ投入する（seedRouteExternalIds参照）。
 // 管理画面での追加・変更・削除を上書きしないよう、2回目以降の起動では何もしない。
 //
@@ -193,7 +194,7 @@ async function seedRouteExternalIds(client) {
   for (const { externalId, routeId, note } of DEFAULT_ROUTE_EXTERNAL_IDS) {
     await client.query(
       `INSERT INTO route_external_ids (external_id, route_id, note) VALUES ($1, $2, $3)
-       ON CONFLICT (external_id) DO NOTHING`,
+       ON CONFLICT DO NOTHING`,
       [externalId, routeId, note]
     );
   }
@@ -682,6 +683,62 @@ async function seedStopsAndTimetable(client, routesById, feedId) {
   );
 }
 
+/**
+ * 指定フィードの路線の線形（`route_shapes`）を登録する。路線図マップ（`/routemap`）専用。
+ *
+ * 路線と線形の結び付けは `trips.txt` 経由で行う（`resolveTripShapeId`。`shape_id` 列が
+ * 空のフィードでは `jp_pattern_id` へフォールバックする。理由は services/gtfsShapes.js）。
+ *
+ * 線形が1本も無い路線（shapes.txt に該当が無い・shapes.txt 自体が無い）は行を作らない。
+ * 路線図マップはその路線を表示しないだけで、他の機能には一切影響しない。
+ */
+async function seedShapes(client, routesById, feedId) {
+  const routeIds = [...routesById.keys()];
+  if (routeIds.length === 0) return;
+
+  // reseed のたびに作り直す（GTFS更新で線形が変わる・消えるため）。
+  // route_shapes は描画専用でどこからも参照されないので、単純な洗い替えでよい。
+  await client.query(`DELETE FROM route_shapes WHERE route_id = ANY($1)`, [routeIds]);
+
+  const pointsByShapeId = readShapePointsByShapeId(feedId, readCsv);
+  if (pointsByShapeId.size === 0) {
+    console.log(`[seed] feed=${feedId} shapes.txt が無いため路線の線形は登録しません。`);
+    return;
+  }
+
+  // (qualified route id) -> Set<shape_id>
+  const shapeIdsByRouteId = new Map();
+  for (const trip of readCsv('trips.txt', feedId)) {
+    const shapeId = resolveTripShapeId(trip, pointsByShapeId);
+    if (!shapeId) continue;
+
+    const qualifiedRouteId = qualifyRouteId(trip.route_id, feedId);
+    if (!routesById.has(qualifiedRouteId)) continue;
+    if (!shapeIdsByRouteId.has(qualifiedRouteId)) shapeIdsByRouteId.set(qualifiedRouteId, new Set());
+    shapeIdsByRouteId.get(qualifiedRouteId).add(shapeId);
+  }
+
+  let totalShapes = 0;
+  for (const [routeId, shapeIds] of shapeIdsByRouteId.entries()) {
+    for (const shapeId of shapeIds) {
+      const points = pointsByShapeId.get(shapeId);
+      // 2点未満では線にならない（Leafletが何も描けない）ので捨てる。
+      if (!points || points.length < 2) continue;
+      await client.query(
+        `INSERT INTO route_shapes (route_id, shape_id, points)
+         VALUES ($1, $2, $3::jsonb)
+         ON CONFLICT (route_id, shape_id) DO UPDATE SET points = EXCLUDED.points`,
+        [routeId, shapeId, JSON.stringify(points)]
+      );
+      totalShapes += 1;
+    }
+  }
+
+  console.log(
+    `[seed] feed=${feedId} 路線の線形 ${totalShapes} 本（${shapeIdsByRouteId.size} 路線）を登録しました。`
+  );
+}
+
 async function seedSettings(client) {
   const defaults = [
     ['notices', '[]'],
@@ -758,12 +815,14 @@ async function seed() {
       for (const feed of gtfsFeeds) {
         const routesById = await seedRoutes(client, feed.id);
         await seedStopsAndTimetable(client, routesById, feed.id);
+        await seedShapes(client, routesById, feed.id);
         totalRoutes += routesById.size;
       }
     } else {
       // フィード未設定の場合は静的GTFSデータを使う（後方互換）
       const routesById = await seedRoutesStatic(client);
       await seedStopsAndTimetable(client, routesById, null);
+      await seedShapes(client, routesById, null);
       totalRoutes += routesById.size;
     }
 

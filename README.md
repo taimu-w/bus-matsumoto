@@ -12,7 +12,7 @@
 
 1. **GTFSフィードの自動更新**: `backend/src/config/feeds.js`に定義されたGTFS ZIPフィードを定期的にダウンロード・展開し、バス停・時刻表・運行日カレンダーのマスタデータを最新に保つ。
 2. **当日の運行便を先に生成する**: GTFSの運行日カレンダーに基づき、その日運行する便をあらかじめすべてDBへ展開する（`frequencies.txt`による頻度ベース運行の仮想便も含む）。この時点では担当車両を持たない。
-3. 複数の位置情報フィード（事業者ごとのCSV）からGPS位置情報を定期的に取得し、`config/feeds.js`に明記された位置情報フィード⇔GTFSフィードの対応と、`route_external_ids`テーブル（DB、管理画面から編集可）の外部ID⇔route_id対応に基づいて路線を特定する。
+3. 複数の位置情報フィード（事業者ごとのCSV）からGPS位置情報を定期的に取得し、`config/feeds.js`に明記された位置情報フィード⇔GTFSフィードの対応と、`route_external_ids`テーブル（DB、管理画面から編集可。多対多）の外部ID⇔route_id対応に基づいて路線を特定する。
 4. **便の始発時刻になった時点で車両を割り当てる**: 始発時刻直前のGPSを見て、始発バス停から100m以内にいる車両を候補にし、最も近い車両を担当車両とする。残りも候補車両として保持する。
 5. 担当車両・候補車両の両方について、GPSの軌跡から「バス停通過」「運行終了」を検知し、定刻と実績を比較して遅延を計算する。
 6. 過去の走行実績（区間ごとの所要時間統計）を使って、まだ到着していない先のバス停の**到着予測時刻**を算出する。
@@ -103,8 +103,9 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 
 | ファイル | 責務 | 詳細 |
 |---|---|---|
-| `gtfsFeedManager.js` | GTFS ZIPフィードの自動ダウンロード・展開（パイプライン⓪）。前回DBへ取り込んだZIPの指紋（`feeds.content_hash` / `last_etag` / `last_modified`）と照合し、内容が変わっていなければ展開も`seed()`も行わない。route_idのフィードプレフィックス操作（`qualifyRouteId`/`unqualifyRouteId`）も提供 | |
+| `gtfsFeedManager.js` | GTFS ZIPフィードの自動ダウンロード・展開（パイプライン⓪）。前回DBへ取り込んだZIPの指紋（`feeds.content_hash` / `last_etag` / `last_modified`）と照合し、内容が変わっておらず、かつ展開済みファイルが**いまのコードの管理対象どおり揃っていれば**（`isExtractedSetCurrent()`。展開マーカー`.extracted.json`と突き合わせる）展開も`seed()`も行わない。route_idのフィードプレフィックス操作（`qualifyRouteId`/`unqualifyRouteId`）も提供 | |
 | `gtfsFrequencies.js` | `frequencies.txt`の読み込み・仮想便展開 | |
+| `gtfsShapes.js` | `shapes.txt`（路線の線形）の読み込みと、便→線形の対応付け（`resolveTripShapeId`。`shape_id`が空のフィードは`jp_pattern_id`へフォールバック）。**地図に線を描く用途専用**で、GPS照合・通過判定には使わない。`db/seed.js`（`route_shapes`＝路線図マップ）と`gtfsTimetable.js`（便詳細「地図で表示」の経路）が共用する | |
 | `dailyTripBuilder.js` | 当日の運行便の生成（①）。既に車両を割り当て済みの便は書き換えない | |
 | `locationFetcher.js` | 複数位置情報フィードの取得（②）。フィードごとに独立したtry/catch | |
 | `vehicleAssigner.js` | 生ログを車両別ログへ振り分け・新規車両登録（③） | |
@@ -125,7 +126,7 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 | `busStopApproaching.js` | バス停検索の「接近中のバス」 | |
 | `routeSearch.js` | `/api/stops/search`専用のDBバス停名検索のみ。**ここへ経路探索を戻さないこと** | |
 | `holidayCalendar.js` | 祝日カレンダー（`holidays`テーブル）のキャッシュ | |
-| `routeExternalIdMapping.js` | 外部ID⇔route_id対応（`route_external_ids`テーブル）のキャッシュ。管理画面編集時に即時破棄 | |
+| `routeExternalIdMapping.js` | 外部ID⇔route_id対応（`route_external_ids`テーブル、多対多）のキャッシュ。外部ID→route_id配列と、その逆引きを持つ。管理画面編集時に即時破棄 | |
 | `touristSpots.js` | 観光スポット情報の管理・近接検索・公式サイトリンクのタップ数集計 | [docs/tourist-spots.md](docs/tourist-spots.md) |
 | `busstopNotices.js` | バス停お知らせ配信（見出し＋画像＋本文。バス停単位／乗り場単位）の管理・取得 | [docs/busstop-notices.md](docs/busstop-notices.md) |
 | `predictionAccuracy.js` / `apiMetrics.js` / `jobMonitor.js` / `visitorTracker.js` / `serviceStatusScraper.js` | 管理画面向けの監視・集計系（予測精度・API稼働・ジョブ実行状況・閲覧数・運行状況スクレイピング） | |
@@ -166,10 +167,11 @@ computeAndStoreAllArrivals() … ⑧ 全active割り当ての到着予測を一�
 
 素のHTML/CSS/JS、ビルドステップなし。
 
-- `frontend/index.html` + `frontend/app.js`: 利用者向け運行状況画面。`POLL_MS`（20秒）間隔で`/api/buses`等をポーリング、お気に入りはlocalStorage、SPAルーティングの入口。バスマップ（`#/busmap`、Leaflet + OpenStreetMap）も含む。バスマップには「路線で絞り込み」セレクトがあり、選んだ路線だけを表示できる（既定は全路線。選択は`#/busmap/<feedId>/<routeId>`としてURLに載り共有・リロードで復元できる）。
+- `frontend/index.html` + `frontend/app.js`: 利用者向け運行状況画面。`POLL_MS`（20秒）間隔で`/api/buses`等をポーリング、お気に入りはlocalStorage、SPAルーティングの入口。バスマップ（`#/busmap`、Leaflet + OpenStreetMap）も含む。バスマップには「路線で絞り込み」セレクトがあり、選んだ路線だけを表示できる（既定は全路線。選択は`#/busmap/<feedId>/<routeId>`としてURLに載り共有・リロードで復元できる）。マップメニュー（`#/map`）からはバスマップ・路線図マップ（`/routemap`）・バス停マップ（`/stopmap`）の3つを開けます。
 - `frontend/onboarding.js`: はじめての方向けチュートリアル。初回訪問時にホーム画面でだけ自動表示し、完了フラグ（localStorage `busTimeOnboardingSeen`）を立てる。`/howto` の「使い方ツアー」ボタン（`/?tutorial=1`）や `window.Onboarding.open()` からいつでも再表示できる。
 - `frontend/howto.html`: 使い方ページ（`/howto`。静的HTML、JSなし）。目的別の導線・機能別の手順・よくある質問（`<details>`）をまとめる。
-- `frontend/timetable.js`（時刻表検索）・`frontend/busstop.js`（バス停検索）・`frontend/stopmap.js`（バス停マップ）・`frontend/routesearch.js`（経路検索）・`frontend/spotsearch.js`（スポット検索）は、いずれもハッシュではなくパス（History API）でルーティングします。経路検索は「経路一覧（`/routesearch?…`）→ 経路詳細（`…&journey=N`）」の2階層で、乗り換え時刻や通過バス停は詳細側に表示します（[docs/route-search.md](docs/route-search.md) 6.3）。経路一覧の上下には「1本前 / 1本後」ボタンがあり、先頭の経路を基準に1本ぶんずらして検索し直します（「1本前」は到着時刻指定へ切り替え。同 6.3.1）。検索フォームには折りたたみの「詳細設定」があり、乗り換え回数（「乗り換えなし」など）・徒歩での乗り継ぎの有無・乗り換えの余裕時間を指定できます。**既定は絞り込みなしの条件**で、既定値の項目はURLにも載せません（同 5.8・6.2）。スポット検索（`/spotsearch`）は2モード。**名称検索**は地名（観光スポット・その他のスポット）・バス停・路線を1つ入力すると、スポット情報＋付近のバス停＋周辺を通る路線を表示し、路線名クリックでリアルタイム時刻表（`#/realtime/{feedId}/{routeId}`）・バス停名タップでバス停ページへ遷移します。**タグ検索**（名称検索フォーム内のボタン→`/spotsearch?tags=...`）は、管理画面で各スポットに付けたタグ（`tourist_spots.tags`、「,」区切り）で絞り込みます（1画面ライブ絞り込み・複数タグはAND・結果カードのタップでそのスポットの名称検索ページへ）。予約タグ「近い」は現在地から半径500m以内で絞り込み、タグの並び順は管理画面「タグ管理」で変更します（[docs/spot-search.md](docs/spot-search.md)）。
+- `frontend/routemap.js`: 路線図マップ（`/routemap`）。GTFS`shapes.txt`由来の線形（`GET /api/route-shapes`）を路線カラーのポリラインで地図に描きます。**描くのは線形がある路線だけ**で、`shapes.txt`に載っていない路線は出しません。路線をタップするとその地点にポップアップで路線名を出し、そこからその路線のリアルタイム時刻表（`#/realtime/{feedId}/{routeId}`）へ遷移できます（重なった線の中からどれを選んだのか確認できるよう、タップで即遷移はしません）。バスマップと同様に「路線で絞り込み」セレクトがあり、選択は`/routemap?route=<qualified route id>`としてURLに載ります。
+- `frontend/timetable.js`（時刻表検索）・`frontend/busstop.js`（バス停検索）・`frontend/stopmap.js`（バス停マップ）・`frontend/routemap.js`（路線図マップ）・`frontend/routesearch.js`（経路検索）・`frontend/spotsearch.js`（スポット検索）は、いずれもハッシュではなくパス（History API）でルーティングします。経路検索は「経路一覧（`/routesearch?…`）→ 経路詳細（`…&journey=N`）」の2階層で、乗り換え時刻や通過バス停は詳細側に表示します（[docs/route-search.md](docs/route-search.md) 6.3）。経路一覧の上下には「1本前 / 1本後」ボタンがあり、先頭の経路を基準に1本ぶんずらして検索し直します（「1本前」は到着時刻指定へ切り替え。同 6.3.1）。検索フォームには折りたたみの「詳細設定」があり、乗り換え回数（「乗り換えなし」など）・徒歩での乗り継ぎの有無・乗り換えの余裕時間を指定できます。**既定は絞り込みなしの条件**で、既定値の項目はURLにも載せません（同 5.8・6.2）。スポット検索（`/spotsearch`）は2モード。**名称検索**は地名（観光スポット・その他のスポット）・バス停・路線を1つ入力すると、スポット情報＋付近のバス停＋周辺を通る路線を表示し、路線名クリックでリアルタイム時刻表（`#/realtime/{feedId}/{routeId}`）・バス停名タップでバス停ページへ遷移します。**タグ検索**（名称検索フォーム内のボタン→`/spotsearch?tags=...`）は、管理画面で各スポットに付けたタグ（`tourist_spots.tags`、「,」区切り）で絞り込みます（1画面ライブ絞り込み・複数タグはAND・結果カードのタップでそのスポットの名称検索ページへ）。予約タグ「近い」は現在地から半径500m以内で絞り込み、タグの並び順は管理画面「タグ管理」で変更します（[docs/spot-search.md](docs/spot-search.md)）。
 - `frontend/admin.html`: 認証で保護された管理画面（運行ダッシュボード・便の割当監視・予測精度の監視・当日の状況・異常アラート・GTFS/位置情報フィード監視・API稼働監視・ジョブ監視・お知らせ編集・バス停お知らせ・祝日カレンダー・外部IDマッピング・方向マッピング・リアルタイム休止・運用パラメータ設定・観光スポット管理・観光スポットの検索・アクセス数・車両名・メモ管理）。「リアルタイム休止」は、突発的な運休・輸送障害でGPS由来のリアルタイム情報が実態と食い違うとき、路線ごとにリアルタイム表示だけを利用者向け画面（リアルタイム運行状況・バスマップ・経路検索の重ね合わせ・便詳細のリアルタイム切替・接近中のバス）から一時的に止めるキルスイッチです。時刻表ベースの表示・経路探索・管理画面の運行監視は影響を受けません（`route_realtime_suspensions`テーブル、[docs/realtime-suspension.md](docs/realtime-suspension.md)）。「バス停お知らせ」は、バス停詳細ページに出る見出し＋画像＋本文のお知らせで、バス停単位（常に表示）と乗り場単位（乗り場別表示のときだけ）の2つの配信範囲がある（`busstop_notices`テーブル、[docs/busstop-notices.md](docs/busstop-notices.md)）。車両名・メモ管理（`vehicle_labels`テーブル、キーは`car_id`）で名前を付けた車両は、運行ダッシュボードの便詳細セクションで車両IDの代わりに名前で表示され、名前タップでメモが出ます。「観光スポット管理」ではタブ区切りテキストの1列目に指定するID（`tourist_spots.id`）で各スポットを識別し（名称による名寄せはせず、IDが同じなら改称しても同一スポット）、写真を「,」区切りで複数枚登録できます。別称（`aliases`、「からす城」「国宝」など）を「,」区切りで登録すると、その呼び名でも経路検索の出発地・目的地やスポット検索の候補に出せます（検索補助用。利用者画面には表示しません）。タグ列（「,」区切り）はスポット検索の「タグ検索」で使い、別メニュー「タグ管理」（`spot_tags`テーブル）でタグ検索でのタグの並び順を変更できます（タグの追加・削除はスポット登録側で行い、未使用タグは自動で消えます。「近い」は予約タグで登録不可）。別メニュー「観光スポットの検索・アクセス数」でスポット検索の検索回数（`spot_search_counts`）と公式サイトリンクのタップ回数（`tourist_spot_link_clicks`）を指定期間（最大1年）でまとめて集計し、掲載の有用性を確認できます（[docs/spot-search.md](docs/spot-search.md) / [docs/tourist-spots.md](docs/tourist-spots.md)）。
 - `frontend/spot-photos.js`: 観光スポットの写真表示の共通モジュール（`window.SpotPhotos`）。バス停ページ・経路検索のスポット詳細ポップアップ・スポット検索が、1枚ずつ表示するカルーセル（複数枚は5秒間隔の自動送り＋スワイプ／矢印／インジケーター）を描画するのに使う。`busstop.js`・`routesearch.js`・`spotsearch.js` より前に読み込む（[docs/tourist-spots.md](docs/tourist-spots.md) の「写真表示（カルーセル）」）。
 - `frontend/style.css`: 共通スタイル。
@@ -292,7 +294,8 @@ npm test   # backend/test/ の回帰テスト（node --test。DB不要な純粋�
 
 コードを読み解く上で把握しておくと良い、現状のクセや注意点をまとめます（いずれも致命的なバグではありませんが、改修の際は意識してください）。
 
-- **`frequencies.txt`・`translations.txt`・`fare_attributes.txt`・`fare_rules.txt`を`gtfsFeedManager.js`の`REQUIRED_GTFS_FILES`に足してはいけない**。持たないフィードがあると、必須にした瞬間にGTFS更新が全フィードで「必須ファイル欠損」となり、システム全体が止まる。`OPTIONAL_GTFS_FILES`側に置いてあるのは意図的。
+- **`frequencies.txt`・`translations.txt`・`fare_attributes.txt`・`fare_rules.txt`・`feed_info.txt`・`shapes.txt`を`gtfsFeedManager.js`の`REQUIRED_GTFS_FILES`に足してはいけない**。持たないフィードがあると、必須にした瞬間にGTFS更新が全フィードで「必須ファイル欠損」となり、システム全体が止まる。`OPTIONAL_GTFS_FILES`側に置いてあるのは意図的。
+- **`MANAGED_GTFS_FILES`にファイルを追加したら、展開済みディレクトリの再展開が必要になる**。内容不変（HTTP 304／ハッシュ一致）のスキップ判定は`isExtractedSetCurrent()`が担い、展開マーカー`.extracted.json`（前回の管理対象ファイル集合と実際に配置したファイル名）と突き合わせる。マーカーが無い／集合がコードと食い違う場合はスキップしないので、コード側でファイルを増やせば次の更新で必ず降りてくる。この判定を「必須ファイルの存在」だけに戻さないこと。戻すと、配信元のZIPが変わるまで新しい任意ファイルが永久に展開されず、その機能がエラーも出ないまま「データ0件」で固定される（`shapes.txt`追加時に実際に踏んだ）。
 - **「同時刻帯＝始発時刻の差が10分以内」を「稼働中の車両は他の便に割り当てない」に単純化しないこと**。8:00便の担当車両が8:11便の担当になるのは仕様上正しい動作（[docs/vehicle-assignment.md](docs/vehicle-assignment.md)参照）。
 - **`stops`は物理バス停（`gtfs_stop_id`）＋通過回数（`occurrence`）で一意化されており、`seq_order`は路線内の表示順専用**（`UNIQUE (route_id, direction_id, gtfs_stop_id, occurrence)`）。便ごとの実際の停車順は`schedule_stop_times.stop_sequence`（便自身の中での0始まりの連番）が正であり、`daily_trip_stop_times`/`trip_stop_progress`/`completed_trip_stop_times`等の`seq_order`列もこれを引き継ぐ。`stops.seq_order`を便の順序判定に使わないこと（service_idグループ横断で`seq_order`を共有すると、停車パターンの異なる便で順序が壊れる／別のservice_idグループが同じ行を別バス停のデータで上書きする）。
 - **`finishService.closeDailyTrip()`は`reassignOrphanTrips()`（パイプライン⑤）と`finishTrips()`自身（運行日終了の掃除）の2つの独立したタイマーから同じ便に対して同時に呼ばれうる**。冒頭の`SELECT … FOR UPDATE`による行ロックで、後発側は先発側の`COMMIT`後に`closed_at`を確認して即座に抜けるため、実績が二重に`completed_trips`へアーカイブされることはない（安全網として`UNIQUE (daily_trip_id, assignment_id)`制約もある）。同様に`etaPredictor.updateSegmentStats()`も両タイマーから呼ばれるため、対象行の取得を`FOR UPDATE SKIP LOCKED`にし、`segment_travel_stats`への反映も原子的なUPSERTにしてある。この排他制御を外す・弱める変更をしないこと（詳細は[docs/trip-lifecycle.md](docs/trip-lifecycle.md)・[docs/eta-prediction-algorithm.md](docs/eta-prediction-algorithm.md)）。
