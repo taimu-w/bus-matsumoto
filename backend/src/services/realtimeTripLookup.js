@@ -123,7 +123,7 @@ async function buildBusEntry(t, routeId, routeName) {
   );
 
   const latestGpsResult = await pool.query(
-    `SELECT lat, lon FROM vehicle_gps_log
+    `SELECT lat, lon, gps_time_ts FROM vehicle_gps_log
      WHERE vehicle_id = $1
      ORDER BY gps_time_ts DESC, id DESC LIMIT 1`,
     [t.vehicle_id]
@@ -165,6 +165,7 @@ async function buildBusEntry(t, routeId, routeName) {
     delayMinutes: t.delay_minutes,
     lat: latestGps ? latestGps.lat : null,
     lng: latestGps ? latestGps.lon : null,
+    positionUpdatedAt: latestGps ? latestGps.gps_time_ts : null,
     stops
   };
 }

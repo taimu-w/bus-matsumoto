@@ -36,6 +36,8 @@
   let platformMarkers = [];
   // 便詳細ページの「地図で表示」ポップアップ専用のLeafletインスタンス（プラットフォーム選択地図とは別管理）
   let tripMapPopupInstance = null;
+  // 上記ポップアップの「位置情報取得: ◯秒前」表示を1秒ごとに更新するタイマー
+  let tripMapPopupUpdatedTimer = null;
   // 便詳細ページのリアルタイム表示中の自動更新タイマー（20秒間隔。他画面のPOLL_MSと合わせる）
   let tripRealtimeTimer = null;
   const TRIP_REALTIME_POLL_MS = 20000;
@@ -931,6 +933,48 @@
       tripMapPopupInstance.remove();
       tripMapPopupInstance = null;
     }
+    stopPositionUpdatedTicker();
+  }
+
+  function stopPositionUpdatedTicker() {
+    if (tripMapPopupUpdatedTimer) {
+      clearInterval(tripMapPopupUpdatedTimer);
+      tripMapPopupUpdatedTimer = null;
+    }
+  }
+
+  /** 経過秒数を「◯秒前」または「◯分◯秒前」に整形する。 */
+  function formatElapsedAgo(elapsedMs) {
+    const totalSec = Math.max(0, Math.floor(elapsedMs / 1000));
+    if (totalSec < 60) return `${totalSec}秒前`;
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    return `${min}分${sec}秒前`;
+  }
+
+  /**
+   * 「地図で表示」ポップアップの車両位置が何秒（何分何秒）前に取得されたものかを
+   * 1秒ごとに更新表示する。ポップアップが閉じられたら（.modal-hiddenが付いたら）
+   * 自身でタイマーを止める（グローバルなモーダルclose処理には手を入れない）。
+   */
+  function startPositionUpdatedTicker(positionUpdatedAt) {
+    const el = document.getElementById('tt-map-popup-updated');
+    if (!el) return;
+    const updatedMs = positionUpdatedAt ? new Date(positionUpdatedAt).getTime() : NaN;
+    if (!Number.isFinite(updatedMs)) {
+      el.textContent = '';
+      return;
+    }
+    const modal = document.getElementById('tt-map-popup-modal');
+    const tick = () => {
+      if (modal && modal.classList.contains('modal-hidden')) {
+        stopPositionUpdatedTicker();
+        return;
+      }
+      el.textContent = `位置情報取得: ${formatElapsedAgo(Date.now() - updatedMs)}`;
+    };
+    tick();
+    tripMapPopupUpdatedTimer = setInterval(tick, 1000);
   }
 
   /**
@@ -939,6 +983,8 @@
    * バス停全件が収まるようにズームアウトはせず、バスの現在地にある程度拡大した状態で開く。
    * バス停アイコンは1回タップするとバス停名を表示し、同じアイコンをもう一度タップすると
    * そのバス停（乗り場）のページへ遷移する。
+   * タイトル下にはその位置情報が何秒（何分何秒）前に取得されたものかを表示し、1秒ごとに更新する
+   * （startPositionUpdatedTicker。bus.positionUpdatedAtはvehicle_gps_logの直近1件のgps_time_ts）。
    *
    * staticStopsは便詳細の静的停車リスト（data.stops）。bus.stopsと同じGTFS stop_times由来で
    * 並び・件数が一致するため、同じindexのstopKey/platformKeyをそのまま遷移先に使える
@@ -954,6 +1000,7 @@
     if (titleEl) titleEl.textContent = label || '';
     window.openModal('tt-map-popup-modal');
     destroyTripMapPopup();
+    startPositionUpdatedTicker(bus.positionUpdatedAt);
 
     // モーダルがdisplay:noneから表示に切り替わった直後はコンテナの実寸が取れないため、
     // 少し待ってから地図を初期化する（setupPlatformMap()のinvalidateSizeと同じ理由）。
