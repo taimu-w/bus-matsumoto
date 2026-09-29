@@ -10,7 +10,7 @@
 
 | scope | 範囲 | 突合キー | 表示条件 |
 |---|---|---|---|
-| `stop` | **バス停単位** | `stop_key`（統合バス停キー＋その別名） | そのバス停ページを開いていれば、どの乗り場を見ていても表示 |
+| `stop` | **バス停単位** | `stop_key`（統合バス停キー＋その別名） | すべての乗り場を統合表示しているとき（または乗り場が1か所だけ）だけ表示。乗り場別表示で特定の乗り場を選んでいるときは出さない |
 | `platform` | **乗り場（のりば）単位** | `feed_id` + `stop_id` | 乗り場が確定しているとき（乗り場別表示、または乗り場が1か所だけ）だけ表示 |
 
 トップ画面のお知らせ（`system_settings.notices`）が路線・全体向けなのに対し、こちらは「このバス停は当面△△へ移設」（バス停単位）「◯番のりばのエレベーター工事」（乗り場単位）のような、バス停・のりばに紐づく案内に使う。
@@ -19,8 +19,10 @@
 
 「このバス停でできること」の下の `#bs-notices` に、次の順で最大2枚のカードを描く。取得は `GET /api/busstop/:stopKey/notices?platform=...`（表示モード切替のたびに `renderSeq` ガード付きで取り直す）。取得に失敗してもバス停情報自体の表示は妨げない（soft-fail、何も出さない）。
 
-1. **「このバス停のお知らせ」** … `stopNotices`（`scope='stop'`）。表示モードによらず常に描く。0件ならカードを出さない。
+1. **「このバス停のお知らせ」** … `stopNotices`（`scope='stop'`）。統合表示のとき（`effectivePlatform(data)` が null、または乗り場が1か所だけ）だけ描く。乗り場が複数あるバス停で特定の乗り場を選んでいるときは**サーバーが空配列で返し**、フロントも描かない（バス停全体向けのお知らせが各乗り場のページに重複して出ないようにするため）。0件ならカードを出さない。
 2. **「◯番のりばのお知らせ」／「この乗り場のお知らせ」** … `platformNotices`（`scope='platform'`）。乗り場が確定しているとき（`effectivePlatform(data)` が非null）だけ描く。すべての乗り場を統合表示しているとき（`effectivePlatform(data)` が null、`?platform=` なし）は**サーバーが空配列で返す**ので出ない。0件ならカードを出さない。
+
+乗り場が1か所だけのバス停は統合表示と乗り場別表示の区別がないので、1・2の両方を描く。
 
 各お知らせは 見出し → 画像（`<img>`）→ 本文（`linkifyNotice()`）の順。画像・本文の両方が空の行は描画しない。
 
@@ -52,7 +54,7 @@
 `stopKey` と `?platform=` の値（`stop_id` または `feedId_stopId`）から、バス停グループと乗り場を軽量に解決する（発車一覧は組み立てない）。返り値に `stopKey`（正キー）・`aliases`（統合されて使われなくなった旧キー）・`platform`（解決できた乗り場、または乗り場が1か所ならその1件）・`platforms` を含む。
 
 - `scope='platform'` の突合には `platform.feedId` + `platform.stopId` を使う。乗り場が複数あって `?platform=` 未指定なら `platform: null`（＝統合表示）。
-- `scope='stop'` の突合には `[stopKey, ...aliases]` を使う。座標統合で代表キーが変わっても旧キーが別名として残るため拾える。
+- `scope='stop'` の突合には `[stopKey, ...aliases]` を使う。`hasMultiplePlatforms` かつ `platform` が非null（乗り場別表示）のときは突合せず空を返す。座標統合で代表キーが変わっても旧キーが別名として残るため拾える。
 
 ## リンク記法
 
@@ -80,7 +82,7 @@
 
 | メソッド | パス | 概要 |
 |---|---|---|
-| GET | `/api/busstop/:stopKey/notices?platform=...` | 公開。`{ stopNotices, platformNotices }`。`stopNotices` は常に返す。`platformNotices` は乗り場が確定しているときだけ（統合表示なら `[]`） |
+| GET | `/api/busstop/:stopKey/notices?platform=...` | 公開。`{ stopNotices, platformNotices }`。`stopNotices` は統合表示のとき（または乗り場が1か所）だけ（乗り場別表示なら `[]`）。`platformNotices` は乗り場が確定しているときだけ（統合表示なら `[]`） |
 | GET | `/api/admin/busstop-notices` | 全件（無効も含む。管理画面一覧用） |
 | POST | `/api/admin/busstop-notices` | 新規作成。body `{ scope, stopKey, platform, title, imageUrl, body, enabled }`。`scope='platform'` のときは `stopKey`+`platform` をサーバー側で `resolvePlatformRef()` に通し、正規の `feed_id`+`stop_id` へ落として保存（乗り場が特定できなければ400）。`scope='stop'` のときは `stopKey` を解決して正規の統合バス停キーで保存 |
 | PUT | `/api/admin/busstop-notices/:id` | 内容の更新（`title`/`imageUrl`/`body`/`enabled`）。配信範囲・対象は変えない |

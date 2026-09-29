@@ -348,6 +348,9 @@ async function loadAll() {
     routeOptions = routeData.routes || [];
     syncRouteSelector();
 
+    // 路線お知らせは運行情報とは独立に取得・描画する（失敗しても運行情報の表示を妨げない）
+    loadRouteNotices(selectedRouteId);
+
     const [busData, timetable] = await Promise.all([
       fetchJson(`${API_BASE}/buses?routeId=${encodeURIComponent(selectedRouteId)}`),
       fetchJson(`${API_BASE}/timetable?routeId=${encodeURIComponent(selectedRouteId)}`)
@@ -486,6 +489,49 @@ async function loadNotices() {
     renderNotices(settings);
   } catch (err) {
     console.error('お知らせの取得エラー:', err);
+  }
+}
+
+/* ---------- 路線お知らせ（リアルタイム時刻表の上部） ----------
+ * 管理画面「路線お知らせ」で登録した、その路線向けのお知らせ（docs/route-notices.md）。
+ * リアルタイム運行情報の表示領域を狭めないよう題名だけを1行ずつ並べ、タップでトップ画面の
+ * お知らせと同じ詳細モーダル（画像＋本文・リンク記法対応）を開く。0件ならフィールドごと隠す。
+ * 20秒ポーリングのたびに取り直すが、内容が前回と同じなら描き直さない。 */
+let routeNoticesSignature = '';
+
+function renderRouteNotices(notices) {
+  const container = $('route-notices');
+  if (!container) return;
+  const list = (notices || []).filter((n) => n && n.title);
+  const signature = JSON.stringify(list);
+  if (signature === routeNoticesSignature) return;
+  routeNoticesSignature = signature;
+
+  container.innerHTML = '';
+  container.style.display = list.length ? 'block' : 'none';
+  for (const notice of list) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'w-full text-left px-3 py-2.5 flex items-center gap-2 active:bg-amber-50';
+    btn.innerHTML = `
+      <span class="shrink-0">📢</span>
+      <span class="flex-1 min-w-0 truncate text-sm font-bold text-gray-900">${escapeHtml(notice.title)}</span>
+      <svg class="shrink-0 w-4 h-4 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
+    `;
+    btn.addEventListener('click', () => openNoticeModal(notice));
+    container.appendChild(btn);
+  }
+}
+
+// 取得に失敗しても運行情報の表示は妨げない（soft-fail。前回の表示をそのまま残す）。
+async function loadRouteNotices(routeId) {
+  try {
+    const data = await fetchJson(`${API_BASE}/route-notices?routeId=${encodeURIComponent(routeId)}`);
+    // 取得中に別の路線へ切り替わっていたら捨てる
+    if (routeId !== selectedRouteId) return;
+    renderRouteNotices(data.notices || []);
+  } catch (err) {
+    console.error('路線お知らせの取得エラー:', err);
   }
 }
 
@@ -1446,6 +1492,8 @@ async function renderCurrentRoute() {
       window.location.hash = '#/realtime';
       return;
     }
+    // 別の路線へ切り替えたら、前の路線のお知らせを取得完了まで残さない
+    if (state.routeId !== selectedRouteId) renderRouteNotices([]);
     selectedRouteId = state.routeId;
     const selectedRoute = routeOptions.find((route) => route.id === selectedRouteId);
     setPageTitle(selectedRoute?.name || 'リアルタイム運行情報', 'Realtime Timetable');
@@ -1553,6 +1601,7 @@ if (unsupportedConfirmBtn) {
 if (routeSelect) {
   routeSelect.addEventListener('change', (e) => {
     selectedRouteId = e.target.value;
+    renderRouteNotices([]);
     loadAll();
   });
 }

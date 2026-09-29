@@ -44,6 +44,7 @@ const touristSpots = require('../services/touristSpots');
 const spotSearch = require('../services/spotSearch');
 const spotTags = require('../services/spotTags');
 const busstopNotices = require('../services/busstopNotices');
+const routeNotices = require('../services/routeNotices');
 const { invalidateHolidayCache } = require('../services/holidayCalendar');
 const { invalidateRouteExternalIdCache } = require('../services/routeExternalIdMapping');
 const { loadAbbreviations, invalidateDisplayAbbreviationsCache } = require('../services/displayAbbreviations');
@@ -1435,6 +1436,92 @@ router.delete('/admin/busstop-notices/:id', requireAdminAuth, async (req, res) =
   }
 });
 
+// ==========================================================
+// 路線お知らせ配信（docs/route-notices.md）。
+// リアルタイム時刻表（#/realtime/...）の上部に題名だけを並べ、タップで詳細を開く。
+// 路線は /api/routes の候補一覧から選ばせ、保存時に routes の実在を確かめて路線名をスナップショットする。
+// ==========================================================
+
+// routeId が現在のGTFSに実在すれば { id, name }、無ければ null。
+async function findRouteForNotice(routeId) {
+  const trimmed = typeof routeId === 'string' ? routeId.trim() : '';
+  if (!trimmed) return null;
+  const result = await pool.query('SELECT id, name FROM routes WHERE id = $1', [trimmed]);
+  return result.rows[0] || null;
+}
+
+// GET /api/admin/route-notices -> 全件（無効・期間外も含む。管理画面一覧用）
+router.get('/admin/route-notices', requireAdminAuth, async (req, res) => {
+  try {
+    const notices = await routeNotices.listAll();
+    res.json({ notices });
+  } catch (err) {
+    console.error('[api] /admin/route-notices 取得エラー:', err);
+    res.status(500).json({ error: '路線お知らせの取得に失敗しました。' });
+  }
+});
+
+// POST /api/admin/route-notices -> 新規作成。
+// body: { routeId, title, imageUrl, body, startDate, endDate, enabled }
+router.post('/admin/route-notices', requireAdminAuth, async (req, res) => {
+  try {
+    const route = await findRouteForNotice(req.body?.routeId);
+    if (!route) return res.status(400).json({ error: '路線を候補一覧から選択してください。' });
+    const result = await routeNotices.createNotice(route, req.body || {});
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    res.json({ ok: true, notice: result.notice });
+  } catch (err) {
+    console.error('[api] /admin/route-notices 作成エラー:', err);
+    res.status(500).json({ error: '路線お知らせの保存に失敗しました。' });
+  }
+});
+
+// PUT /api/admin/route-notices/:id -> 内容の更新（路線の付け替えも可）
+router.put('/admin/route-notices/:id', requireAdminAuth, async (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: '不正なIDです。' });
+  try {
+    const route = await findRouteForNotice(req.body?.routeId);
+    if (!route) return res.status(400).json({ error: '路線を候補一覧から選択してください。' });
+    const result = await routeNotices.updateNotice(id, route, req.body || {});
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    res.json({ ok: true, notice: result.notice });
+  } catch (err) {
+    console.error('[api] /admin/route-notices/:id 更新エラー:', err);
+    res.status(500).json({ error: '路線お知らせの更新に失敗しました。' });
+  }
+});
+
+// PATCH /api/admin/route-notices/:id -> 有効/無効の切り替え
+router.patch('/admin/route-notices/:id', requireAdminAuth, async (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: '不正なIDです。' });
+  if (typeof req.body?.enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled（真偽値）を指定してください。' });
+  }
+  try {
+    const updated = await routeNotices.setNoticeEnabled(id, req.body.enabled);
+    if (!updated) return res.status(404).json({ error: '指定のお知らせが見つかりませんでした。' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/route-notices/:id 切替エラー:', err);
+    res.status(500).json({ error: '路線お知らせの更新に失敗しました。' });
+  }
+});
+
+// DELETE /api/admin/route-notices/:id -> 1件削除
+router.delete('/admin/route-notices/:id', requireAdminAuth, async (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: '不正なIDです。' });
+  try {
+    await routeNotices.deleteNotice(id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/route-notices/:id 削除エラー:', err);
+    res.status(500).json({ error: '路線お知らせの削除に失敗しました。' });
+  }
+});
+
 // GET /api/stops -> 全バス停マスタ（時刻表画面・地図表示用）
 router.get('/stops', async (req, res) => {
   try {
@@ -1443,7 +1530,7 @@ router.get('/stops', async (req, res) => {
       return res.status(400).json({ error: 'routeIdを指定してください。' });
     }
     const result = await pool.query(
-      `SELECT id, direction_id, seq_order, name, name_kana, name_en, lat, lon, notice, timetable_link
+      `SELECT id, direction_id, gtfs_stop_id, seq_order, name, name_kana, name_en, lat, lon, notice, timetable_link
        FROM stops
        WHERE route_id = $1
        ORDER BY direction_id ASC, seq_order ASC`,
@@ -1618,6 +1705,26 @@ async function readTimetableFromSchedule(routeId) {
 // 表示対象は「担当車両が割り当てられている便」のみ。候補車両は内部処理だけで、
 // 利用者には公開しない（仕様書 9.1・15）。
 // マップ用の拡張(allGps=true): 担当便を持たない車両もGPS座標だけ返す
+// GET /api/route-notices?routeId=... -> その路線の配信中のお知らせ（docs/route-notices.md）
+// リアルタイム時刻表の上部に題名だけを並べ、タップで詳細（画像＋本文）を開く。
+// enabled=true かつ今日（運行日・JST）が配信期間内のものだけを並び順で返す。
+router.get('/route-notices', async (req, res) => {
+  try {
+    const routeId = resolveRouteId(req.query.routeId);
+    if (!routeId) {
+      return res.status(400).json({ error: 'routeIdを指定してください。' });
+    }
+    const notices = await routeNotices.getActiveRouteNotices(routeId, getServiceDateString());
+    res.json({
+      routeId,
+      notices: notices.map((n) => ({ id: n.id, title: n.title, imageUrl: n.imageUrl, body: n.body }))
+    });
+  } catch (err) {
+    console.error('[api] /route-notices エラー:', err);
+    res.status(500).json({ error: '路線お知らせの取得に失敗しました。' });
+  }
+});
+
 router.get('/buses', async (req, res) => {
   try {
     const routeId = resolveRouteId(req.query.routeId);
@@ -3144,7 +3251,9 @@ router.get('/busstop/:stopKey/nearby-spots', async (req, res) => {
 
 // GET /api/busstop/:stopKey/notices?platform=... -> そのバス停のお知らせ（docs/busstop-notices.md）
 // バス停詳細ページの「このバス停でできること」の下に出す。
-//   stopNotices     … scope='stop'（バス停単位）。表示モードによらず常に返す。
+//   stopNotices     … scope='stop'（バス停単位）。すべての乗り場の統合表示のときだけ返す
+//                     （乗り場が複数あって platform 指定なし、または乗り場が1か所だけのバス停）。
+//                     乗り場が複数あるバス停で特定の乗り場を選んでいるときは空。
 //   platformNotices … scope='platform'（乗り場単位）。乗り場が確定しているときだけ返す
 //                     （platform 指定、または乗り場が1か所だけのバス停）。統合表示のときは空。
 router.get('/busstop/:stopKey/notices', async (req, res) => {
@@ -3153,8 +3262,11 @@ router.get('/busstop/:stopKey/notices', async (req, res) => {
     const ref = await resolvePlatformRef(req.params.stopKey, platformParam);
     if (!ref) return res.status(404).json({ error: '指定のバス停が見つかりませんでした。' });
 
-    const stopKeys = [ref.stopKey, ...(ref.aliases || [])];
-    const stopNotices = await busstopNotices.getActiveStopNotices(stopKeys);
+    // 乗り場が1か所だけのバス停は統合表示と乗り場別表示の区別がないので、両方を返す。
+    const isIntegratedView = !ref.hasMultiplePlatforms || !ref.platform;
+    const stopNotices = isIntegratedView
+      ? await busstopNotices.getActiveStopNotices([ref.stopKey, ...(ref.aliases || [])])
+      : [];
     const platformNoticeList = ref.platform
       ? await busstopNotices.getActivePlatformNotices(ref.platform.feedId, ref.platform.stopId)
       : [];

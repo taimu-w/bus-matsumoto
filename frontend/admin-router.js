@@ -24,6 +24,7 @@ const SECTION_LOADERS = {
   'job-monitor': () => window.AdminJobMonitor.load(),
   notices: () => window.AdminNotices.load(),
   'busstop-notices': () => window.AdminBusstopNotices.load(),
+  'route-notices': () => window.AdminRouteNotices.load(),
   holidays: () => window.AdminHolidays.load(),
   'route-mappings': () => window.AdminRouteMappings.load(),
   'display-abbreviations': () => window.AdminDisplayAbbreviations.load(),

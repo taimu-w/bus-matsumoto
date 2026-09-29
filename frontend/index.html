@@ -282,6 +282,10 @@
       <span id="selected-route-name" class="text-sm font-bold text-gray-600 truncate"></span>
       <span id="selected-route-fav" class="shrink-0"></span>
     </div>
+    <!-- 路線お知らせ（管理画面「路線お知らせ」）。お知らせがあるときだけ表示する。
+         リアルタイム運行情報の表示領域を狭めないよう題名だけを1行ずつ並べ、
+         タップで詳細（画像＋本文）をnotice-modalで開く（app.jsのrenderRouteNotices）。 -->
+    <div id="route-notices" class="mb-4 bg-white rounded-xl border border-amber-300 divide-y divide-amber-100 overflow-hidden" style="display:none;"></div>
     <!-- 本日の運行が無い／終了した場合はリアルタイム・時刻表の各セクションを出さず、
          この1行だけを表示する（app.jsのrenderDayStatus）。 -->
     <p id="realtime-day-status" class="text-sm font-bold text-gray-500 bg-gray-50 border-2 border-gray-100 rounded-xl px-4 py-6 text-center" style="display:none;"></p>

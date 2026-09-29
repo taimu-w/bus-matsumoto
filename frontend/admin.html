@@ -89,6 +89,10 @@
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 21s-6-4.686-6-10a6 6 0 1112 0c0 5.314-6 10-6 10z"></path><circle cx="12" cy="11" r="2.2"></circle></svg>
               <span>バス停お知らせ</span>
             </button>
+            <button data-section="route-notices" data-label="路線お知らせ" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="6" cy="18" r="2"></circle><circle cx="18" cy="6" r="2"></circle><path d="M8 18h7a3 3 0 000-6H9a3 3 0 010-6h7"></path></svg>
+              <span>路線お知らせ</span>
+            </button>
             <button data-section="tourist-spots" data-label="観光スポット管理" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M6 3v18"></path><path d="M6 4.5h12l-3 4 3 4H6z"></path></svg>
               <span>観光スポット管理</span>
@@ -666,7 +670,7 @@
               バス停詳細ページの「このバス停でできること」の下に出るお知らせです。1件のお知らせに
               <b>見出し・画像・本文</b>を自由に組み合わせられます（画像と本文の少なくとも一方）。<br>
               配信範囲は2種類あります：<br>
-              ・<b>バス停単位</b>… そのバス停を開けば、どの乗り場を見ていても表示されます。<br>
+              ・<b>バス停単位</b>… <b>すべての乗り場を統合表示しているとき</b>だけ表示されます（乗り場を選んで表示中は出ません。乗り場が1か所だけのバス停では常に表示）。<br>
               ・<b>乗り場単位</b>… <b>乗り場（のりば）を選んで表示しているとき</b>だけ表示されます（すべての乗り場を統合表示中は出ません）。<br>
               画像は Cloudinary などにアップロードした <code>https://</code> の画像URLを貼り付けます（アプリからはアップロードしません）。<br>
               本文はトップ画面のお知らせと同じ記法です：<code>https://example.com</code> と書くとURLがそのまま、
@@ -731,6 +735,73 @@
           <div>
             <h3 class="text-sm font-bold text-slate-600 mb-2">登録済みのバス停お知らせ</h3>
             <div id="bn-list" class="space-y-2"></div>
+          </div>
+        </section>
+
+        <!-- 路線お知らせ -->
+        <section id="section-route-notices" class="section hidden space-y-6">
+          <div>
+            <h2 class="text-xl font-bold">路線お知らせ</h2>
+            <p class="text-sm text-slate-500">
+              路線ごとのリアルタイム時刻表（利用者画面の「リアルタイム運行情報」で路線を選んだ画面）の上部に出るお知らせです。<br>
+              リアルタイム運行情報の表示を狭めないよう、画面には<b>題名だけ</b>が1行ずつ並び、題名をタップすると
+              <b>画像・本文</b>の詳細がポップアップで開きます（トップ画面のお知らせと同じ表示）。お知らせが無い路線ではフィールドごと表示されません。<br>
+              画像は Cloudinary などにアップロードした <code>https://</code> の画像URLを貼り付けます（アプリからはアップロードしません）。<br>
+              本文はトップ画面のお知らせと同じ記法です：<code>https://example.com</code> と書くとURLがそのまま、
+              <code>[時刻表はこちら](https://example.com)</code> と書くとテキストに置き換えて表示されます。リンクを含まないただの文章も入力できます。
+            </p>
+          </div>
+
+          <div class="bg-white rounded-xl border p-4 space-y-4">
+            <h3 class="text-sm font-bold text-slate-600" id="rn-form-title">お知らせを追加</h3>
+
+            <label class="block text-sm font-bold">路線
+              <select id="rn-route-id" class="mt-1 w-full border rounded-lg px-3 py-2 font-normal">
+                <option value="">路線を選択…</option>
+              </select>
+            </label>
+
+            <label class="block text-sm font-bold">題名（必須・最大60文字）
+              <input id="rn-title" type="text" maxlength="60"
+                     class="mt-1 w-full border rounded-lg px-3 py-2 font-normal" placeholder="例: 工事に伴う迂回運行について">
+            </label>
+
+            <label class="block text-sm font-bold">画像URL（https://・任意）
+              <input id="rn-image-url" type="url"
+                     class="mt-1 w-full border rounded-lg px-3 py-2 font-normal font-mono text-xs"
+                     placeholder="https://res.cloudinary.com/.../notice.jpg">
+            </label>
+
+            <label class="block text-sm font-bold">本文（リンク記法可・任意）
+              <textarea id="rn-body" rows="4" class="mt-1 w-full border rounded-lg px-3 py-2 font-normal"
+                        placeholder="例: ◯月◯日は△△付近の工事のため迂回運行します。詳細は [お知らせ](https://example.com) をご覧ください。"></textarea>
+            </label>
+            <p class="text-xs text-slate-400 -mt-2">画像と本文の少なくとも一方を入力してください（題名をタップしたときの詳細になります）。</p>
+
+            <div class="grid grid-cols-2 gap-3">
+              <label class="block text-sm font-bold">配信開始日（任意）
+                <input id="rn-start-date" type="date" class="mt-1 w-full border rounded-lg px-3 py-2 font-normal">
+              </label>
+              <label class="block text-sm font-bold">配信終了日（任意）
+                <input id="rn-end-date" type="date" class="mt-1 w-full border rounded-lg px-3 py-2 font-normal">
+              </label>
+            </div>
+            <p class="text-xs text-slate-400 -mt-2">未入力なら無期限。開始日・終了日の当日も表示されます。</p>
+
+            <label class="flex items-center gap-2 text-sm font-bold">
+              <input type="checkbox" id="rn-enabled" checked> 表示する
+            </label>
+
+            <div class="flex items-center gap-3">
+              <button id="rn-save-btn" class="bg-green-700 hover:bg-green-800 text-white font-bold rounded-lg px-4 py-2">追加</button>
+              <button id="rn-cancel-edit-btn" class="text-sm font-bold text-slate-500 hover:underline hidden">編集をやめる</button>
+              <span id="rn-save-status" class="text-sm font-bold"></span>
+            </div>
+          </div>
+
+          <div>
+            <h3 class="text-sm font-bold text-slate-600 mb-2">登録済みの路線お知らせ</h3>
+            <div id="rn-list" class="space-y-2"></div>
           </div>
         </section>
 
@@ -1137,6 +1208,7 @@
   <script src="/admin-job-monitor.js" defer></script>
   <script src="/admin-notices.js" defer></script>
   <script src="/admin-busstop-notices.js" defer></script>
+  <script src="/admin-route-notices.js" defer></script>
   <script src="/admin-holidays.js" defer></script>
   <script src="/admin-route-mappings.js" defer></script>
   <script src="/admin-display-abbreviations.js" defer></script>

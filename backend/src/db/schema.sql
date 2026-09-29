@@ -338,7 +338,7 @@ CREATE INDEX IF NOT EXISTS idx_spot_tags_sort ON spot_tags (sort_order, name);
 -- 1件のお知らせは 見出し・画像・本文（リンク記法対応）を任意に組み合わせて持てる（画像と本文の少なくとも一方）。
 -- scope で配信範囲を決める：
 --   scope='platform' … 乗り場（のりば）単位。突合キーは (feed_id, stop_id)。乗り場別表示のときだけ出す。
---   scope='stop'     … バス停単位。突合キーは stop_key（統合バス停キー＋その別名）。表示モードによらず常に出す。
+--   scope='stop'     … バス停単位。突合キーは stop_key（統合バス停キー＋その別名）。統合表示のとき（または乗り場が1か所）だけ出す。
 -- GTFS再取込で stop_id / stop_key が変わっても行は更新しない。参照時に一致しなくなるだけ（実害なし）。
 -- stop_name / platform_code は管理画面一覧の可読性のためのスナップショット。
 CREATE TABLE IF NOT EXISTS busstop_notices (
@@ -360,6 +360,29 @@ CREATE TABLE IF NOT EXISTS busstop_notices (
 );
 CREATE INDEX IF NOT EXISTS idx_busstop_notices_platform ON busstop_notices (feed_id, stop_id);
 CREATE INDEX IF NOT EXISTS idx_busstop_notices_stop_key ON busstop_notices (stop_key);
+
+-- 路線お知らせ配信（docs/route-notices.md）。管理画面「路線お知らせ」で編集する。
+-- リアルタイム時刻表（#/realtime/...）の上部に題名だけを並べ、タップで詳細（画像＋本文）を開く。
+-- title は必須（画面には題名しか出ないため）。画像と本文の少なくとも一方も必須（詳細が空にならないように）。
+-- route_id は routes.id と同じ「feedId:routeId」形式の qualified route id。保存時に routes の実在を確かめるが
+-- 外部キーは張らない（GTFS再取込で路線が消えても行は残り、参照時に一致しなくなるだけ）。
+-- route_name は管理画面一覧の可読性のためのスナップショット。
+-- start_date / end_date は配信期間（両端含む・NULLは無期限）。運行日（JST）で判定する。
+CREATE TABLE IF NOT EXISTS route_notices (
+  id             SERIAL PRIMARY KEY,
+  route_id       TEXT NOT NULL,
+  route_name     TEXT NOT NULL,
+  title          TEXT NOT NULL,
+  image_url      TEXT,
+  body           TEXT,
+  start_date     DATE,
+  end_date       DATE,
+  enabled        BOOLEAN NOT NULL DEFAULT TRUE,
+  sort_order     INTEGER NOT NULL DEFAULT 0,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_route_notices_route ON route_notices (route_id);
 
 -- 表示テキスト（系統名・行き先）の略称辞書。original を部分文字列として含む表示テキストが
 -- 表示領域からはみ出すときだけ、フロントエンドが abbreviation に置き換える（はみ出さない

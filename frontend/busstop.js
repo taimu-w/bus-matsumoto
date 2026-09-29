@@ -495,7 +495,8 @@
   /* ---------- バス停お知らせ（docs/busstop-notices.md） ----------
    * 「このバス停でできること」の下に、管理画面「バス停お知らせ」で登録されたお知らせ
    * （見出し・画像・本文を任意に組み合わせ）を出す。
-   * - バス停単位（scope='stop'）は表示モードによらず常に取得・表示する。
+   * - バス停単位（scope='stop'）はすべての乗り場を統合表示しているとき（または乗り場が1か所だけの
+   *   バス停）だけ表示する。乗り場別表示で特定の乗り場を選んでいるときは出さない。
    * - 乗り場単位（scope='platform'）は乗り場が確定しているとき（乗り場別表示、または乗り場が
    *   1か所だけのバス停）だけ表示する。すべての乗り場を統合表示しているときは出さない。
    * - お知らせが無ければセクションごと出さない（soft-fail：取得失敗時も何も出さない）。 */
@@ -554,8 +555,9 @@
       ? `${platformLabel(platformObj)}のお知らせ`
       : 'この乗り場のお知らせ';
 
-    // バス停単位を先、乗り場単位を後に並べる。
-    const html = noticeCardHtml('このバス停のお知らせ', res.stopNotices)
+    // バス停単位は統合表示（または乗り場が1か所）のときだけ。バス停単位を先、乗り場単位を後に並べる。
+    const isIntegratedView = !data.hasMultiplePlatforms || !platformObj;
+    const html = (isIntegratedView ? noticeCardHtml('このバス停のお知らせ', res.stopNotices) : '')
       + (platformObj ? noticeCardHtml(platformHeading, res.platformNotices) : '');
     container.innerHTML = html;
   }

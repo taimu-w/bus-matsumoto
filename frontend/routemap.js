@@ -10,6 +10,12 @@
  * 描くのは `GET /api/route-shapes` が返す路線だけ＝**shapes.txtに線形がある路線だけ**である。
  * 線形を持たない路線は地図に描く線が存在しないので、絞り込みの選択肢にも出さない。
  *
+ * 1路線に絞り込んだときだけ、その路線のバス停（`GET /api/stops?routeId=`）も重ねて描き、
+ * STOP_NAME_ZOOM_THRESHOLD 以上に拡大したらバス停名を常時表示する。「すべての路線」では
+ * バス停を出さない（全路線ぶん重ねると市街地が点で埋まり、路線図が読めなくなるため）。
+ * バス停をタップすると、名前が出ていなければまず名前を出し、名前が出ている状態のタップで
+ * バス停（乗り場別）のページ /busstop/{stopKey}?platform=... へ遷移する（handleStopTap）。
+ *
  * 路線をタップすると、その地点にポップアップで路線名を出し、そこから
  * その路線のリアルタイム時刻表（#/realtime/{feedId}/{routeId}）へ遷移できる。
  * タップで即遷移させないのは、市街地では複数路線の線が重なっており、
@@ -25,6 +31,11 @@
   const LINE_WEIGHT = 4;
   const TAP_TARGET_WEIGHT = 16;
   const TAP_TARGET_PANE = 'routemapTapTargets';
+  // バス停マーカー専用ペイン。線（overlayPane, z-index 400）より上に置き、
+  // 線と重なっていてもバス停の点が隠れず、タップも線のポップアップに吸われないようにする。
+  const STOP_PANE = 'routemapStops';
+  // このズームレベル以上に拡大したら、バス停名を常時表示する（バス停マップと同じ閾値）。
+  const STOP_NAME_ZOOM_THRESHOLD = 14;
   // 路線カラーが未設定（GTFSのroute_colorが空）の路線に使う色。
   const FALLBACK_ROUTE_COLOR = '#2563eb';
 
@@ -38,6 +49,12 @@
   let cachedRoutes = null;
   // 'all'＝すべての路線、それ以外は qualified route id（feedId:routeId）。
   let routeFilter = 'all';
+  // 選択中の路線のバス停マーカーをまとめるレイヤ（1路線選択時のみ地図に載る）。
+  let stopLayer = null;
+  // バス停名を出すために1度タップされたマーカー。もう一度タップされたらバス停ページへ遷移する。
+  let armedStopMarker = null;
+  // 路線ごとに取得済みのバス停一覧（qualified route id → stops）。路線図と同じく静的データなので使い回す。
+  const stopsCache = new Map();
 
   async function fetchJson(url) {
     const res = await fetch(url);
@@ -114,6 +131,8 @@
     }
     routeLayers = [];
     userMarker = null;
+    stopLayer = null;
+    armedStopMarker = null;
 
     mapInstance = window.L.map('routemap').setView([36.2381, 137.9701], 12);
     window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -126,6 +145,9 @@
     // 隣の路線の当たり判定に吸われない。
     mapInstance.createPane(TAP_TARGET_PANE);
     mapInstance.getPane(TAP_TARGET_PANE).style.zIndex = '390';
+    mapInstance.createPane(STOP_PANE);
+    mapInstance.getPane(STOP_PANE).style.zIndex = '450';
+    mapInstance.on('zoomend', updateStopLabelVisibility);
 
     // display:none から表示に切り替えた直後はコンテナのサイズが未確定なことがあり、
     // タイルも線も描画されないことがある。レイアウト確定後にサイズを再計算させる。
@@ -189,6 +211,128 @@
     return group;
   }
 
+  /**
+   * 路線のバス停一覧を取得する。/api/stops は方向（direction_id）ごと・通過回ごとに行を返すため、
+   * 同じ標柱が往復や循環で複数行になる。地図には1点だけ描けばよいので標柱（gtfs_stop_id）で重複を除く。
+   * 座標ではなく標柱で束ねるのは、タップ先が乗り場別ページで、どの標柱かを取り違えられないため。
+   */
+  async function fetchRouteStops(routeId) {
+    if (stopsCache.has(routeId)) return stopsCache.get(routeId);
+    const rows = await fetchJson(`${API_BASE}/stops?routeId=${encodeURIComponent(routeId)}`);
+    const seen = new Set();
+    const stops = [];
+    (Array.isArray(rows) ? rows : []).forEach((row) => {
+      const lat = Number(row.lat);
+      const lon = Number(row.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+      const key = row.gtfs_stop_id || `${lat},${lon}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      stops.push({ name: row.name || '', gtfsStopId: row.gtfs_stop_id || null, lat, lon });
+    });
+    stopsCache.set(routeId, stops);
+    return stops;
+  }
+
+  function stopTooltipOptions(permanent) {
+    return { direction: 'top', offset: [0, -4], permanent };
+  }
+
+  /**
+   * バス停（乗り場別）のページ /busstop/{stopKey}?platform=... へ遷移する。
+   * DBの route_id は「feedId:routeId」形式なので、その feedId と生のGTFS stop_id から
+   * app.js の navigateToBusStopByFeedStop()（GET /api/busstop/resolve-by-feed-stop）で標柱を解決する。
+   */
+  function goToBusStop(routeId, stop) {
+    const feedId = String(routeId).includes(':') ? String(routeId).split(':')[0] : null;
+    if (typeof window.navigateToBusStopByFeedStop === 'function') {
+      window.navigateToBusStopByFeedStop(feedId, stop.gtfsStopId, stop.name);
+    }
+  }
+
+  /**
+   * バス停マーカーのタップ。バス停名が見えていない状態では1回目のタップで名前を出すだけにし、
+   * 名前が出ている状態でのタップでバス停ページへ遷移する（市街地では点が密集しており、
+   * どのバス停を押したのか確認してから遷移できる必要があるため。路線の線のポップアップと同じ考え方）。
+   *
+   * 「名前を出したマーカー」は armedStopMarker で自前に管理する。isTooltipOpen() では判定できない：
+   * Leaflet は非常時表示のツールチップを mouseover / click で開くため、タッチ端末では
+   * タップ時に発生する互換 mouseover でクリック処理より先にツールチップが開いてしまう。
+   * ツールチップが閉じたら（別の場所をタップした・マウスが離れた・ズームで付け替えた）解除する。
+   */
+  function handleStopTap(marker, routeId, stop) {
+    const labelsAlwaysShown = mapInstance && mapInstance.getZoom() >= STOP_NAME_ZOOM_THRESHOLD;
+    if (labelsAlwaysShown || armedStopMarker === marker) {
+      armedStopMarker = null;
+      goToBusStop(routeId, stop);
+      return;
+    }
+    armedStopMarker = marker;
+    marker.openTooltip();
+  }
+
+  /** 選択中の路線のバス停を描き直す。'all' のときはバス停を消すだけ。 */
+  async function renderStopsForFilter() {
+    if (stopLayer && mapInstance) mapInstance.removeLayer(stopLayer);
+    stopLayer = null;
+    if (!mapInstance || routeFilter === 'all') return;
+
+    const routeId = routeFilter;
+    const map = mapInstance;
+    const selected = routeLayers.find(({ route }) => route.id === routeId);
+    if (!selected) return;
+
+    let stops;
+    try {
+      stops = await fetchRouteStops(routeId);
+    } catch (err) {
+      // バス停が取れなくても路線図そのものは表示できているので、線だけ残して諦める。
+      console.error('路線のバス停の取得エラー:', err);
+      return;
+    }
+    // 取得中に別の路線へ切り替えた／画面を開き直した場合は、古い結果を描かない。
+    if (routeFilter !== routeId || mapInstance !== map || stopLayer) return;
+
+    const color = normalizeRouteColor(selected.route.color);
+    const showLabels = map.getZoom() >= STOP_NAME_ZOOM_THRESHOLD;
+    const group = window.L.layerGroup();
+    stops.forEach((stop) => {
+      const marker = window.L.circleMarker([stop.lat, stop.lon], {
+        pane: STOP_PANE,
+        radius: 5,
+        weight: 2,
+        color,
+        fillColor: '#ffffff',
+        fillOpacity: 1
+      });
+      marker.on('click', () => handleStopTap(marker, routeId, stop));
+      marker.on('tooltipclose', () => {
+        if (armedStopMarker === marker) armedStopMarker = null;
+      });
+      marker.bindTooltip(escapeHtml(stop.name), stopTooltipOptions(showLabels));
+      group.addLayer(marker);
+    });
+    armedStopMarker = null;
+    stopLayer = group.addTo(map);
+  }
+
+  /**
+   * ある程度拡大された（STOP_NAME_ZOOM_THRESHOLD以上）ときだけ、バス停名を常時表示する。
+   * tooltipのpermanentオプションは動的に変更できないため、必要なときだけ付け替える
+   * （stopmap.js の updateStopLabelVisibility と同じ理由）。
+   */
+  function updateStopLabelVisibility() {
+    if (!mapInstance || !stopLayer) return;
+    const showLabels = mapInstance.getZoom() >= STOP_NAME_ZOOM_THRESHOLD;
+    stopLayer.eachLayer((marker) => {
+      const tooltip = marker.getTooltip();
+      if (!tooltip || tooltip.options.permanent === showLabels) return;
+      const content = tooltip.getContent();
+      marker.unbindTooltip();
+      marker.bindTooltip(content, stopTooltipOptions(showLabels));
+    });
+  }
+
   /** いま表示対象になっている路線すべてを囲む範囲（有効な範囲が無ければ isValid() が false）。 */
   function visibleBounds() {
     const bounds = window.L.latLngBounds([]);
@@ -224,6 +368,8 @@
       const bounds = visibleBounds();
       if (bounds.isValid()) mapInstance.fitBounds(bounds.pad(0.05), { maxZoom: 16 });
     }
+    // fitBounds の後に呼び、ラベルを常時表示するかを切り替え後のズームで判定させる。
+    renderStopsForFilter();
 
     if (routeFilter === 'all') {
       setStatus(visibleCount > 0
