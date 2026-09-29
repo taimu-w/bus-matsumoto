@@ -41,6 +41,10 @@
   // 便詳細ページのリアルタイム表示中の自動更新タイマー（20秒間隔。他画面のPOLL_MSと合わせる）
   let tripRealtimeTimer = null;
   const TRIP_REALTIME_POLL_MS = 20000;
+  // 便詳細ページのリアルタイム表示中、GPS更新時刻がこの時間以上前になった時点で「GPSが失われました」を出す
+  const GPS_LOST_WARNING_MS = 2 * 60 * 1000;
+  // 上記の警告を「閾値を越えた瞬間」に出すためのタイマー（ポーリングの20秒間隔を待たない）
+  let gpsLostWarningTimer = null;
 
   /* ---------- 小さなヘルパー ---------- */
   function esc(value) {
@@ -938,6 +942,13 @@
     }
   }
 
+  function stopGpsLostWatch() {
+    if (gpsLostWarningTimer) {
+      clearTimeout(gpsLostWarningTimer);
+      gpsLostWarningTimer = null;
+    }
+  }
+
   function destroyTripMapPopup() {
     if (tripMapPopupInstance) {
       tripMapPopupInstance.remove();
@@ -1132,6 +1143,7 @@
   async function renderTripView(state) {
     const seq = ++renderSeq;
     stopTripRealtimePolling();
+    stopGpsLostWatch();
     root().innerHTML = '<p class="text-sm font-bold text-gray-500 py-10 text-center">便情報を読み込み中...</p>';
 
     const backUrl = state.params.get('from') || '/timetable';
@@ -1171,6 +1183,10 @@
     // リアルタイム表示で「直近到着済み」バス停へ自動スクロールするのは初回描画時の1回だけ。
     // 20秒ごとのポーリング更新（refreshRealtime→paint）でスクロール位置が飛ぶのを防ぐ。
     let didRealtimeAutoScroll = false;
+    // 「GPSが失われました」警告を出した時点の positionUpdatedAt（ミリ秒）。同じ測位のまま
+    // 途絶が続いている間はポーリングのたびに出し直さない。新しい測位が届いた後に再び
+    // 途絶したら、値が変わるので改めて出す。
+    let gpsLostWarnedForMs = null;
 
     setTitle(data.headsign || data.routeName, 'Trip Detail');
 
@@ -1345,9 +1361,48 @@
         .join('');
     }
 
+    /**
+     * リアルタイム表示中の車両について、GPS更新時刻（bus.positionUpdatedAt＝vehicle_gps_logの
+     * 直近1件のgps_time_ts）がGPS_LOST_WARNING_MS以上前になった時点で「GPSが失われました」
+     * ポップアップを出す。paint()のたびに呼び直し、閾値を越える瞬間にタイマーを合わせる
+     * （20秒ポーリングの次回を待たずに出すため）。新しい測位が届いて閾値内に戻ったら閉じる。
+     * 自動更新OFF（手動設定・サーバー高負荷時の一時停止とも）の間は出さない。画面のデータ自体が
+     * 更新されないため、GPSが途絶えていなくても経過時間だけで警告が出てしまうから。
+     * OFFの間は「出した」扱いにもしないので、ONに戻した後の最初のポーリング（paint）で
+     * まだ途絶が続いていれば改めて出す。
+     */
+    function watchGpsLost(bus) {
+      stopGpsLostWatch();
+      if (!autoRefreshEnabled()) return;
+      const updatedMs = bus && bus.positionUpdatedAt ? new Date(bus.positionUpdatedAt).getTime() : NaN;
+      if (!Number.isFinite(updatedMs)) return;
+
+      const modal = document.getElementById('tt-gps-lost-modal');
+      const remainingMs = updatedMs + GPS_LOST_WARNING_MS - Date.now();
+      if (remainingMs > 0 && modal && !modal.classList.contains('modal-hidden') && typeof window.closeModal === 'function') {
+        window.closeModal('tt-gps-lost-modal');
+      }
+      if (gpsLostWarnedForMs === updatedMs) return;
+
+      const show = () => {
+        gpsLostWarningTimer = null;
+        // 他の画面へ移った・定刻表示へ戻した・この便のリアルタイム情報が無くなった・
+        // タイマー待ちの間に自動更新がOFFになった場合は出さない
+        const section = document.getElementById('section-timetable');
+        if (seq !== renderSeq || mode !== 'realtime' || !realtime.bus) return;
+        if (!autoRefreshEnabled()) return;
+        if (section && section.style.display === 'none') return;
+        gpsLostWarnedForMs = updatedMs;
+        if (typeof window.openModal === 'function') window.openModal('tt-gps-lost-modal');
+      };
+      if (remainingMs <= 0) show();
+      else gpsLostWarningTimer = setTimeout(show, remainingMs);
+    }
+
     function paint() {
       if (seq !== renderSeq) return;
       const bus = mode === 'realtime' ? realtime.bus : null;
+      watchGpsLost(bus);
       // 「地図で表示」は車両の最新位置（バスアイコン）とこの便が停車するバス停（バス停アイコン）を表示する。
       const showMapBtn = bus && Number.isFinite(Number(bus.lat)) && Number.isFinite(Number(bus.lng));
 
@@ -1476,6 +1531,7 @@
     section.style.display = 'block';
     destroyMap();
     stopTripRealtimePolling();
+    stopGpsLostWatch();
 
     const state = parsePath();
     if (!state || state.view === 'search') {

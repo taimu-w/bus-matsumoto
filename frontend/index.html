@@ -464,6 +464,23 @@
   </div>
 </div>
 
+<!-- GPS途絶の警告（便詳細ページのリアルタイム表示中、車両のGPS更新が2分以上前になった時点で開く。timetable.js） -->
+<!-- 「地図で表示」ポップアップを開いたままでも前面に出るよう、z-indexを1段上げてある -->
+<div id="tt-gps-lost-modal" class="fixed inset-0 bg-black/70 z-[70] flex items-center justify-center px-4 modal-hidden">
+  <div class="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
+    <div class="bg-amber-500 p-4 text-white font-bold text-lg flex items-center gap-2">
+      <span aria-hidden="true">⚠️</span>
+      <h3>GPSが失われました</h3>
+    </div>
+    <div class="p-6 text-base text-gray-900 leading-relaxed">
+      GPSが失われました。この車両の情報は最新でない可能性があります。
+    </div>
+    <div class="p-4 border-t bg-gray-50">
+      <button data-close="tt-gps-lost-modal" class="w-full bg-gray-900 text-white py-3.5 rounded-xl text-base font-bold">閉じる</button>
+    </div>
+  </div>
+</div>
+
 <!-- バス停検索：マップで見るモーダル（OpenStreetMap。busstop.jsから使う。外部サイトへは遷移しない） -->
 <div id="bs-map-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4 modal-hidden">
   <div class="bg-white rounded-t-3xl sm:rounded-2xl w-full max-w-md shadow-2xl p-4">
