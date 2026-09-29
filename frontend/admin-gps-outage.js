@@ -128,8 +128,8 @@
         layers.push(m);
         bounds.push([lostLat, lostLng]);
       }
-      const recLat = Number(o.recoveredLat);
-      const recLng = Number(o.recoveredLng);
+      const recLat = o.recoveredLat != null ? Number(o.recoveredLat) : NaN;
+      const recLng = o.recoveredLng != null ? Number(o.recoveredLng) : NaN;
       if (Number.isFinite(recLat) && Number.isFinite(recLng)) {
         const m = L.marker([recLat, recLng], {
           icon: L.divIcon({
