@@ -145,27 +145,14 @@
     return 1.05 / (l + 0.05);
   }
 
-  // ダークモードのカード地（style.css の --surface = #151d2b）に対するコントラスト比。
-  // 路線カラーをそのまま文字に使えるかはテーマによって答えが変わる
-  // （濃紺はライトでは読めるがダークでは沈み、黄色はその逆）ため、両方を測る。
-  const DARK_SURFACE_LUMINANCE = 0.0121;
-
-  function contrastWithDarkSurface(rgb) {
-    const l = relativeLuminance(rgb);
-    return (Math.max(l, DARK_SURFACE_LUMINANCE) + 0.05) / (Math.min(l, DARK_SURFACE_LUMINANCE) + 0.05);
-  }
-
   /**
    * カードの地の上に路線カラーで数字を描けるかを判定する。
-   * コントラスト比が足りない色（ライトでの黄色、ダークでの濃紺など）は、
+   * コントラスト比が足りない色（黄色など）は、
    * 数字を文字色トークンにして、路線カラーは下線＋円形バッジで表現する
    * （仕様書 3.4 C 視認性確保）。
    *
-   * 地の色はライト＝白／ダーク＝濃紺とテーマで変わるので、採用色は1つに
-   * 決めず textLight / textDark の2つを返す。呼び出し側はこれを
-   * --rc-text-l / --rc-text-d のカスタムプロパティとして要素に載せ、
-   * どちらを使うかは style.css の .rc-text がテーマ別に選ぶ。
-   * インラインで color を書いてしまうと詳細度でCSS側から切り替えられない。
+   * 呼び出し側は textLight を --rc-text-l のカスタムプロパティとして要素に載せ、
+   * style.css の .rc-text が文字色に使う。
    */
   function routeColorStyle(color) {
     const rgb = parseHexColor(color);
@@ -173,21 +160,18 @@
       return {
         hex: null,
         textLight: 'var(--text-strong)',
-        textDark: 'var(--text-strong)',
         underline: 'var(--border)',
         needsBadge: false
       };
     }
     const hex = `#${String(color).replace('#', '')}`;
     const readableOnLight = contrastWithWhite(rgb) >= 3;
-    const readableOnDark = contrastWithDarkSurface(rgb) >= 3;
     return {
       hex,
       textLight: readableOnLight ? hex : 'var(--text-strong)',
-      textDark: readableOnDark ? hex : 'var(--text-strong)',
       underline: hex,
-      // どちらかのテーマで数字に色を使えないなら、その色を示す丸印を出す
-      needsBadge: !readableOnLight || !readableOnDark
+      // 数字に色を使えないなら、その色を示す丸印を出す
+      needsBadge: !readableOnLight
     };
   }
 
@@ -750,7 +734,7 @@
               : '';
             const url = tripUrl(departure, data.stop.stopKey, date, platform);
             return `
-              <a href="${esc(url)}" data-spa class="tt-min" style="border-bottom-color:${esc(style.underline)};--rc-text-l:${esc(style.textLight)};--rc-text-d:${esc(style.textDark)}"
+              <a href="${esc(url)}" data-spa class="tt-min" style="border-bottom-color:${esc(style.underline)};--rc-text-l:${esc(style.textLight)}"
                  title="${esc(`${departure.time} ${departure.routeName} ${departure.headsign || ''}`)}">
                 ${style.needsBadge ? `<span class="tt-min-dot" style="background:${esc(style.hex)}"></span>` : ''}
                 <span class="tt-min-num rc-text">${String(departure.minute).padStart(2, '0')}</span>

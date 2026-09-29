@@ -1,4 +1,4 @@
-/* Tailwind(CDN)で表現しきれない部分と、テーマ（配色）の一元管理だけをここに置く。
+/* Tailwind(CDN)で表現しきれない部分と、配色の一元管理だけをここに置く。
    余白・角丸・タイポなどのレイアウトは index.html 側のユーティリティクラスで完結させる。 */
 
 /* ==========================================================
@@ -10,11 +10,11 @@
    Tailwindの bg-white / text-gray-500 / bg-blue-50 といった
    具体的な色名クラスを使ったままで構わない。下の「ユーティリティ
    上書き層」がそれらのクラスをトークン参照に読み替えるため、
-   ダークモードの追加や配色の微調整を数百箇所のクラス書き換え
+   配色の微調整を数百箇所のクラス書き換え
    （app.js・timetable.js・routesearch.js 等、合計30万字超）
    なしで行える。
 
-   ライトモードのトークン値はTailwind既定の実値と同じにしてある。
+   トークン値はTailwind既定の実値と同じにしてある。
    例外は --text-secondary（旧 gray-500）と --text-muted（旧 gray-400）
    の2つで、コントラスト比がWCAG AAに届いていなかったため意図的に
    濃くしている（下のコメント参照）。
@@ -32,8 +32,7 @@
   --surface-95: rgb(255 255 255 / 0.95); /* 下部ナビ等の半透明面 */
 
   /* 反転面：塗りボタン・トーストのように「面の上に白文字」を置くもの。
-     ダークモードでは暗くするのではなく地よりも明るくしないとボタンが
-     背景に溶けるため、通常の面トークンとは別に持つ。 */
+     通常の面トークンとは別に持つ。 */
   --inverse-surface: #111827;   /* bg-gray-900 / bg-slate-900 */
   --inverse-surface-2: #374151; /* bg-gray-700 */
 
@@ -81,12 +80,12 @@
   --on-brand-btn-bg-hover: #eff6ff;
   --on-brand-btn-text: #1e40af;
 
-  --focus-ring: #2563eb;    /* フォーカスリング。ダークでは明るい青に差し替える */
+  --focus-ring: #2563eb;    /* フォーカスリング */
   --shadow-color: rgb(15 23 42 / 0.10);
 
   /* 状態色（お知らせ・警告・運行状況のカード）。
      bg-*-50 の下地 / border-*-200 の枠 / text-*-700|800|900 の文字を
-     1組のトークンにまとめ、ダークでは「暗い色地＋明るい文字」に入れ替える。 */
+     1組のトークンにまとめる。 */
   --acc-sky-surface: #f0f9ff;     --acc-sky-border: #bae6fd;     --acc-sky-text: #0369a1;
   --acc-indigo-surface: #eef2ff;  --acc-indigo-border: #c7d2fe;  --acc-indigo-text: #4338ca;
   --acc-purple-surface: #faf5ff;  --acc-purple-border: #e9d5ff;  --acc-purple-text: #7e22ce;
@@ -96,148 +95,6 @@
   --acc-yellow-surface: #fefce8;  --acc-yellow-border: #fef08a;  --acc-yellow-text: #a16207;
   --acc-red-surface: #fef2f2;     --acc-red-border: #fecaca;     --acc-red-text: #b91c1c;
   --acc-rose-surface: #fff1f2;    --acc-rose-border: #fecdd3;    --acc-rose-text: #be123c;
-
-  /* 地図タイル（Leaflet/OSM）。ダークでは反転+色相回転で暗くする。 */
-  --map-tile-filter: none;
-}
-
-/* ----------------------------------------------------------
-   ダークモードのトークン
-   OSの設定に追従しつつ、ヘッダーの切替ボタン（theme.js）で
-   ライト固定／ダーク固定にもできる。
-   - OS追従時は data-theme 属性が付かないので、条件は
-     「ライト固定されていないとき」= :not([data-theme="light"]) にする。
-   - CSSのカスタムプロパティはメディアクエリの中でしか切り替えられないため、
-     OS追従用とdata-theme="dark"用で同じ宣言ブロックを2回書いている
-     （セレクタリストにまとめると片方がメディアクエリ外になってしまう）。
-   すべての文字色トークンは --surface / --surface-3 上で4.5:1以上になる値を選んでいる。
-   ---------------------------------------------------------- */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-
-    --canvas: #080e16;
-    --surface: #151d2b;
-    --surface-2: #1c2536;
-    --surface-3: #253042;
-    --surface-4: #2d3a4f;
-    --surface-5: #3a465c;
-    --surface-95: rgb(21 29 43 / 0.95);
-
-    --inverse-surface: #33415c;
-    --inverse-surface-2: #45526e;
-
-    --border: #2a3445;
-    --border-soft: #222c3c;
-    --border-strong: #3a465c;
-
-    --text-strong: #e9eef6;
-    --text-800: #dde4ee;
-    --text-body: #cbd5e3;
-    --text-600: #b9c5d5;
-    --text-secondary: #a6b3c5;
-    --text-muted: #99a6b8;
-    --text-faint: #6b7789;
-    --neutral-mark: #64748b;
-
-    --brand-header: #16223f;
-    --brand-solid: #1e3f8f;
-    --brand-solid-2: #2450a8;
-    --link: #9cc0ff;
-    --brand-text-800: #a9c6ff;
-    --brand-text-900: #bfd4ff;
-    --tint-blue: #172741;
-    --tint-blue-2: #1d3153;
-    --border-blue-soft: #24395c;
-    --border-blue: #2d4670;
-    --border-blue-hover: #3d5c92;
-    --border-blue-strong: #4a6eaa;
-
-    --hero-from: #1b3a7a;
-    --hero-to: #0f1f45;
-
-    --on-brand-btn-bg: rgb(255 255 255 / 0.14);
-    --on-brand-btn-bg-hover: rgb(255 255 255 / 0.24);
-    --on-brand-btn-text: #ffffff;
-
-    --focus-ring: #7da6ff;
-    --shadow-color: rgb(0 0 0 / 0.55);
-
-    --acc-sky-surface: #122f46;     --acc-sky-border: #114d6f;     --acc-sky-text: #7dd3fc;
-    --acc-indigo-surface: #1e2647;  --acc-indigo-border: #303772;  --acc-indigo-text: #a5b4fc;
-    --acc-purple-surface: #282448;  --acc-purple-border: #493174;  --acc-purple-text: #d8b4fe;
-    --acc-emerald-surface: #133237; --acc-emerald-border: #12554a; --acc-emerald-text: #6ee7b7;
-    --acc-green-surface: #153432;   --acc-green-border: #18593d;   --acc-green-text: #86efac;
-    --acc-amber-surface: #332e27;   --acc-amber-border: #644b1f;   --acc-amber-text: #fcd34d;
-    --acc-yellow-surface: #313126;  --acc-yellow-border: #60521e;  --acc-yellow-text: #fde047;
-    --acc-red-surface: #32222f;     --acc-red-border: #622a34;     --acc-red-text: #fca5a5;
-    --acc-rose-surface: #332132;    --acc-rose-border: #64293d;    --acc-rose-text: #fda4af;
-
-    --map-tile-filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.92) saturate(0.7);
-  }
-}
-
-:root[data-theme="dark"] {
-  color-scheme: dark;
-
-  --canvas: #080e16;
-  --surface: #151d2b;
-  --surface-2: #1c2536;
-  --surface-3: #253042;
-  --surface-4: #2d3a4f;
-  --surface-5: #3a465c;
-  --surface-95: rgb(21 29 43 / 0.95);
-
-  --inverse-surface: #33415c;
-  --inverse-surface-2: #45526e;
-
-  --border: #2a3445;
-  --border-soft: #222c3c;
-  --border-strong: #3a465c;
-
-  --text-strong: #e9eef6;
-  --text-800: #dde4ee;
-  --text-body: #cbd5e3;
-  --text-600: #b9c5d5;
-  --text-secondary: #a6b3c5;
-  --text-muted: #99a6b8;
-  --text-faint: #6b7789;
-  --neutral-mark: #64748b;
-
-  --brand-header: #16223f;
-  --brand-solid: #1e3f8f;
-  --brand-solid-2: #2450a8;
-  --link: #9cc0ff;
-  --brand-text-800: #a9c6ff;
-  --brand-text-900: #bfd4ff;
-  --tint-blue: #172741;
-  --tint-blue-2: #1d3153;
-  --border-blue-soft: #24395c;
-  --border-blue: #2d4670;
-  --border-blue-hover: #3d5c92;
-  --border-blue-strong: #4a6eaa;
-
-  --hero-from: #1b3a7a;
-  --hero-to: #0f1f45;
-
-  --on-brand-btn-bg: rgb(255 255 255 / 0.14);
-  --on-brand-btn-bg-hover: rgb(255 255 255 / 0.24);
-  --on-brand-btn-text: #ffffff;
-
-  --focus-ring: #7da6ff;
-  --shadow-color: rgb(0 0 0 / 0.55);
-
-  --acc-sky-surface: #122f46;     --acc-sky-border: #114d6f;     --acc-sky-text: #7dd3fc;
-  --acc-indigo-surface: #1e2647;  --acc-indigo-border: #303772;  --acc-indigo-text: #a5b4fc;
-  --acc-purple-surface: #282448;  --acc-purple-border: #493174;  --acc-purple-text: #d8b4fe;
-  --acc-emerald-surface: #133237; --acc-emerald-border: #12554a; --acc-emerald-text: #6ee7b7;
-  --acc-green-surface: #153432;   --acc-green-border: #18593d;   --acc-green-text: #86efac;
-  --acc-amber-surface: #332e27;   --acc-amber-border: #644b1f;   --acc-amber-text: #fcd34d;
-  --acc-yellow-surface: #313126;  --acc-yellow-border: #60521e;  --acc-yellow-text: #fde047;
-  --acc-red-surface: #32222f;     --acc-red-border: #622a34;     --acc-red-text: #fca5a5;
-  --acc-rose-surface: #332132;    --acc-rose-border: #64293d;    --acc-rose-text: #fda4af;
-
-  --map-tile-filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.92) saturate(0.7);
 }
 
 /* ==========================================================
@@ -339,9 +196,8 @@ html ::after {
 :root .border-rose-200 { border-color: var(--acc-rose-border); }
 :root .text-rose-700, :root .text-rose-800, :root .text-rose-900 { color: var(--acc-rose-text); }
 
-/* 影。ダークでは黒い影が地に溶けて段差が消えるため、Tailwindの
-   --tw-shadow-color 機構（--tw-shadow-colored への差し替え）を使って
-   色だけを入れ替える。box-shadow自体を上書きしないのは、
+/* 影。Tailwindの --tw-shadow-color 機構（--tw-shadow-colored への差し替え）を
+   使って色だけを入れ替える。box-shadow自体を上書きしないのは、
    ring-1 ring-sky-500（timetable.jsの選択中バス停）のように
    ring と shadow を合成している箇所を壊さないため。 */
 :root .shadow-sm,
@@ -357,24 +213,12 @@ html ::after {
 /* ==========================================================
    路線カラーで描く文字（時刻表の分・経路検索の行き先）
    ----------------------------------------------------------
-   路線カラーをそのまま文字色に使えるかは地の色しだいで、地の色は
-   テーマで変わる（ライト＝白／ダーク＝濃紺）。そこで timetable.js /
-   routesearch.js の routeColorStyle() は採用色を1つに決めず、
-   ライト用・ダーク用の2色を要素の --rc-text-l / --rc-text-d に載せる。
-   どちらを使うかをここで選ぶ。
-   JS側が style="color:..." を直接書かないのは、インラインスタイルには
-   このセレクタが勝てないため。
+   timetable.js / routesearch.js の routeColorStyle() が、白地に対して
+   路線カラーをそのまま文字色に使えるかを判定し、採用色を要素の
+   --rc-text-l に載せる。
    ========================================================== */
 .rc-text {
   color: var(--rc-text-l, inherit);
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .rc-text {
-    color: var(--rc-text-d, inherit);
-  }
-}
-:root[data-theme="dark"] .rc-text {
-  color: var(--rc-text-d, inherit);
 }
 
 /* ==========================================================
@@ -416,8 +260,7 @@ html ::after {
    3ページの「ご利用にあたって」見出しが親サイズのままになっていたので補う。 */
 :root .text-md { font-size: 1rem; line-height: 1.5rem; }
 
-/* プレースホルダ（経路検索・バス停検索の入力欄）。既定はブラウザ依存で
-   ダーク時に読めなくなるため明示する。 */
+/* プレースホルダ（経路検索・バス停検索の入力欄）。既定はブラウザ依存のため明示する。 */
 input::placeholder,
 textarea::placeholder {
   color: var(--text-muted);
@@ -486,9 +329,7 @@ textarea:focus-visible,
 /* ==========================================================
    ブランド色の面の上に置くボタン（ヘッダー・ヒーローカード）
    ----------------------------------------------------------
-   もともと bg-white / text-blue-800 のユーティリティで「濃い青の帯の上に
-   白いボタン」を作っていたが、この2つはダークモードでは面トークン（暗い灰青）と
-   明るい青文字に読み替わるため、同じく暗いヘッダーの上でボタンの輪郭が消える。
+   「濃い青の帯の上に白いボタン」を作る。
    ヘッダー上のボタンだけは面トークンではなく「帯に対する相対色」で持つ。
    詳細度は上のユーティリティ上書き層と同じ(0,2,0)なので、
    このファイル内でそれより後ろに書いてあることで勝っている。
@@ -509,37 +350,12 @@ textarea:focus-visible,
   transform: scale(0.94);
 }
 
-/* 配色切替ボタン（theme.js が aria-label とアイコンを制御する） */
-.theme-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 2.75rem;
-  padding: 0 0.5rem;
-  border-radius: 0.5rem;
-}
-.theme-toggle svg {
-  width: 1.25rem;
-  height: 1.25rem;
-}
-/* 現在のモードに合うアイコンだけを出す。
-   data-theme が付いていないとき（OS追従）は「自動」を表示する。 */
-.theme-toggle [data-theme-icon] { display: none; }
-:root:not([data-theme]) .theme-toggle [data-theme-icon="auto"] { display: block; }
-:root[data-theme="light"] .theme-toggle [data-theme-icon="light"] { display: block; }
-:root[data-theme="dark"] .theme-toggle [data-theme-icon="dark"] { display: block; }
 
 /* ==========================================================
    バスマップ（Leaflet）
    マーカーのDOMはLeafletが動的に挿入するため、Tailwind(CDN)の
    クラス生成に依存せずここで直接スタイルを定義する。
    ========================================================== */
-
-/* OSMのタイルはライト前提の絵なので、ダークでは反転して地図だけ暗くする。
-   マーカー・経路ポリラインは別ペイン（.leaflet-overlay-pane等）なので色が化けない。 */
-.leaflet-tile-pane {
-  filter: var(--map-tile-filter);
-}
 
 /* Leafletが自前で色を持つ部品（ポップアップ・ズームボタン・帰属表示）を面トークンに揃える */
 .leaflet-container {
@@ -719,7 +535,7 @@ textarea:focus-visible,
   /* iPhoneのホームインジケーター等の下に隠れないようにする（viewport-fit=cover採用のため） */
   padding-bottom: env(safe-area-inset-bottom, 0px);
   /* 面・罫線・影はHTML側のユーティリティではなくここでトークンから当てる
-     （id指定＝詳細度(1,0,0)なので、ダークモードでも確実に効く）。 */
+     （id指定＝詳細度(1,0,0)なので確実に効く）。 */
   background: var(--surface-95);
   border-top: 1px solid var(--border);
   box-shadow: 0 -4px 16px var(--shadow-color);
@@ -906,8 +722,7 @@ summary.list-none::-webkit-details-marker {
 
 /* ==========================================================
    ホームのヒーローカード（リアルタイム運行情報への導線）
-   グラデーションをHTML側の from-/to- ユーティリティで持つと
-   ダークモードで明るすぎるため、トークン管理に移している。
+   グラデーションはトークンで管理する。
    ========================================================== */
 .brand-hero {
   background-image: linear-gradient(to bottom right, var(--hero-from), var(--hero-to));

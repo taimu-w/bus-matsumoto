@@ -161,32 +161,20 @@
     return 1.05 / (l + 0.05);
   }
 
-  // ダークモードのカード地（style.css の --surface = #151d2b）に対するコントラスト比。
-  // 路線カラーをそのまま文字に使えるかはテーマによって答えが変わる
-  // （濃紺はライトでは読めるがダークでは沈み、黄色はその逆）ため、両方を測る。
-  const DARK_SURFACE_LUMINANCE = 0.0121;
-
-  function contrastWithDarkSurface(rgb) {
-    const l = relativeLuminance(rgb);
-    return (Math.max(l, DARK_SURFACE_LUMINANCE) + 0.05) / (Math.min(l, DARK_SURFACE_LUMINANCE) + 0.05);
-  }
-
   /**
    * カードの地の上に路線カラーで文字を描けるか。描けない色は文字色トークンに
-   * フォールバックする。地の色はテーマで変わる（ライト＝白／ダーク＝濃紺）ので、
-   * 採用色は1つに決めず textLight / textDark の2つを返す。呼び出し側はこれを
-   * --rc-text-l / --rc-text-d として要素に載せ、style.css の .rc-text が選ぶ。
+   * フォールバックする。呼び出し側は textLight を --rc-text-l として要素に載せ、
+   * style.css の .rc-text が文字色に使う。
    */
   function routeColorStyle(color) {
     const rgb = parseHexColor(color);
     if (!rgb) {
-      return { hex: '#94a3b8', textLight: 'var(--text-strong)', textDark: 'var(--text-strong)', hasColor: false };
+      return { hex: '#94a3b8', textLight: 'var(--text-strong)', hasColor: false };
     }
     const hex = `#${String(color).replace('#', '')}`;
     return {
       hex,
       textLight: contrastWithWhite(rgb) >= 3 ? hex : 'var(--text-strong)',
-      textDark: contrastWithDarkSurface(rgb) >= 3 ? hex : 'var(--text-strong)',
       hasColor: true
     };
   }
@@ -1620,7 +1608,7 @@
         <div class="flex-1 min-w-0 py-2">
           <div class="flex flex-wrap items-center gap-2">
             ${routeChip(leg)}
-            <span class="text-sm font-bold rc-text" style="--rc-text-l:${esc(style.textLight)};--rc-text-d:${esc(style.textDark)}">${esc(leg.headsign ? `${leg.headsign} ゆき` : leg.routeName)}</span>
+            <span class="text-sm font-bold rc-text" style="--rc-text-l:${esc(style.textLight)}">${esc(leg.headsign ? `${leg.headsign} ゆき` : leg.routeName)}</span>
           </div>
           <p class="text-[11px] font-bold text-gray-500 mt-1">
             ${esc(leg.routeName)} ／ ${leg.stopCount}停留所 ／ 約${leg.rideMinutes}分
