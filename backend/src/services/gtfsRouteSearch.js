@@ -1018,10 +1018,16 @@ function serializeStopRef(index, stop, groupKey) {
   const group = groupKey ? index.groups.get(groupKey) : null;
   // 通過するバス停は、そのバス停の全乗り場ではなく実際に通る乗り場単独のページへ遷移させる。
   const platformQuery = stop ? `?platform=${encodeURIComponent(`${stop.feedId}_${stop.stopId}`)}` : '';
+  // 物理的な乗り場の識別子。座標統合で畳まれた標柱は代表標柱のキーにそろえる
+  // （mergeCoincidentPlatforms 参照）。乗換の「同じ乗り場か」の判定はこれで比べること。
+  // 生の stop_id で比べると、2フィードが同じのりばを別 stop_id で持つ場合に
+  // 「乗り場を移動する必要があります」と誤表示する。
+  const platformStop = stop ? (stop.mergedInto && index.stops.get(stop.mergedInto)) || stop : null;
   return {
     stopKey: groupKey || null,
     stopId: stop ? stop.stopId : null,
     feedId: stop ? stop.feedId : null,
+    platformKey: platformStop ? `${platformStop.feedId}_${platformStop.stopId}` : null,
     name: group ? group.name : stop ? stop.name : '',
     platformCode: stop ? stop.platformCode || '' : '',
     lat: stop ? stop.lat : group ? group.lat : null,

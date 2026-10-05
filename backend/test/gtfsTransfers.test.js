@@ -218,3 +218,30 @@ test('徒歩乗継では「徒歩＋乗換余裕」の代わりに指定値を�
   assert.equal(reverseWalk.departureSeconds, 1000);
   assert.equal(reverseWalk.arrivalSeconds, 1060);
 });
+
+/* ---------- 乗換地点の乗り場（platformKey） ---------- */
+
+function transferStopsOf(index) {
+  const results = runRaptor(contextOf(index), new Map([['O', 800]]), new Set(['D']));
+  const best = results.reduce((a, b) => (a.arrivalSeconds <= b.arrivalSeconds ? a : b));
+  const [first, second] = buildJourney(index, best.labels, 0).legs.filter((leg) => leg.type === 'bus');
+  return { alight: first.toStop, board: second.fromStop };
+}
+
+test('乗換地点の降車・乗車の乗り場を platformKey で返す（別の標柱なら異なる）', () => {
+  const { alight, board } = transferStopsOf(buildFixture());
+  assert.equal(alight.stopKey, 'T');
+  assert.equal(board.stopKey, 'T');
+  assert.equal(alight.platformKey, 'f_a');
+  assert.equal(board.platformKey, 'f_b');
+});
+
+test('座標統合で畳まれた標柱は代表標柱の platformKey にそろえる（同じ乗り場と判定できる）', () => {
+  const index = buildFixture();
+  index.stops.get(makeKey('f', 'a')).mergedInto = makeKey('f', 'b');
+  const { alight, board } = transferStopsOf(index);
+  assert.equal(alight.platformKey, 'f_b');
+  assert.equal(board.platformKey, 'f_b');
+  // 遷移先URL（?platform=）は従来どおり実際の標柱のまま（resolvePlatform が代表へ解決する）
+  assert.equal(alight.busstopUrl, '/busstop/T?platform=f_a');
+});

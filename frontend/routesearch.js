@@ -45,6 +45,8 @@
   let realtimeTimer = null;
   let renderSeq = 0;
   let lastResult = null;
+  // 乗換地点の乗り場ポップアップの地図（開くたびに作り直す）
+  let transferMap = null;
 
   /* ---------- 小さなヘルパー ---------- */
   function esc(value) {
@@ -1582,18 +1584,39 @@
     journey.legs.forEach((leg, legIndex) => {
       rows.push(leg.type === 'walk' ? renderWalkLeg(leg) : renderBusLeg(leg, `${journeyIndex}-${legIndex}`));
       const nextLeg = journey.legs[legIndex + 1];
-      rows.push(renderStopNode(leg.toStop, {
+      // 徒歩で別のバス停へ乗り継ぐとき、徒歩区間の到着側はバス停（グループ）しか持たないため、
+      // 次のバス区間の乗車停（実際に乗る乗り場の ?platform= 付きURL・乗り場番号を持つ）で描く。
+      const nodeStop = leg.type === 'walk' && nextLeg && nextLeg.type === 'bus'
+        && nextLeg.fromStop && nextLeg.fromStop.stopKey === leg.toStop.stopKey
+        ? nextLeg.fromStop
+        : leg.toStop;
+      rows.push(renderStopNode(nodeStop, {
         arrivalTime: leg.arrivalTime,
         arrivalDayOffset: leg.arrivalDayOffset,
         departureTime: nextLeg ? nextLeg.departureTime : null,
         departureDayOffset: nextLeg ? nextLeg.departureDayOffset : 0,
         isTerminal: !nextLeg,
         color: leg.type === 'bus' ? routeColorStyle(leg.routeColor).hex : '#94a3b8',
-        predicted: leg.realtime ? leg.realtime.predictedArrivalTime : null
+        predicted: leg.realtime ? leg.realtime.predictedArrivalTime : null,
+        transfer: transferPlatformInfo(leg, nextLeg, journeyIndex, legIndex)
       }));
     });
 
     return `<div class="space-y-0">${rows.join('')}</div>`;
+  }
+
+  /**
+   * 同じバス停でバスからバスへ乗り換える地点の、降りる乗り場と乗る乗り場の関係。
+   * 乗り場（platformKey、座標統合後の物理のりば）が分からないとき・徒歩で別のバス停へ
+   * 乗り継ぐときは null（従来どおりの表示）。
+   */
+  function transferPlatformInfo(leg, nextLeg, journeyIndex, legIndex) {
+    if (!nextLeg || leg.type !== 'bus' || nextLeg.type !== 'bus') return null;
+    const alight = leg.toStop;
+    const board = nextLeg.fromStop;
+    if (!alight || !board || !alight.stopKey || alight.stopKey !== board.stopKey) return null;
+    if (!alight.platformKey || !board.platformKey) return null;
+    return { samePlatform: alight.platformKey === board.platformKey, alight, board, journeyIndex, legIndex };
   }
 
   function renderStopNode(stop, options) {
@@ -1609,12 +1632,41 @@
       timeLines.push(`<div><span class="font-bold text-green-700">${esc(t('予測 {time}', { time: options.predicted }))}</span></div>`);
     }
 
+    // 乗換地点で乗り場を移動するときは、バス停名で降りる乗り場・乗る乗り場の地図ポップアップを開く
+    // （どちらか一方の乗り場ページへ直接飛ばすと、もう一方の乗り場が分からなくなるため）。
+    const transfer = options.transfer;
+    const movesPlatform = transfer && !transfer.samePlatform;
+    const transferDataAttrs = movesPlatform
+      ? `data-role="rs-transfer-stop" data-journey="${esc(transfer.journeyIndex)}" data-leg="${esc(transfer.legIndex)}"`
+      : '';
+
     // 出発地/目的地が観光スポットのとき、タイムライン側のスポット名をタップ可能にする（観光スポット情報_仕様書）。
     const link = stop.spotId
       ? spotNameButtonHtml(stop)
-      : stop.busstopUrl
-        ? `<a href="${esc(stop.busstopUrl)}" data-spa class="font-bold text-gray-900 underline decoration-dotted underline-offset-2 hover:text-purple-700">${nameHtml(stop.name, 'stop')}</a>`
-        : `<span class="font-bold text-gray-900">${nameHtml(stop.name, 'stop')}</span>`;
+      : movesPlatform
+        ? `<button type="button" ${transferDataAttrs} class="font-bold text-gray-900 underline decoration-dotted underline-offset-2 hover:text-purple-700 text-left">${nameHtml(stop.name, 'stop')}</button>`
+        : stop.busstopUrl
+          ? `<a href="${esc(stop.busstopUrl)}" data-spa class="font-bold text-gray-900 underline decoration-dotted underline-offset-2 hover:text-purple-700">${nameHtml(stop.name, 'stop')}</a>`
+          : `<span class="font-bold text-gray-900">${nameHtml(stop.name, 'stop')}</span>`;
+
+    const chipClass = 'text-[10px] font-bold text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded';
+    let platformHtml = platformLabel(stop) ? `<span class="${chipClass}">${esc(platformLabel(stop))}</span>` : '';
+    let transferHtml = '';
+    if (transfer && transfer.samePlatform) {
+      platformHtml += `<span class="text-[10px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">${esc(t('同じ乗り場'))}</span>`;
+    } else if (movesPlatform) {
+      // 降車・乗車の乗り場番号が分かるときだけ「降車 1番のりば → 乗車 2番のりば」と並べる
+      platformHtml = platformLabel(transfer.alight) || platformLabel(transfer.board)
+        ? `<span class="${chipClass}">${esc(roleWithPlatform(t('降車'), transfer.alight))}</span>
+           <span class="text-[10px] text-gray-400">→</span>
+           <span class="${chipClass}">${esc(roleWithPlatform(t('乗車'), transfer.board))}</span>`
+        : '';
+      transferHtml = `
+        <button type="button" ${transferDataAttrs}
+                class="mt-1 mb-1 w-full text-left text-[11px] font-bold text-amber-900 bg-amber-50 border border-amber-300 rounded-lg px-2 py-1 hover:bg-amber-100">
+          ${esc(t('⚠ 乗り場を移動する必要があります'))}<span class="text-amber-700 ml-1">${esc(t('地図で確認 ›'))}</span>
+        </button>`;
+    }
 
     return `
       <div class="flex items-start gap-3">
@@ -1622,14 +1674,109 @@
           <span class="block w-3.5 h-3.5 rounded-full border-[3px] bg-white" style="border-color:${esc(options.color || '#94a3b8')}"></span>
         </div>
         <div class="flex-1 min-w-0 pb-1">
-          <div class="flex flex-wrap items-baseline gap-x-2">
+          <div class="flex flex-wrap items-baseline gap-x-2 gap-y-1">
             ${link}
-            ${platformLabel(stop) ? `<span class="text-[10px] font-bold text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">${esc(platformLabel(stop))}</span>` : ''}
+            ${platformHtml}
           </div>
           <div class="flex flex-col text-sm">${timeLines.join('')}</div>
+          ${transferHtml}
         </div>
       </div>
     `;
+  }
+
+  /**
+   * 「降車 1番のりば」のような役割＋乗り場の表記。乗り場番号が無いときは役割だけ。
+   * platform_code が「降車」そのもの（松本バスターミナルの降車場など）のときに「降車 降車」と重ねない。
+   */
+  function roleWithPlatform(role, stop) {
+    const label = platformLabel(stop);
+    return label && label !== role ? `${role} ${label}` : role;
+  }
+
+  /* ---------- 乗換地点の乗り場ポップアップ（乗り場を移動するとき） ---------- */
+  function destroyTransferMap() {
+    if (transferMap) {
+      transferMap.remove();
+      transferMap = null;
+    }
+  }
+
+  /**
+   * 地図上の乗り場ピン。乗車・降車バッジ（renderLegStops）と同じ配色にそろえる。
+   * 文言の長さ（英語表示など）に関わらず中心が乗り場の座標に来るよう、サイズ0のアイコンから
+   * translate(-50%,-50%) で中央寄せする。
+   */
+  function transferPinIcon(text, color) {
+    return window.L.divIcon({
+      html: `<div style="position:absolute;left:0;top:0;transform:translate(-50%,-50%);background:${color};color:#fff;border:2px solid #fff;border-radius:9999px;height:28px;padding:0 10px;display:flex;align-items:center;white-space:nowrap;font-weight:700;font-size:11px;box-shadow:0 1px 4px rgba(0,0,0,.4)">${esc(text)}</div>`,
+      className: 'rs-transfer-pin',
+      iconSize: [0, 0]
+    });
+  }
+
+  function openTransferModal(journeyIndex, legIndex) {
+    const journey = lastResult && lastResult.journeys ? lastResult.journeys[journeyIndex] : null;
+    const leg = journey ? journey.legs[legIndex] : null;
+    const transfer = leg ? transferPlatformInfo(leg, journey.legs[legIndex + 1], journeyIndex, legIndex) : null;
+    const title = document.getElementById('rs-transfer-modal-title');
+    const actions = document.getElementById('rs-transfer-modal-actions');
+    if (!transfer || !title || !actions || typeof window.openModal !== 'function') return;
+
+    const ends = [
+      { role: t('降車'), heading: t('降りる乗り場'), stop: transfer.alight, color: '#374151', button: 'bg-gray-700 hover:bg-gray-800' },
+      { role: t('乗車'), heading: t('乗る乗り場'), stop: transfer.board, color: '#9333ea', button: 'bg-purple-600 hover:bg-purple-700' }
+    ].map((end) => ({
+      ...end,
+      // 見出し（「降りる乗り場」）に添える乗り場名。platform_code が役割そのもの（「降車」）なら添えない
+      label: platformLabel(end.stop) !== end.role ? platformLabel(end.stop) : ''
+    }));
+
+    title.innerHTML = nameHtml(transfer.alight.name, 'stop');
+    // data-spa で乗り場ページへ遷移し、data-close で同時にポップアップを閉じる（どちらもdocumentの委譲ハンドラ）
+    actions.innerHTML = ends
+      .filter((end) => end.stop.busstopUrl)
+      .map((end) => `
+        <a href="${esc(end.stop.busstopUrl)}" data-spa data-close="rs-transfer-modal"
+           class="flex items-center justify-between gap-2 w-full ${end.button} text-white rounded-xl px-4 py-3 font-bold shadow active:scale-95 transition-all">
+          <span>${esc(end.heading)}${end.label ? `<span class="text-xs font-bold opacity-90 ml-2">${esc(end.label)}</span>` : ''}</span>
+          <span class="text-xs shrink-0">${esc(t('乗り場のページへ ›'))}</span>
+        </a>`)
+      .join('');
+
+    window.openModal('rs-transfer-modal');
+
+    // モーダルがdisplay:noneから表示に切り替わった直後はコンテナの実寸が取れないため少し待つ
+    // （busstop.jsのshowStopMapModalと同じ理由）。前の地図の破棄もここで行う
+    // （素早く2回開いたときに同じコンテナへ地図を二重に作らないため）。
+    setTimeout(() => {
+      const el = document.getElementById('rs-transfer-map');
+      if (!el) return;
+      destroyTransferMap();
+      el.innerHTML = '';
+      const points = ends.filter((end) => Number.isFinite(end.stop.lat) && Number.isFinite(end.stop.lon));
+      if (points.length === 0 || typeof window.L === 'undefined') {
+        el.innerHTML = `<p class="text-sm font-bold text-gray-500 p-4">${esc(t('位置情報が登録されていません。'))}</p>`;
+        return;
+      }
+
+      transferMap = window.L.map(el).setView([points[0].stop.lat, points[0].stop.lon], 18);
+      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors',
+        maxZoom: 19
+      }).addTo(transferMap);
+
+      const bounds = points.map((end) => {
+        window.L.marker([end.stop.lat, end.stop.lon], { icon: transferPinIcon(roleWithPlatform(end.role, end.stop), end.color) })
+          .addTo(transferMap)
+          .bindPopup(`<div style="font-weight:700">${esc(end.heading)}</div>` +
+            (end.label ? `<div style="font-size:11px">${esc(end.label)}</div>` : ''));
+        return [end.stop.lat, end.stop.lon];
+      });
+      // 降りる乗り場・乗る乗り場の両方が入る範囲に合わせる（ピンの幅ぶん左右の余白を多めに取る）
+      if (bounds.length > 1) transferMap.fitBounds(bounds, { padding: [60, 40], maxZoom: 19 });
+      setTimeout(() => transferMap && transferMap.invalidateSize(), 100);
+    }, 50);
   }
 
   function renderBusLeg(leg, legKey) {
@@ -1822,6 +1969,10 @@
 
     container.querySelectorAll('[data-role="rs-spot-name"]').forEach((button) => {
       button.addEventListener('click', () => openSpotModal(button.dataset.spotId));
+    });
+
+    container.querySelectorAll('[data-role="rs-transfer-stop"]').forEach((button) => {
+      button.addEventListener('click', () => openTransferModal(Number(button.dataset.journey), Number(button.dataset.leg)));
     });
 
     // 一覧のカード（＝詳細を開く）と、詳細内の「前の経路／次の経路」。
