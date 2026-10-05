@@ -24,8 +24,8 @@
 | GET | `/api/stops` | 指定路線（`routeId`必須）のバス停マスタ。方向・通過順に並び、標柱の`gtfs_stop_id`を含む（路線図マップで1路線選択時のバス停表示・乗り場別ページへの遷移に使用） |
 | GET | `/api/stops/search` | バス停名の部分一致検索（全路線対応） |
 | GET | `/api/timetable` | 本日運行対象の便の時刻表（`daily_trips`ベース。frequencies由来の仮想便も含む） |
-| GET | `/api/buses` | **担当車両が割り当てられている当日便のリアルタイム運行状況＋到着予測**（`trip_arrival_predictions`から読み出すだけ。計算はパイプライン側でプリコンピュート済み → [eta-prediction-algorithm.md](eta-prediction-algorithm.md)）。候補車両は公開しない。管理画面「リアルタイム休止」中の路線は`{ buses: [], realtimeSuspended: true, suspensionReason }`を返す（[realtime-suspension.md](realtime-suspension.md)） |
-| GET | `/api/buses-for-map` | バスマップ用の走行中バス位置（担当車両のみ・到着予測なしの軽量版）。`routeId`は任意（qualified route id）で、省略時（および`routeId=all`）は全路線を返す。利用者向けバスマップの「路線で絞り込み」セレクトで路線を選んだときだけ付く。リアルタイム休止中の路線のバスは除外し（認証済みの管理画面リクエストは除外しない）、`suspendedRouteIds`（休止中のqualified route id一覧）を常に添える |
+| GET | `/api/buses` | **担当車両が割り当てられている当日便のリアルタイム運行状況＋到着予測**（`trip_arrival_predictions`から読み出すだけ。計算はパイプライン側でプリコンピュート済み → [eta-prediction-algorithm.md](eta-prediction-algorithm.md)）。候補車両は公開しない。各バスの`vehicleProfile`は管理画面「車両詳細情報（公開）」の登録内容（未登録なら`null`、[vehicle-profiles.md](vehicle-profiles.md)）。管理画面「リアルタイム休止」中の路線は`{ buses: [], realtimeSuspended: true, suspensionReason }`を返す（[realtime-suspension.md](realtime-suspension.md)） |
+| GET | `/api/buses-for-map` | バスマップ用の走行中バス位置（担当車両のみ・到着予測なしの軽量版）。`routeId`は任意（qualified route id）で、省略時（および`routeId=all`）は全路線を返す。利用者向けバスマップの「路線で絞り込み」セレクトで路線を選んだときだけ付く。リアルタイム休止中の路線のバスは除外し（認証済みの管理画面リクエストは除外しない）、`suspendedRouteIds`（休止中のqualified route id一覧）を常に添える。各バスにバスアイコン用の`vehicleProfile`と、アイコンを進行方向へ向けるための`heading`（方位角。真北=0・時計回り。アイコン未登録・算出不可なら`null`）を載せる |
 | GET | `/api/service-status` | アルピコ交通の運行状況（1時間ごとにスクレイピングしてキャッシュ済み） |
 
 ## 経路検索
@@ -57,7 +57,7 @@
 | GET | `/api/timetable/stops/map` | バス停マップ用の全バス停一覧（同名で標柱違いは代表点1件に統合済み） |
 | GET | `/api/timetable/stops/:stopKey` | バス停の時刻表（標柱一覧・凡例つき。`?date=YYYY-MM-DD`・`?platform=標柱のstop_id`） |
 | GET | `/api/timetable/trips/:feedId/:routeId/:tripId/:departureTime` | 便の通過時刻一覧（`?stop=`でハイライト対象を指定）。`shapeId`／`shapePoints`（`[[lat, lon], ...]`）は**その便が走る経路の線形**（GTFS`shapes.txt`由来）で、便詳細の「地図で表示」に路線カラーで重ねる描画専用データ。路線の全線形ではなくこの便の1本だけを返す。線形が無い便は両方とも`null` |
-| GET | `/api/timetable/trips/:feedId/:routeId/:tripId/:departureTime/realtime` | 上記便のリアルタイム重ね合わせ（リアルタイム休止中の路線は`available:false`） |
+| GET | `/api/timetable/trips/:feedId/:routeId/:tripId/:departureTime/realtime` | 上記便のリアルタイム重ね合わせ（リアルタイム休止中の路線は`available:false`）。`bus.vehicleProfile`は便詳細の「車両詳細」ポップアップに、`bus.heading`は「地図で表示」のアイコンの向きに使う |
 | GET | `/api/busstop/search` | `/api/timetable/stops/search`と同一データ |
 | GET | `/api/busstop/nearby` | 現在地から近い順のバス停（既定5件） |
 | GET | `/api/busstop/:stopKey/approaching` | 現在時刻±30分以内に到着予定の便一覧 |
@@ -84,7 +84,8 @@
 | GET | `/api/admin/tourist-spots/link-clicks` | 管理画面「観光スポットの検索・アクセス数」。スポット検索の検索回数（`spot_search_counts`）と公式サイトリンクのタップ回数（`tourist_spot_link_clicks`）をスポットごとに期間集計してマージ（`?from=&to=`、最大1年／未指定は直近30日）。[spot-search.md](spot-search.md) / [tourist-spots.md](tourist-spots.md) |
 | GET / POST / PUT / PATCH / DELETE | `/api/admin/busstop-notices`（`/:id`） | バス停お知らせの一覧（無効含む）・新規作成・内容更新・有効無効切替・削除。POSTは`{scope, stopKey, platform, title, imageUrl, body, enabled}`。`scope='platform'`は`stopKey`+`platform`を`resolvePlatformRef()`で正規の`feed_id`+`stop_id`へ落として保存（乗り場が特定できなければ400）、`scope='stop'`は統合バス停キーで保存。画像・本文の少なくとも一方が必須。PUTで配信範囲・対象は変更不可（[busstop-notices.md](busstop-notices.md)） |
 | GET / POST / PUT / PATCH / DELETE | `/api/admin/route-notices`（`/:id`） | 路線お知らせの一覧（無効・期間外含む）・新規作成・内容更新・有効無効切替・削除。POST/PUTは`{routeId, title, imageUrl, body, startDate, endDate, enabled}`。`routeId`は`routes`テーブルへの実在チェックあり（PUTで路線の付け替えも可）。題名必須、画像・本文の少なくとも一方が必須（[route-notices.md](route-notices.md)） |
-| GET / PUT / DELETE | `/api/admin/vehicle-labels`（`/:carId`） | 車両ID（`car_id`）ごとの名前・メモの取得・追加更新（UPSERT）・削除。GETは登録済み一覧に加えて最近観測された車両ID一覧（`knownVehicles`）も返す。PUTで名前・メモがどちらも空の場合は行を削除する。運行ダッシュボードの便詳細セクションで名前表示・名前タップで車両詳細表示に使う |
+| GET / PUT / DELETE | `/api/admin/vehicle-labels`（`/:carId`） | 車両ID（`car_id`）ごとの名前・メモの取得・追加更新（UPSERT）・削除。GETは登録済み一覧に加えて最近観測された車両ID一覧（`knownVehicles`）も返す。PUTで名前・メモがどちらも空の場合は行を削除する。名前が他の車両と重複する場合は409（車両名は重複不可）。運行ダッシュボードの便詳細セクションで名前表示・名前タップで車両詳細表示に使う |
+| GET / PUT / DELETE | `/api/admin/vehicle-profiles`（`/:carId`） | 車両ID（`car_id`）ごとの公開用の車両詳細情報（バスアイコン・ノンステップ・車いす対応・支払い方法）の取得・追加更新（UPSERT）・削除。GETは登録一覧（識別の補助として管理用の車両名を併記）に加えて、アイコンの選択肢（`icons`＝`frontend/images/`の画像ファイル一覧）・支払い方法の選択肢（`paymentMethods`）・最近観測された車両ID一覧（`knownVehicles`）・車両名の対応表（`vehicleNames`＝`[{carId, name}]`、対象車両を車両名で検索するため）も返す。PUTはアイコンが実在しない・未知の支払い方法などを400で拒否し、すべて未設定なら行を削除する（[vehicle-profiles.md](vehicle-profiles.md)） |
 | GET | `/api/admin/vehicle-operation-history/:carId` | 1台ぶんの「直近の運行履歴」（`history: { weekday: [便...], weekendHoliday: [便...] }`。各バケットは直近1日分の全便を始発時刻昇順で、履歴が無ければ空配列。各便は`serviceDate`/`routeName`/`headsign`/`startTime`ほか）＋車両名・メモ（`carName`/`carMemo`）。運行ダッシュボードで車両名/車両IDをタップしたときの詳細展開用（`vehicle_operation_history`） |
 | GET | `/api/admin/vehicle-operation-status` | 管理画面「車両運用状況」。運行履歴のある車両・名前を登録済みの車両ごとに`{ carId, name, history: { weekday: [便...], weekendHoliday: [便...] } }`。`name ASC NULLS LAST, car_id ASC`順 |
 | GET | `/api/admin/vehicle-positions-map` | 運行ダッシュボード（地図）の「全車両（直近3分）」モード用。便に割り当てられていない・候補にすらなっていない車両も含め、直近3分以内にGPSを受信した全車両を1台につき最新の1件だけ返す |

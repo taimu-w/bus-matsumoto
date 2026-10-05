@@ -35,6 +35,7 @@ const SECTION_LOADERS = {
   'spot-tags': () => window.AdminSpotTags.load(),
   'tourist-spot-clicks': () => window.AdminTouristSpotClicks.load(),
   'vehicle-labels': () => window.AdminVehicleLabels.load(),
+  'vehicle-profiles': () => window.AdminVehicleProfiles.load(),
   viewers: () => window.AdminViewers.load(),
   'operation-records': () => window.AdminOperationRecords.load()
 };

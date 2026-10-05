@@ -193,9 +193,18 @@
       ? `<span class="text-[10px] font-bold text-gray-400">発車前</span>`
       : '';
 
+    // リアルタイム便で、管理画面「車両詳細情報」にバスアイコンを登録した車両はその画像で描く
+    // （時刻表推定便は車両が分からないため常に従来のアイコン）。
+    const vehicleImg = kind === 'realtime' && window.VehicleInfo
+      ? window.VehicleInfo.iconImgHtml(record.vehicleProfile, 'max-w-full max-h-full object-contain', 'バス')
+      : null;
+    const iconHtml = vehicleImg
+      ? `<span class="w-12 h-9 flex items-center justify-center shrink-0 cursor-pointer active:opacity-60" data-role="rt-bus-icon">${vehicleImg}</span>`
+      : `<span class="w-8 h-8 rounded-full ${iconBg} flex items-center justify-center text-white text-sm shrink-0 shadow cursor-pointer active:opacity-60" data-role="rt-bus-icon">🚌</span>`;
+
     return `
       <div class="${rowClass}" data-role="rt-bus-row" data-kind="${kind}" data-trip-id="${escapeHtml(String(tripId))}">
-        <span class="w-8 h-8 rounded-full ${iconBg} flex items-center justify-center text-white text-sm shrink-0 shadow cursor-pointer active:opacity-60" data-role="rt-bus-icon">🚌</span>
+        ${iconHtml}
         ${badgeHtml}
         ${beforeStartBadge}
         ${headsignLabel ? `<span class="text-[11px] text-gray-500 font-bold truncate">${escapeHtml(headsignLabel)}行き</span>` : ''}

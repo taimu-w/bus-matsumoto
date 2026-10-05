@@ -109,6 +109,10 @@
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M3 13l2-5a2 2 0 011.9-1.4h10.2A2 2 0 0119 8l2 5"></path><path d="M3 13h18v5a1 1 0 01-1 1h-1a1 1 0 01-1-1v-1H6v1a1 1 0 01-1 1H4a1 1 0 01-1-1z"></path><circle cx="7" cy="16" r="0.6" fill="currentColor"></circle><circle cx="17" cy="16" r="0.6" fill="currentColor"></circle></svg>
               <span>車両名・メモ管理</span>
             </button>
+            <button data-section="vehicle-profiles" data-label="車両詳細情報（公開）" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
+              <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="4" y="3.5" width="16" height="14" rx="2.5"></rect><path d="M4 11h16"></path><path d="M7 17.5V20M17 17.5V20"></path><circle cx="8" cy="14.3" r="0.6" fill="currentColor"></circle><circle cx="16" cy="14.3" r="0.6" fill="currentColor"></circle></svg>
+              <span>車両詳細情報（公開）</span>
+            </button>
             <button data-section="viewers" data-label="サイト閲覧数" class="nav-btn w-full text-left px-3 py-2 rounded-lg text-sm font-bold">
               <svg class="w-[18px] h-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M2.5 12S6.5 5.5 12 5.5 21.5 12 21.5 12 17.5 18.5 12 18.5 2.5 12 2.5 12z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>
               <span>サイト閲覧数</span>
@@ -1090,7 +1094,8 @@
             <p class="text-sm text-slate-500">
               車両ID（位置情報フィードの車両ID）に、分かりやすい名前とメモを付けられます。<br>
               名前を付けた車両は、運行ダッシュボードの便詳細セクション（バスアイコンをタップしたときに右側に出るもの）で車両IDの代わりに名前で表示され、名前をタップするとメモが表示されます。<br>
-              名前・メモをどちらも空にして保存すると、その車両の登録を削除します（車両IDのみの表示に戻ります）。
+              名前・メモをどちらも空にして保存すると、その車両の登録を削除します（車両IDのみの表示に戻ります）。<br>
+              名前は他の車両と重複できません（「車両詳細情報（公開）」で車両名から車両を探すため）。
             </p>
           </div>
           <div class="bg-white rounded-xl border p-4 flex flex-wrap gap-3 items-end">
@@ -1126,6 +1131,82 @@
           <div>
             <h3 class="text-sm font-bold text-slate-600 mb-2">最近観測された車両ID（未登録を含む）</h3>
             <div id="vehicle-labels-known" class="flex flex-wrap gap-1.5 text-xs"></div>
+          </div>
+        </section>
+
+        <!-- 車両詳細情報（公開）。admin-vehicle-profiles.js -->
+        <section id="section-vehicle-profiles" class="section hidden space-y-4">
+          <div>
+            <h2 class="text-xl font-bold">車両詳細情報（公開）</h2>
+            <p class="text-sm text-slate-500">
+              車両ID（位置情報フィードの車両ID）ごとに、<b>利用者向け画面に表示する</b>バスアイコンと車両の設備・お支払い方法を登録します。<br>
+              バスアイコンはリアルタイム時刻表（カード表示・基本表示）とバスマップで使われ、便詳細ページの「車両詳細」ボタンからアイコンと設備・お支払い方法を確認できます。<br>
+              「車両名・メモ管理」（管理画面専用・非公開）とは別の情報です。ここで入力した内容はそのまま公開されるため、運用上のメモは書かないでください。<br>
+              対象の車両は車両IDのほか、「車両名・メモ管理」で付けた車両名（重複不可）でも検索できます（車両名は利用者には表示されません）。<br>
+              バスアイコンの選択肢は <code class="font-mono text-xs bg-slate-100 px-1 rounded">frontend/images/</code> にある画像ファイルです（画像ファイルを置くと選択肢に追加されます）。すべて未設定にして保存すると登録を削除します。
+            </p>
+          </div>
+          <div class="bg-white rounded-xl border p-4 space-y-4">
+            <div class="flex flex-wrap gap-3 items-end">
+              <div class="text-sm font-bold relative">
+                <label for="vehicle-profile-car-id">車両（車両ID・車両名で検索）</label>
+                <input id="vehicle-profile-car-id" type="text" autocomplete="off" class="mt-1 border rounded-lg px-3 py-2 text-sm block w-72" placeholder="例: 1234 / 松本200か1234号車" />
+                <div id="vehicle-profile-suggest" class="hidden absolute left-0 top-full mt-1 w-80 max-h-72 overflow-y-auto bg-white border rounded-lg shadow-lg z-20 font-normal"></div>
+                <p id="vehicle-profile-target" class="mt-1 text-xs font-normal text-slate-500 min-h-[1rem]"></p>
+              </div>
+              <label class="text-sm font-bold">ノンステップバス
+                <select id="vehicle-profile-non-step" class="mt-1 border rounded-lg px-3 py-2 block">
+                  <option value="">未登録（表示しない）</option>
+                  <option value="true">対応</option>
+                  <option value="false">非対応</option>
+                </select>
+              </label>
+              <label class="text-sm font-bold">車いす対応
+                <select id="vehicle-profile-wheelchair" class="mt-1 border rounded-lg px-3 py-2 block">
+                  <option value="">未登録（表示しない）</option>
+                  <option value="true">対応</option>
+                  <option value="false">非対応</option>
+                </select>
+              </label>
+            </div>
+            <div>
+              <p class="text-sm font-bold mb-1">バスアイコン</p>
+              <div id="vehicle-profile-icons" class="flex flex-wrap gap-2"></div>
+            </div>
+            <div>
+              <p class="text-sm font-bold mb-1">お支払い方法</p>
+              <div id="vehicle-profile-payments" class="flex flex-wrap gap-x-4 gap-y-1 text-sm"></div>
+              <label class="text-sm font-bold block mt-2">お支払い方法の補足（任意・200文字以内）
+                <input id="vehicle-profile-payment-note" type="text" maxlength="200" class="mt-1 border rounded-lg px-3 py-2 block w-full max-w-xl font-normal" placeholder="例: 1日乗車券もご利用いただけます" />
+              </label>
+            </div>
+            <div class="flex gap-2">
+              <button id="save-vehicle-profile-btn" class="bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-lg px-4 py-2">保存</button>
+              <button id="reset-vehicle-profile-btn" type="button" class="bg-white border hover:bg-slate-50 font-bold rounded-lg px-4 py-2">入力をクリア</button>
+            </div>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-slate-600 mb-2">登録済みの車両詳細情報</h3>
+            <div class="bg-white rounded-xl border overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50 text-slate-500">
+                  <tr>
+                    <th class="text-left px-3 py-2 font-bold">アイコン</th>
+                    <th class="text-left px-3 py-2 font-bold">車両ID</th>
+                    <th class="text-left px-3 py-2 font-bold">ノンステップ</th>
+                    <th class="text-left px-3 py-2 font-bold">車いす</th>
+                    <th class="text-left px-3 py-2 font-bold">お支払い方法</th>
+                    <th class="text-left px-3 py-2 font-bold">更新日時</th>
+                    <th class="text-left px-3 py-2 font-bold"></th>
+                  </tr>
+                </thead>
+                <tbody id="vehicle-profiles-list"></tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-slate-600 mb-2">最近観測された車両ID（未登録を含む）</h3>
+            <div id="vehicle-profiles-known" class="flex flex-wrap gap-1.5 text-xs"></div>
           </div>
         </section>
 
@@ -1219,6 +1300,7 @@
   <script src="/admin-spot-tags.js" defer></script>
   <script src="/admin-tourist-spot-clicks.js" defer></script>
   <script src="/admin-vehicle-labels.js" defer></script>
+  <script src="/admin-vehicle-profiles.js" defer></script>
   <script src="/admin-viewers.js" defer></script>
   <script src="/admin-operation-records.js" defer></script>
   <script src="/admin-router.js" defer></script>

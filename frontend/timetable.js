@@ -1087,15 +1087,22 @@
         });
       });
 
-      // 車両アイコンはバス停アイコンより上に重なるよう最後に追加する
-      window.L.marker([vLat, vLng], {
-        icon: window.L.divIcon({
+      // 車両アイコンはバス停アイコンより上に重なるよう最後に追加する。
+      // 管理画面「車両詳細情報」でバスアイコンを登録した車両はその画像（バスマップと同じ見た目。
+      // bus.heading＝進行方向に合わせて反転・回転する）。
+      const photo = window.VehicleInfo ? window.VehicleInfo.mapMarkerPhoto(bus.vehicleProfile, bus.heading) : null;
+      const busIcon = photo
+        ? window.L.divIcon({
+          html: photo.html,
+          className: 'tt-map-popup-bus-pin',
+          iconSize: photo.size
+        })
+        : window.L.divIcon({
           html: `<div style="background:#ef4444;color:#fff;border:2px solid #fff;border-radius:9999px;width:34px;height:34px;display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 1px 4px rgba(0,0,0,.5)">🚌</div>`,
           className: 'tt-map-popup-bus-pin',
           iconSize: [34, 34]
-        }),
-        zIndexOffset: 1000
-      }).addTo(tripMapPopupInstance);
+        });
+      window.L.marker([vLat, vLng], { icon: busIcon, zIndexOffset: 1000 }).addTo(tripMapPopupInstance);
 
       tripMapPopupInstance.invalidateSize();
     }, 50);
@@ -1416,6 +1423,11 @@
       const mapBtnHtml = showMapBtn
         ? `<button data-role="tt-map-btn" class="text-xs font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded-full px-3 py-1.5 shrink-0">地図で表示</button>`
         : '';
+      // 「車両詳細」は、走行中の車両に管理画面「車両詳細情報」の登録があるときだけ出す
+      // （未登録の車両でボタンを出しても「情報がありません」としか表示できないため）。
+      const vehicleBtnHtml = bus && bus.vehicleProfile && window.VehicleInfo
+        ? `<button data-role="tt-vehicle-btn" class="text-xs font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded-full px-3 py-1.5 shrink-0">車両詳細</button>`
+        : '';
 
       root().innerHTML = `
         <div class="flex items-center justify-between mb-3">
@@ -1441,7 +1453,7 @@
             <span>始発 ${esc(data.stops[0] ? (data.stops[0].departureTime || '--') : '--')} ${esc(data.stops[0] ? data.stops[0].stopName : '')}</span>
             <span>終点 ${esc(data.stops.length ? (data.stops[data.stops.length - 1].arrivalTime || data.stops[data.stops.length - 1].departureTime || '--') : '--')} ${esc(data.stops.length ? data.stops[data.stops.length - 1].stopName : '')}</span>
             <span>運行区分 ${esc(data.serviceId)}</span>
-            <span class="ml-auto flex items-center gap-2">${mapBtnHtml}${toggleBtnHtml}</span>
+            <span class="ml-auto flex flex-wrap items-center justify-end gap-2">${vehicleBtnHtml}${mapBtnHtml}${toggleBtnHtml}</span>
           </div>
           ${data.departureTimeMismatch ? '<div class="bg-amber-50 border-t border-amber-200 px-5 py-2 text-[11px] font-bold text-amber-800">指定された発車時刻と時刻表が一致しませんでした。GTFSの改訂により時刻が変更された可能性があります。</div>' : ''}
           ${initialMode === 'realtime' && !realtime.available ? '<div class="bg-gray-50 border-t border-gray-200 px-5 py-2 text-[11px] font-bold text-gray-500">現在この便のリアルタイム運行情報はありません。定刻表示を表示しています。</div>' : ''}
@@ -1477,6 +1489,14 @@
           mode = mode === 'realtime' ? 'schedule' : 'realtime';
           paint();
           manageRealtimePolling();
+        });
+      }
+      const vehicleBtn = root().querySelector('[data-role="tt-vehicle-btn"]');
+      if (vehicleBtn) {
+        vehicleBtn.addEventListener('click', () => {
+          window.VehicleInfo.openDetail(bus.vehicleProfile, {
+            title: data.headsign ? `${data.routeName} ${data.headsign} 行` : data.routeName
+          });
         });
       }
       const mapBtn = root().querySelector('[data-role="tt-map-btn"]');

@@ -468,6 +468,22 @@
   </div>
 </div>
 
+<!-- 車両詳細ポップアップ（便詳細ページのリアルタイム表示の「車両詳細」ボタンから開く。vehicle-info.js） -->
+<div id="vehicle-detail-modal" class="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center px-0 sm:px-4 modal-hidden">
+  <div class="bg-white rounded-t-3xl sm:rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+    <div class="flex justify-between items-start p-4 pb-3">
+      <div class="min-w-0">
+        <p class="text-xs text-blue-600 font-bold">車両詳細</p>
+        <h3 id="vehicle-detail-title" class="text-lg font-bold text-blue-900 leading-snug"></h3>
+      </div>
+      <button data-close="vehicle-detail-modal" class="text-gray-400 shrink-0" aria-label="閉じる">
+        <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+      </button>
+    </div>
+    <div id="vehicle-detail-body" class="px-4 pb-4 max-h-[70vh] overflow-y-auto"></div>
+  </div>
+</div>
+
 <!-- GPS途絶の警告（便詳細ページのリアルタイム表示中、車両のGPS更新が2分以上前になった時点で開く。timetable.js） -->
 <!-- 「地図で表示」ポップアップを開いたままでも前面に出るよう、z-indexを1段上げてある -->
 <div id="tt-gps-lost-modal" class="fixed inset-0 bg-black/70 z-[70] flex items-center justify-center px-4 modal-hidden">
@@ -551,6 +567,7 @@
 <script src="/favorites.js"></script>
 <script src="/spot-photos.js"></script>
 <script src="/text-abbrev.js"></script>
+<script src="/vehicle-info.js"></script>
 <script src="/timetable.js"></script>
 <script src="/stopmap.js"></script>
 <script src="/routemap.js"></script>

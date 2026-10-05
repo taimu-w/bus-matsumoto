@@ -432,6 +432,28 @@ CREATE TABLE IF NOT EXISTS vehicle_labels (
   memo        TEXT,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 車両名は重複不可（名前なし＝NULLは何台でも可）。管理画面「車両詳細情報（公開）」で
+-- 車両名から車両IDを引くため、名前が1台に定まらないと別の車両の公開情報を書き換える事故になる。
+CREATE UNIQUE INDEX IF NOT EXISTS ux_vehicle_labels_name ON vehicle_labels (name) WHERE name IS NOT NULL;
+
+-- 車両詳細情報（公開用。管理画面「車両詳細情報」、services/vehicleProfiles.js、docs/vehicle-profiles.md）。
+-- 利用者向け画面（リアルタイム時刻表・バスマップ・便詳細の「車両詳細」）に出す情報だけを持つ。
+-- 管理専用の vehicle_labels（名前・メモ）とは意図的に別テーブル。キーは同じく car_id。
+--   icon            … frontend/images/ 内の画像ファイル名（バスアイコン）。NULL＝未設定
+--   non_step        … ノンステップバスか（TRUE/FALSE、NULL＝未登録で画面に出さない）
+--   wheelchair      … 車いす対応か（同上）
+--   payment_methods … 支払い方法のキー配列（選択肢は vehicleProfiles.js の PAYMENT_METHODS）
+--   payment_note    … 支払い方法の補足（自由記述）
+-- すべて未設定になった時点で行を削除する。
+CREATE TABLE IF NOT EXISTS vehicle_profiles (
+  car_id           TEXT PRIMARY KEY,
+  icon             TEXT,
+  non_step         BOOLEAN,
+  wheelchair       BOOLEAN,
+  payment_methods  TEXT[] NOT NULL DEFAULT '{}',
+  payment_note     TEXT,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- 車両ごとの「直近の運行履歴」（管理画面「車両運用状況」・運行ダッシュボードの車両詳細）。
 -- car_id × 曜日区分（バケット）ごとに「最も新しく運行した1日ぶんの便」をすべて保持する

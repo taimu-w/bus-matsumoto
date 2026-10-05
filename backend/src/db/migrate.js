@@ -1228,6 +1228,32 @@ async function migrate() {
     `);
     console.log('[migrate] ステップ48完了: 外部ID⇔route_idを多対多にし、測位に外部IDを記録するようにしました。');
 
+    // ==========================================================
+    // 49. 車両詳細情報（公開用。管理画面「車両詳細情報」、docs/vehicle-profiles.md）。
+    //     バスアイコン・ノンステップ・車いす対応・支払い方法を car_id ごとに持つ。
+    //     管理専用の vehicle_labels とは別テーブル。新規環境ではschema.sqlのCREATE TABLEに
+    //     既に含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS vehicle_profiles (
+        car_id           TEXT PRIMARY KEY,
+        icon             TEXT,
+        non_step         BOOLEAN,
+        wheelchair       BOOLEAN,
+        payment_methods  TEXT[] NOT NULL DEFAULT '{}',
+        payment_note     TEXT,
+        updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    // ==========================================================
+    // 50. 車両名（vehicle_labels.name）を重複不可にする。管理画面「車両詳細情報（公開）」で
+    //     車両名から車両IDを引くため。新規環境ではschema.sqlに含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS ux_vehicle_labels_name ON vehicle_labels (name) WHERE name IS NOT NULL
+    `);
+
     await client.query('COMMIT');
     console.log('[migrate] マイグレーション完了');
   } catch (err) {

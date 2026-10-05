@@ -396,6 +396,31 @@ textarea:focus-visible,
   line-height: 1;
 }
 
+/* バスアイコン（管理画面「車両詳細情報」で登録した車両の画像）を使うときのマーカー本体。
+   背景・枠は付けず画像だけを描く（路線カラーは下のラベルで示す）。
+   サイズを変えるときは app.js（createBusIcon）・timetable.js（showLocationPopup）の iconSize も揃えること。 */
+.bus-marker-photo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 32px;
+}
+
+/* max-width/max-height で収めてはいけない。leaflet.css の
+   `.leaflet-container .leaflet-marker-pane img { max-width: none !important; max-height: none !important; }`
+   に打ち消され、画像が元の解像度（数百〜千px）のまま地図に描かれる。幅・高さを直接指定して枠に収める。 */
+/* 画像要素は常に 44×32px（枠に対して中央）。進行方向への反転・回転は vehicle-info.js の
+   mapMarkerPhoto が img の style（transform）で付け、枠（.bus-marker-photo）の大きさは
+   回転後の外接矩形に合わせて同じく style で上書きする。 */
+.bus-marker-photo img {
+  display: block;
+  flex: none;
+  width: 44px;
+  height: 32px;
+  object-fit: contain;
+}
+
 /* バス停の車両IDに代わり、その地点(直近到着済み停留所)のstop_headsignを
    路線カラーで常時表示するバッジ。タップ判定はマーカー本体側に委ねるため
    pointer-events は親(.bus-marker-wrap)で無効化している。 */

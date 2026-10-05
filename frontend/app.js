@@ -672,6 +672,16 @@ function createBusCard(bus) {
     ? `<svg class="w-6 h-6 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>`
     : '';
 
+  // 管理画面「車両詳細情報」でバスアイコンを登録した車両はその画像、未登録なら従来のアイコン。
+  const vehicleImg = window.VehicleInfo
+    ? window.VehicleInfo.iconImgHtml(bus.vehicleProfile, 'max-w-full max-h-full object-contain', 'バス')
+    : null;
+  const busIconHtml = vehicleImg
+    ? `<div class="w-20 h-14 flex items-center justify-center mr-3 shrink-0">${vehicleImg}</div>`
+    : `<div class="w-12 h-12 bg-blue-800 rounded-xl flex items-center justify-center text-white mr-3 shadow shrink-0">
+            <svg class="w-8 h-8" fill="currentColor" viewBox="0 0 24 24"><path d="M18,11H6V6h12M16.5,17A1.5,1.5 0 0,1 15,15.5A1.5,1.5 0 0,1 16.5,14A1.5,1.5 0 0,1 18,15.5A1.5,1.5 0 0,1 16.5,17M7.5,17A1.5,1.5 0 0,1 6,15.5A1.5,1.5 0 0,1 7.5,14A1.5,1.5 0 0,1 9,15.5A1.5,1.5 0 0,1 7.5,17M4,16c0,0.88 0.39,1.67 1,2.22V20a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1h8v1a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1.78c0.61-0.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8,0.5-8,4V16Z"></path></svg>
+          </div>`;
+
   card.innerHTML = `
     <div class="p-5 ${toggleCursorClass}" data-role="toggle">
       <div class="flex justify-between items-start mb-3">
@@ -680,9 +690,7 @@ function createBusCard(bus) {
       </div>
       <div class="flex items-center justify-between">
         <div class="flex items-center">
-          <div class="w-12 h-12 bg-blue-800 rounded-xl flex items-center justify-center text-white mr-3 shadow">
-            <svg class="w-8 h-8" fill="currentColor" viewBox="0 0 24 24"><path d="M18,11H6V6h12M16.5,17A1.5,1.5 0 0,1 15,15.5A1.5,1.5 0 0,1 16.5,14A1.5,1.5 0 0,1 18,15.5A1.5,1.5 0 0,1 16.5,17M7.5,17A1.5,1.5 0 0,1 6,15.5A1.5,1.5 0 0,1 7.5,14A1.5,1.5 0 0,1 9,15.5A1.5,1.5 0 0,1 7.5,17M4,16c0,0.88 0.39,1.67 1,2.22V20a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1h8v1a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1.78c0.61-0.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8,0.5-8,4V16Z"></path></svg>
-          </div>
+          ${busIconHtml}
           <div>
             <p class="text-[10px] text-gray-400 font-bold">現在の位置</p>
             <p class="text-xl font-bold text-gray-900">${escapeHtml(currentPos)}</p>
@@ -1157,12 +1165,32 @@ function createBusIcon(bus) {
   // 車両IDの代わりに、その地点（直近到着済み停留所）のstop_headsignを路線カラーのバッジで常時表示する
   // （stop_headsign未設定ならtrip_headsignにフォールバック。currentHeadsignはAPI側で解決済み）。
   const label = bus.currentHeadsign || bus.headsign || '';
+  const labelHtml = label
+    ? `<div class="bus-marker-label" data-abbrev-fit style="background:${labelBg};color:${labelFg};">${escapeHtml(label)}</div>`
+    : '';
+  // 管理画面「車両詳細情報」でバスアイコンを登録した車両は、その画像だけを描く（背景・枠なし。路線カラーはラベルで示す）。
+  // 画像は左向きなので、APIの heading（進行方向）に合わせて反転・回転する（vehicle-info.js の mapMarkerPhoto）。
+  const photo = window.VehicleInfo ? window.VehicleInfo.mapMarkerPhoto(bus.vehicleProfile, bus.heading) : null;
   // マーカーはLeafletが動的に挿入するDOMなので、見た目はstyle.cssの.bus-marker側で定義する。
+  if (photo) {
+    const [w, h] = photo.size;
+    return L.divIcon({
+      html: `
+        <div class="bus-marker-wrap">
+          ${photo.html}
+          ${labelHtml}
+        </div>`,
+      iconSize: [w, h],
+      iconAnchor: [w / 2, h / 2],
+      popupAnchor: [0, -h / 2],
+      className: 'bus-marker'
+    });
+  }
   return L.divIcon({
     html: `
       <div class="bus-marker-wrap">
         <div class="bus-marker-body" style="background:${bg};">🚌</div>
-        ${label ? `<div class="bus-marker-label" data-abbrev-fit style="background:${labelBg};color:${labelFg};">${escapeHtml(label)}</div>` : ''}
+        ${labelHtml}
       </div>`,
     iconSize: [32, 32],
     iconAnchor: [16, 16],

@@ -45,6 +45,8 @@ const spotSearch = require('../services/spotSearch');
 const spotTags = require('../services/spotTags');
 const busstopNotices = require('../services/busstopNotices');
 const routeNotices = require('../services/routeNotices');
+const vehicleProfiles = require('../services/vehicleProfiles');
+const { getVehicleHeadings } = require('../services/vehicleHeading');
 const { invalidateHolidayCache } = require('../services/holidayCalendar');
 const { invalidateRouteExternalIdCache } = require('../services/routeExternalIdMapping');
 const { loadAbbreviations, invalidateDisplayAbbreviationsCache } = require('../services/displayAbbreviations');
@@ -875,33 +877,43 @@ router.delete('/admin/realtime-suspensions/:routeId', requireAdminAuth, async (r
 // 名前タップでメモ表示に使う。
 // ==========================================================
 
+// 管理画面の車両ID入力補助（「車両名・メモ管理」「車両詳細情報」で共用）：観測済みの車両ID一覧。
+// vehicles は (feed_id, car_id) で物理車両1台1行になったため、路線名は「直近に観測した系統」
+// だけになる。運用者が車両を識別しやすいよう、直近の運行履歴（vehicle_operation_history、
+// car_id × 曜日区分ごとの直近1日分）の路線も併せて集める。履歴が無ければ直近観測系統にフォールバック。
+async function queryKnownVehicles() {
+  const result = await pool.query(
+    `SELECT v.car_id,
+            MAX(v.last_gps_at) AS last_gps_at,
+            COALESCE(
+              (SELECT array_agg(DISTINCT r2.name)
+               FROM vehicle_operation_history voh
+               JOIN routes r2 ON r2.id = voh.route_id
+               WHERE voh.car_id = v.car_id),
+              array_remove(array_agg(DISTINCT r.name), NULL)
+            ) AS route_names
+     FROM vehicles v
+     LEFT JOIN routes r ON r.id = v.route_id
+     GROUP BY v.car_id
+     ORDER BY MAX(v.last_gps_at) DESC NULLS LAST, v.car_id ASC`
+  );
+  return result.rows.map((row) => ({
+    carId: row.car_id,
+    lastGpsAt: row.last_gps_at,
+    routeNames: row.route_names || []
+  }));
+}
+
 // GET /api/admin/vehicle-labels -> 名前・メモの一覧＋現在観測されている車両ID一覧
 router.get('/admin/vehicle-labels', requireAdminAuth, async (req, res) => {
   try {
-    const [labelsRes, knownRes] = await Promise.all([
+    const [labelsRes, knownVehicles] = await Promise.all([
       pool.query(
         `SELECT vl.car_id, vl.name, vl.memo, vl.updated_at
          FROM vehicle_labels vl
          ORDER BY vl.name ASC NULLS LAST, vl.car_id ASC`
       ),
-      // vehicles は (feed_id, car_id) で物理車両1台1行になったため、路線名は「直近に観測した系統」
-      // だけになる。運用者が車両を識別しやすいよう、直近の運行履歴（vehicle_operation_history、
-      // car_id × 曜日区分ごとの直近1日分）の路線も併せて集める。履歴が無ければ直近観測系統にフォールバック。
-      pool.query(
-        `SELECT v.car_id,
-                MAX(v.last_gps_at) AS last_gps_at,
-                COALESCE(
-                  (SELECT array_agg(DISTINCT r2.name)
-                   FROM vehicle_operation_history voh
-                   JOIN routes r2 ON r2.id = voh.route_id
-                   WHERE voh.car_id = v.car_id),
-                  array_remove(array_agg(DISTINCT r.name), NULL)
-                ) AS route_names
-         FROM vehicles v
-         LEFT JOIN routes r ON r.id = v.route_id
-         GROUP BY v.car_id
-         ORDER BY MAX(v.last_gps_at) DESC NULLS LAST, v.car_id ASC`
-      )
+      queryKnownVehicles()
     ]);
     res.json({
       labels: labelsRes.rows.map((row) => ({
@@ -910,11 +922,7 @@ router.get('/admin/vehicle-labels', requireAdminAuth, async (req, res) => {
         memo: row.memo,
         updatedAt: row.updated_at
       })),
-      knownVehicles: knownRes.rows.map((row) => ({
-        carId: row.car_id,
-        lastGpsAt: row.last_gps_at,
-        routeNames: row.route_names || []
-      }))
+      knownVehicles
     });
   } catch (err) {
     console.error('[api] /admin/vehicle-labels 取得エラー:', err);
@@ -945,6 +953,17 @@ router.put('/admin/vehicle-labels/:carId', requireAdminAuth, async (req, res) =>
       await pool.query('DELETE FROM vehicle_labels WHERE car_id = $1', [carId]);
       return res.json({ ok: true, deleted: true });
     }
+    // 車両名は重複不可（ux_vehicle_labels_name）。「車両詳細情報（公開）」で車両名から車両IDを引くため。
+    // どの車両と重なったかを返せるよう先に確かめる（同時保存の競合は下の 23505 で受ける）。
+    if (trimmedName) {
+      const dup = await pool.query(
+        'SELECT car_id FROM vehicle_labels WHERE name = $1 AND car_id <> $2 LIMIT 1',
+        [trimmedName, carId]
+      );
+      if (dup.rows[0]) {
+        return res.status(409).json({ error: `車両名「${trimmedName}」は車両ID「${dup.rows[0].car_id}」で既に使われています。` });
+      }
+    }
     await pool.query(
       `INSERT INTO vehicle_labels (car_id, name, memo, updated_at)
        VALUES ($1, $2, $3, now())
@@ -954,6 +973,9 @@ router.put('/admin/vehicle-labels/:carId', requireAdminAuth, async (req, res) =>
     );
     res.json({ ok: true });
   } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: `車両名「${trimmedName}」は他の車両で既に使われています。` });
+    }
     console.error('[api] /admin/vehicle-labels 保存エラー:', err);
     res.status(500).json({ error: '車両名・メモの保存に失敗しました。' });
   }
@@ -968,6 +990,73 @@ router.delete('/admin/vehicle-labels/:carId', requireAdminAuth, async (req, res)
   } catch (err) {
     console.error('[api] /admin/vehicle-labels 削除エラー:', err);
     res.status(500).json({ error: '車両名・メモの削除に失敗しました。' });
+  }
+});
+
+// ==========================================================
+// 車両詳細情報（公開用。docs/vehicle-profiles.md）。
+// バスアイコン・ノンステップ・車いす対応・支払い方法を car_id ごとに登録し、
+// 利用者向け画面（リアルタイム時刻表・バスマップ・便詳細の「車両詳細」）に出す。
+// 上の「車両名・メモ」（管理専用・非公開）とは別テーブル（vehicle_profiles）。
+// ==========================================================
+
+// GET /api/admin/vehicle-profiles -> 登録一覧＋アイコン選択肢（frontend/images/）＋支払い方法の選択肢＋観測済み車両ID
+router.get('/admin/vehicle-profiles', requireAdminAuth, async (req, res) => {
+  try {
+    const [profiles, knownVehicles, namesRes] = await Promise.all([
+      vehicleProfiles.listProfilesForAdmin(),
+      queryKnownVehicles(),
+      // 車両名（管理用、重複不可）で編集対象の車両を探せるようにするための対応表。管理画面専用。
+      pool.query('SELECT car_id, name FROM vehicle_labels WHERE name IS NOT NULL ORDER BY name ASC')
+    ]);
+    res.json({
+      profiles,
+      icons: vehicleProfiles.listBusIcons(),
+      paymentMethods: vehicleProfiles.PAYMENT_METHODS,
+      knownVehicles,
+      vehicleNames: namesRes.rows.map((row) => ({ carId: row.car_id, name: row.name }))
+    });
+  } catch (err) {
+    console.error('[api] /admin/vehicle-profiles 取得エラー:', err);
+    res.status(500).json({ error: '車両詳細情報の取得に失敗しました。' });
+  }
+});
+
+// PUT /api/admin/vehicle-profiles/:carId -> 追加・更新（car_idキーのUPSERT）。
+// すべて未設定なら行ごと削除する（＝利用者画面は従来の表示に戻る）。
+router.put('/admin/vehicle-profiles/:carId', requireAdminAuth, async (req, res) => {
+  const carId = typeof req.params.carId === 'string' ? req.params.carId.trim() : '';
+  if (!carId || carId.length > 100) {
+    return res.status(400).json({ error: '車両IDが不正です。' });
+  }
+  const normalized = vehicleProfiles.normalizeVehicleProfileInput(
+    req.body || {},
+    vehicleProfiles.listBusIconFiles({ fresh: true })
+  );
+  if (!normalized.ok) return res.status(400).json({ error: normalized.error });
+
+  try {
+    if (normalized.empty) {
+      await vehicleProfiles.deleteProfile(carId);
+      return res.json({ ok: true, deleted: true });
+    }
+    await vehicleProfiles.upsertProfile(carId, normalized.value);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/vehicle-profiles 保存エラー:', err);
+    res.status(500).json({ error: '車両詳細情報の保存に失敗しました。' });
+  }
+});
+
+// DELETE /api/admin/vehicle-profiles/:carId -> 1件削除
+router.delete('/admin/vehicle-profiles/:carId', requireAdminAuth, async (req, res) => {
+  const carId = typeof req.params.carId === 'string' ? req.params.carId.trim() : '';
+  try {
+    await vehicleProfiles.deleteProfile(carId);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[api] /admin/vehicle-profiles 削除エラー:', err);
+    res.status(500).json({ error: '車両詳細情報の削除に失敗しました。' });
   }
 });
 
@@ -1890,6 +1979,14 @@ router.get('/buses-for-map', async (req, res) => {
       }
     }
 
+    // バスアイコン（管理画面「車両詳細情報」）。未登録の車両は従来どおりの丸アイコンで描く。
+    // アイコンは左向きの画像なので、進行方向（heading）で反転・回転させる（vehicleHeading.js）。
+    // 方向の算出はアイコンを登録した車両だけに絞る（丸アイコンは向きを使わない）。
+    const profileByCarId = await vehicleProfiles.getPublicProfilesByCarIds(pool, rows.map((row) => row.car_id));
+    const headingByVehicle = await getVehicleHeadings(pool, rows
+      .filter((row) => { const p = profileByCarId.get(row.car_id); return p && p.iconUrl; })
+      .map((row) => ({ vehicleId: row.vehicle_id, assignmentId: row.assignment_id, lat: row.lat, lng: row.lon })));
+
     const buses = rows.map((row) => ({
       id: row.car_id,
       vehicleId: row.vehicle_id,
@@ -1909,7 +2006,9 @@ router.get('/buses-for-map', async (req, res) => {
       feedId: row.feed_id || null,
       gtfsRouteId: row.feed_id ? unqualifyRouteId(row.route_id, row.feed_id) : null,
       gtfsTripId: row.gtfs_trip_id || null,
-      departureUrlTime: startTimeToUrlHhmm(row.start_time)
+      departureUrlTime: startTimeToUrlHhmm(row.start_time),
+      vehicleProfile: profileByCarId.get(row.car_id) || null,
+      heading: headingByVehicle.has(row.vehicle_id) ? headingByVehicle.get(row.vehicle_id) : null
     }));
 
     // 現在リアルタイム休止中の路線ID一覧（除外の有無にかかわらず添える）。
@@ -3130,6 +3229,14 @@ router.get('/timetable/trips/:feedId/:routeId/:tripId/:departureTime/realtime', 
     const bus = await buildBusEntry(match, qualifyRouteId(routeId, feedId), null);
     bus.feedId = feedId;
     bus.gtfsRouteId = routeId;
+    // 「地図で表示」のバスアイコンを進行方向へ向けるための方位角（アイコン登録車両のみ。vehicleHeading.js）
+    bus.heading = null;
+    if (bus.vehicleProfile && bus.vehicleProfile.iconUrl) {
+      const headings = await getVehicleHeadings(pool, [
+        { vehicleId: match.vehicle_id, assignmentId: match.assignment_id, lat: bus.lat, lng: bus.lng }
+      ]);
+      bus.heading = headings.has(match.vehicle_id) ? headings.get(match.vehicle_id) : null;
+    }
     res.json({ available: true, bus });
   } catch (err) {
     console.error('[api] /timetable/trips/.../realtime エラー:', err);

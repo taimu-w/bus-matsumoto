@@ -13,6 +13,7 @@ const { getArrivalsForAssignment, describeSource } = require('./etaPredictor');
 const { describeArrivalMethod } = require('./passDetection');
 const { getRuntimeSetting } = require('./runtimeSettings');
 const { isRealtimeSuspended } = require('./realtimeSuspension');
+const { getPublicProfilesByCarIds } = require('./vehicleProfiles');
 
 /**
  * daily_trips.start_time（"H:mm"）を便詳細URLの departure_time 表記（"0805"）に変換する。
@@ -132,6 +133,7 @@ async function buildBusEntry(t, routeId, routeName) {
 
   const predictions = await getArrivalsForAssignment(pool, t.assignment_id);
   const predictionBySeq = new Map(predictions.map((p) => [p.seqOrder, p]));
+  const profileByCarId = await getPublicProfilesByCarIds(pool, [t.car_id]);
 
   const stops = stopRows.rows.map((r) => {
     const pred = predictionBySeq.get(r.seq_order);
@@ -166,6 +168,8 @@ async function buildBusEntry(t, routeId, routeName) {
     lat: latestGps ? latestGps.lat : null,
     lng: latestGps ? latestGps.lon : null,
     positionUpdatedAt: latestGps ? latestGps.gps_time_ts : null,
+    // 車両詳細情報（公開用。管理画面「車両詳細情報」で未登録ならnull）
+    vehicleProfile: profileByCarId.get(t.car_id) || null,
     stops
   };
 }
@@ -185,7 +189,7 @@ async function buildBusEntriesBatch(trips, routeId, routeName) {
   const assignmentIds = trips.map((t) => t.assignment_id);
   const vehicleIds = trips.map((t) => t.vehicle_id);
 
-  const [stopRowsResult, latestGpsResult, predictionsResult] = await Promise.all([
+  const [stopRowsResult, latestGpsResult, predictionsResult, profileByCarId] = await Promise.all([
     pool.query(
       `SELECT p.assignment_id, p.stop_id, p.seq_order, p.scheduled_time, p.status,
               p.actual_time, p.delay_minutes, p.interpolated,
@@ -211,7 +215,8 @@ async function buildBusEntriesBatch(trips, routeId, routeName) {
        WHERE assignment_id = ANY($1::int[])
        ORDER BY assignment_id ASC, seq_order ASC`,
       [assignmentIds]
-    )
+    ),
+    getPublicProfilesByCarIds(pool, trips.map((t) => t.car_id))
   ]);
 
   const stopRowsByAssignment = new Map();
@@ -268,6 +273,7 @@ async function buildBusEntriesBatch(trips, routeId, routeName) {
       delayMinutes: t.delay_minutes,
       lat: latestGps ? latestGps.lat : null,
       lng: latestGps ? latestGps.lon : null,
+      vehicleProfile: profileByCarId.get(t.car_id) || null,
       stops
     };
   });
