@@ -3,7 +3,8 @@
 // /api/buses・/api/buses-for-map・便詳細の /realtime が返すバス情報の vehicleProfile
 // （管理画面「車両詳細情報」で登録。未登録の車両は null）を描く。
 // app.js（カード表示・バスマップ）・realtime-diagram.js（基本表示）・timetable.js（便詳細）で共用するため、
-// これらより先に読み込むこと。
+// これらより先に読み込むこと。管理画面（admin.html）でも運行ダッシュボードの地図マーカー用に読み込む
+// （openDetail は利用者向け index.html のモーダル専用で、管理画面では使わない）。
 //
 // アイコン未登録の車両では iconImgHtml() が null を返すので、呼び出し側は従来のアイコン（🚌等）を描く。
 (function () {
@@ -54,8 +55,10 @@
    * 地図マーカー用のバスアイコン（背景・枠なしで画像だけ）。アイコン未登録ならnull。
    * 画像要素は常に MARKER_W×MARKER_H で、それを回転させた外接矩形を枠の大きさにする
    * （戻り値の size は L.divIcon の iconSize にそのまま渡す。下に出す行先ラベルが画像に重ならないように）。
+   * className は枠に足すクラス（管理画面の運行ダッシュボードで選択中を示す is-selected など）。
+   * 利用者向け画面（style.css）と管理画面（admin.css）の両方に .bus-marker-photo の定義がある。
    */
-  function mapMarkerPhoto(profile, heading) {
+  function mapMarkerPhoto(profile, heading, { className = '' } = {}) {
     const { flip, rotate } = markerTransform(heading);
     const transforms = [];
     if (rotate) transforms.push(`rotate(${rotate}deg)`);
@@ -67,7 +70,7 @@
     const w = Math.ceil(Math.abs(MARKER_W * Math.cos(rad)) + Math.abs(MARKER_H * Math.sin(rad)));
     const h = Math.ceil(Math.abs(MARKER_W * Math.sin(rad)) + Math.abs(MARKER_H * Math.cos(rad)));
     return {
-      html: `<div class="bus-marker-photo" style="width:${w}px;height:${h}px;">${img}</div>`,
+      html: `<div class="bus-marker-photo${className ? ` ${esc(className)}` : ''}" style="width:${w}px;height:${h}px;">${img}</div>`,
       size: [w, h]
     };
   }

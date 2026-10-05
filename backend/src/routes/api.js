@@ -2193,6 +2193,12 @@ router.get('/admin/vehicle-positions-map', requireAdminAuth, async (req, res) =>
        ORDER BY vpr.car_id, vpr.gps_time_ts DESC, vpr.id DESC`
     );
 
+    // バスアイコン・進行方向も /api/buses-for-map と同じく載せる（アイコン登録車両だけ方向を算出）。
+    const profileByCarId = await vehicleProfiles.getPublicProfilesByCarIds(pool, result.rows.map((row) => row.car_id));
+    const headingByVehicle = await getVehicleHeadings(pool, result.rows
+      .filter((row) => { const p = profileByCarId.get(row.car_id); return p && p.iconUrl && row.vehicle_id !== null; })
+      .map((row) => ({ vehicleId: row.vehicle_id, assignmentId: row.assignment_id, lat: row.lat, lng: row.lon })));
+
     const vehicles = result.rows.map((row) => ({
       id: row.car_id,
       vehicleId: row.vehicle_id,
@@ -2207,7 +2213,9 @@ router.get('/admin/vehicle-positions-map', requireAdminAuth, async (req, res) =>
       currentHeadsign: null,
       delayMinutes: null,
       gpsTime: row.gps_time,
-      gpsTimeTs: row.gps_time_ts
+      gpsTimeTs: row.gps_time_ts,
+      vehicleProfile: profileByCarId.get(row.car_id) || null,
+      heading: headingByVehicle.has(row.vehicle_id) ? headingByVehicle.get(row.vehicle_id) : null
     }));
 
     res.json({ vehicles });

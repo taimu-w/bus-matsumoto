@@ -133,6 +133,29 @@ input:focus, select:focus, textarea:focus {
   box-shadow: 0 0 0 3px #2563eb, 0 2px 6px rgba(15, 23, 42, 0.35);
 }
 
+/* 車両詳細情報（公開）でバスアイコンを登録した車両の画像マーカー（frontend/style.css と同じ定義。
+   frontend/vehicle-info.js の mapMarkerPhoto が枠の大きさ・画像の向きを style で付ける）。
+   画像を max-width で収めてはいけない（leaflet.css の marker-pane img { max-width: none !important } に負ける）。 */
+.bus-marker-photo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 32px;
+  cursor: pointer;
+}
+.bus-marker-photo img {
+  display: block;
+  flex: none;
+  width: 44px;
+  height: 32px;
+  object-fit: contain;
+}
+/* 選択中：背景・枠を付けない画像なので、車体の輪郭に沿って青い縁取りを付ける */
+.bus-marker-photo.is-selected img {
+  filter: drop-shadow(0 0 1.5px #2563eb) drop-shadow(0 0 1.5px #2563eb) drop-shadow(0 0 1.5px #2563eb);
+}
+
 /* その便が停車予定の全バス停（状態で配色：到着済=緑、付近=amber、未到着=既定は路線色） */
 .stop-marker {
   width: 14px;

@@ -57,13 +57,14 @@
 }
 ```
 
-描画は`frontend/vehicle-info.js`（`window.VehicleInfo`）に一本化してあり、`app.js`・`realtime-diagram.js`・`timetable.js`より先に読み込みます。バスアイコンが未登録（または画像が消えた）車両は、各画面とも従来のアイコン（🚌等）のままです。
+描画は`frontend/vehicle-info.js`（`window.VehicleInfo`）に一本化してあり、`app.js`・`realtime-diagram.js`・`timetable.js`より先に読み込みます。管理画面（`admin.html`）でも運行ダッシュボードの地図マーカー用に読み込みます。マーカーのCSS（`.bus-marker-photo`）は`style.css`と`admin.css`の両方にあるので、変えるときは両方を揃えてください。バスアイコンが未登録（または画像が消えた）車両は、各画面とも従来のアイコン（🚌等）のままです。
 
 | 画面 | 使い方 |
 |---|---|
 | リアルタイム時刻表（カード表示、`app.js`の`createBusCard`） | バスカード左のアイコンを画像に置き換え |
 | リアルタイム時刻表（基本表示、`realtime-diagram.js`の`iconRowHtml`） | リアルタイム便のアイコンを画像に置き換え（時刻表推定便は車両が分からないため対象外） |
 | バスマップ（`app.js`の`createBusIcon`） | 背景・枠を付けず画像だけをマーカーにする（路線カラーは下のラベルで示す。透過PNGを前提とし、画像に塗られた背景はそのまま出る。44×32px、`style.css`の`.bus-marker-photo`） |
+| 管理画面の運行ダッシュボード（`admin-dashboard.js`の`createBusIcon`） | バスマップと同じ画像マーカー（進行方向へ向ける）。選択中は車体の輪郭に青い縁取り（`admin.css`の`.bus-marker-photo.is-selected`）。「担当車両のみ」は`/api/buses-for-map`、「全車両（直近3分）」は`/api/admin/vehicle-positions-map`の`vehicleProfile`/`heading`を使う |
 | 便詳細ページ（リアルタイム表示、`timetable.js`） | 「車両詳細」ボタン → ポップアップ（`#vehicle-detail-modal`）で画像・設備・お支払い方法を表示。「地図で表示」の車両マーカーも画像にする |
 
 「車両詳細」ボタンは、**表示中の便を走っている車両に登録があるときだけ**出します（未登録の車両でボタンを出しても「情報がありません」としか表示できないため）。
@@ -72,7 +73,7 @@
 
 登録する画像は**すべて左向きの横顔**である前提です。地図（北が上）では進行方向に合わせて向きを変えます。
 
-- サーバー（`services/vehicleHeading.js`の`getVehicleHeadings()`）が進行方向の方位角`heading`（度。真北=0・東=90・時計回り。算出できなければ`null`）を求め、`/api/buses-for-map`の各バスと`/api/timetable/trips/.../realtime`の`bus`に載せます。対象はバスアイコンを登録した車両だけです（🚌の丸アイコンは向きを使わないため、算出のクエリを省く）。
+- サーバー（`services/vehicleHeading.js`の`getVehicleHeadings()`）が進行方向の方位角`heading`（度。真北=0・東=90・時計回り。算出できなければ`null`）を求め、`/api/buses-for-map`・`/api/admin/vehicle-positions-map`の各バスと`/api/timetable/trips/.../realtime`の`bus`に載せます。対象はバスアイコンを登録した車両だけです（🚌の丸アイコンは向きを使わないため、算出のクエリを省く）。
   1. **走行軌跡**：最新の測位と、直近5分以内で20m以上離れたいちばん新しい測位を結んだ向き。20mのしきいは、停車中のGPSの揺らぎで向きが暴れないようにするためです。
   2. **次のバス停**：走行軌跡が取れない（停車中・始発で発車待ち等）ときは、最後に到着したバス停より先のバス停のうち、現在地から30m以上離れた最初のものへの向き。
   3. どちらも取れなければ`null`（画像のまま左向き）。取得に失敗した場合も空のMap（全車両そのままの向き）を返すsoft-failです。

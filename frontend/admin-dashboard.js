@@ -64,16 +64,37 @@
   }
 
   /* ---------- バスアイコン（app.js の createBusIcon と同じ見た目） ---------- */
+  // 管理画面「車両詳細情報（公開）」でバスアイコンを登録した車両は、その画像を進行方向（APIの heading）へ
+  // 向けて描く（frontend/vehicle-info.js の mapMarkerPhoto。利用者向けバスマップと同じ）。未登録なら🚌の丸。
   function createBusIcon(bus, isSelected) {
     const bg = normalizeRouteColor(bus.routeColor, '#ef4444');
     const labelBg = normalizeRouteColor(bus.routeColor, '#334155');
     const labelFg = normalizeRouteColor(bus.routeTextColor, '#ffffff');
     const label = bus.currentHeadsign || bus.headsign || '';
+    const labelHtml = label
+      ? `<div class="bus-marker-label" style="background:${labelBg};color:${labelFg};">${escapeHtml(label)}</div>`
+      : '';
+    const photo = window.VehicleInfo
+      ? window.VehicleInfo.mapMarkerPhoto(bus.vehicleProfile, bus.heading, { className: isSelected ? 'is-selected' : '' })
+      : null;
+    if (photo) {
+      const [w, h] = photo.size;
+      return L.divIcon({
+        html: `
+          <div class="bus-marker-wrap">
+            ${photo.html}
+            ${labelHtml}
+          </div>`,
+        iconSize: [w, h],
+        iconAnchor: [w / 2, h / 2],
+        className: 'bus-marker'
+      });
+    }
     return L.divIcon({
       html: `
         <div class="bus-marker-wrap">
           <div class="bus-marker-body${isSelected ? ' is-selected' : ''}" style="background:${bg};">🚌</div>
-          ${label ? `<div class="bus-marker-label" style="background:${labelBg};color:${labelFg};">${escapeHtml(label)}</div>` : ''}
+          ${labelHtml}
         </div>`,
       iconSize: [32, 32],
       iconAnchor: [16, 16],

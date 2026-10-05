@@ -1275,6 +1275,7 @@
        defer付きの外部scriptはこの記述順のままDOM解析完了後にまとめて実行されるため、
        「admin-core.js→各admin-*.js→admin-router.jsの順に読み込む」という暗黙の依存は崩れない
        （docs/system-review-2026-09.md F-7）。 -->
+  <script src="/vehicle-info.js" defer></script>
   <script src="/admin-core.js" defer></script>
   <script src="/admin-dashboard.js" defer></script>
   <script src="/admin-vehicle-operation-status.js" defer></script>
