@@ -6,7 +6,15 @@
  * routesearch.js）はここが提供する starButtonHtml() でボタンを描画するだけでよく、
  * トグル処理・永続化・ボタンの見た目更新は本ファイルに一本化する。
  *
- * お気に入り1件は { id, type, title, subtitle, url, addedAt } の形。
+ * お気に入り1件は { id, type, title, subtitle, url, addedAt, titleI18n?, subtitleI18n? } の形。
+ * - title / subtitle: 登録時点の日本語の表示文字列（日本語表示ではこれをそのまま出す）。
+ * - titleI18n / subtitleI18n（任意）: 日本語以外で表示するときの組み立て方（docs/i18n.md）。
+ *   [種別, ...] の配列を並べたもので、種別は
+ *     ['name', 日本語名, kind]  … バス停名・路線名などの固有名詞（I18n.nameHtml で訳＋日本語併記）
+ *     ['t', 文言キー, params]   … UI文言（params の値にも ['name', …] を入れられる）
+ *     ['s', 文字列]             … そのまま出す文字列
+ *   無い場合（単純な名前だけのお気に入り・この仕組みより前に登録したもの）は、
+ *   title を固有名詞として、subtitle をUI文言として訳せるだけ訳す。
  * - id: 種別ごとに一意な文字列（例: "busstop|{stopKey}|{platform}"）。
  *   同じ対象を指すidで登録し直すと addedAt を保った上で内容だけ更新する（名前変更等に利用）。
  * - url: タップ時の遷移先。ハッシュ（#/realtime/...）とパス（/busstop/...）の
@@ -91,6 +99,49 @@
     return keys;
   }
 
+  /* ---------- 表示言語に合わせた題名・副題 ---------- */
+  function renderSegment(seg, html) {
+    const I = window.I18n;
+    if (!Array.isArray(seg)) return html ? I.escapeHtml(seg) : String(seg);
+    const [type, a, b] = seg;
+    if (type === 'name') return html ? I.nameHtml(a, b) : I.nameText(a, b);
+    if (type === 't') {
+      const params = {};
+      Object.keys(b || {}).forEach((key) => {
+        const v = b[key];
+        params[key] = typeof v === 'number' ? v : renderSegment(v, html);
+      });
+      return html ? I.tHtml(a, params) : I.t(a, params);
+    }
+    return html ? I.escapeHtml(a) : String(a === undefined ? '' : a);
+  }
+
+  function renderSpec(spec, html) {
+    return spec.map((seg) => renderSegment(seg, html)).join('');
+  }
+
+  /** お気に入り一覧の題名（HTML）。 */
+  function titleHtml(fav) {
+    const I = window.I18n;
+    if (!I || I.isJa) return escAttr(fav.title || '');
+    if (Array.isArray(fav.titleI18n)) return renderSpec(fav.titleI18n, true);
+    return I.nameHtml(fav.title || '', 'any');
+  }
+
+  /** お気に入り一覧の副題（HTML）。 */
+  function subtitleHtml(fav) {
+    const I = window.I18n;
+    if (!I || I.isJa) return escAttr(fav.subtitle || '');
+    if (Array.isArray(fav.subtitleI18n)) return renderSpec(fav.subtitleI18n, true);
+    const subtitle = fav.subtitle || '';
+    return I.has(subtitle) ? I.escapeHtml(I.t(subtitle)) : I.nameHtml(subtitle, 'any');
+  }
+
+  function starTitle(active) {
+    const t = window.I18n ? window.I18n.t : (s) => s;
+    return active ? t('お気に入り解除') : t('お気に入りに登録');
+  }
+
   function starIconSvg(active) {
     const path = 'M12 3.5l2.6 5.4 5.9.7-4.3 4.1 1.1 5.9L12 16.9l-5.3 2.7 1.1-5.9-4.3-4.1 5.9-.7L12 3.5z';
     return active
@@ -106,12 +157,12 @@
     const active = isFavorite(fav.id);
     return `<button type="button" data-fav-star data-fav="${escAttr(JSON.stringify(fav))}"
               class="${size} shrink-0 flex items-center justify-center rounded-full border-2 p-1.5 transition-all active:scale-90 ${active ? 'bg-amber-50 border-amber-300' : 'bg-white border-gray-200'} ${extraClass}"
-              aria-pressed="${active}" title="${active ? 'お気に入り解除' : 'お気に入りに登録'}">${starIconSvg(active)}</button>`;
+              aria-pressed="${active}" title="${escAttr(starTitle(active))}">${starIconSvg(active)}</button>`;
   }
 
   function applyButtonState(btn, active) {
     btn.setAttribute('aria-pressed', String(active));
-    btn.title = active ? 'お気に入り解除' : 'お気に入りに登録';
+    btn.title = starTitle(active);
     btn.classList.toggle('bg-amber-50', active);
     btn.classList.toggle('border-amber-300', active);
     btn.classList.toggle('bg-white', !active);
@@ -136,5 +187,5 @@
     if (typeof window.onFavoritesChanged === 'function') window.onFavoritesChanged();
   });
 
-  window.Favorites = { list, get, add, remove, toggle, isFavorite, starButtonHtml, favoriteBusStopKeys };
+  window.Favorites = { list, get, add, remove, toggle, isFavorite, starButtonHtml, favoriteBusStopKeys, titleHtml, subtitleHtml };
 })();

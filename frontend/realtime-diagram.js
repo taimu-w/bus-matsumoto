@@ -13,6 +13,11 @@
  * IIFE先頭でconstに捕まえるとundefinedを捕まえてしまう）。
  */
 (function () {
+  // 多言語表示（i18n.js）
+  const I18n = window.I18n;
+  const t = I18n.t;
+  const nameHtml = I18n.nameHtml;
+
   function escapeHtml(str) {
     if (str === null || str === undefined) return '';
     return String(str)
@@ -91,6 +96,8 @@
           patternKey: g.patternKey,
           directionId: g.directionId,
           label: `${cluster.origin.stopName} → ${cluster.dest.stopName}`,
+          // 画面に出すのはこちら（英語表示では各バス停名を訳して日本語を添える）。label は並べ替え用。
+          labelHtml: `${nameHtml(cluster.origin.stopName, 'stop')} → ${nameHtml(cluster.dest.stopName, 'stop')}`,
           activeCount: countActiveForGroup(g.tripIds, buses, unsupportedTrips)
         });
         continue;
@@ -110,18 +117,21 @@
       for (const g of cluster.groups) {
         const viaStop = g.stops[commonLen] || g.stops[g.stops.length - 1];
         let viaLabel = viaStop.stopName;
+        let viaSuffix = '';
         // 3経路以上が同一クラスタに属す場合、共通接頭辞の直後がたまたま一致することがある
         // （構造的にあり得るため、実データで未発生でも防御的にサフィックスで区別する）。
         if (used.has(viaLabel)) {
           let n = 2;
           while (used.has(`${viaLabel}(${n})`)) n++;
-          viaLabel = `${viaLabel}(${n})`;
+          viaSuffix = `(${n})`;
+          viaLabel = `${viaLabel}${viaSuffix}`;
         }
         used.add(viaLabel);
         options.push({
           patternKey: g.patternKey,
           directionId: g.directionId,
           label: `${cluster.origin.stopName} → ${viaLabel}経由 → ${cluster.dest.stopName}`,
+          labelHtml: `${nameHtml(cluster.origin.stopName, 'stop')} → ${I18n.tHtml('{via}経由', { via: `${nameHtml(viaStop.stopName, 'stop')}${escapeHtml(viaSuffix)}` })} → ${nameHtml(cluster.dest.stopName, 'stop')}`,
           activeCount: countActiveForGroup(g.tripIds, buses, unsupportedTrips)
         });
       }
@@ -176,7 +186,7 @@
     let iconBg;
     if (kind === 'realtime') {
       const delay = record.delayMinutes || 0;
-      const delayLabel = delay <= 1 ? '定刻通り' : `+${delay}分`;
+      const delayLabel = delay <= 1 ? t('定刻通り') : t('+{n}分', { n: delay });
       const delayClass = delay >= 5 ? 'bg-red-600 text-white' : 'bg-blue-100 text-blue-800';
       badgeHtml = `<span class="text-xs font-bold ${delayClass} px-2 py-0.5 rounded-full" data-role="rt-bus-icon">${escapeHtml(delayLabel)}</span>`;
       headsignLabel = record.currentHeadsign || record.headsign || '';
@@ -184,19 +194,19 @@
     } else {
       // 時刻表推定便は実遅延データが無いため、遅れ・定刻の文言は出さず「推定」バッジのみにする
       // （createUnsupportedBusCardと同じ方針。ユーザー確認済み）。
-      badgeHtml = `<span class="text-[10px] font-bold text-gray-600 bg-gray-100 px-2 py-0.5 rounded-full border border-gray-200" data-role="rt-bus-icon">推定</span>`;
+      badgeHtml = `<span class="text-[10px] font-bold text-gray-600 bg-gray-100 px-2 py-0.5 rounded-full border border-gray-200" data-role="rt-bus-icon">${escapeHtml(t('推定'))}</span>`;
       headsignLabel = record.headsign || '';
       iconBg = 'bg-gray-400';
     }
 
     const beforeStartBadge = beforeStart
-      ? `<span class="text-[10px] font-bold text-gray-400">発車前</span>`
+      ? `<span class="text-[10px] font-bold text-gray-400">${escapeHtml(t('発車前'))}</span>`
       : '';
 
     // リアルタイム便で、管理画面「車両詳細情報」にバスアイコンを登録した車両はその画像で描く
     // （時刻表推定便は車両が分からないため常に従来のアイコン）。
     const vehicleImg = kind === 'realtime' && window.VehicleInfo
-      ? window.VehicleInfo.iconImgHtml(record.vehicleProfile, 'max-w-full max-h-full object-contain', 'バス')
+      ? window.VehicleInfo.iconImgHtml(record.vehicleProfile, 'max-w-full max-h-full object-contain', t('バス'))
       : null;
     const iconHtml = vehicleImg
       ? `<span class="w-12 h-9 flex items-center justify-center shrink-0 cursor-pointer active:opacity-60" data-role="rt-bus-icon">${vehicleImg}</span>`
@@ -207,7 +217,7 @@
         ${iconHtml}
         ${badgeHtml}
         ${beforeStartBadge}
-        ${headsignLabel ? `<span class="text-[11px] text-gray-500 font-bold truncate">${escapeHtml(headsignLabel)}行き</span>` : ''}
+        ${headsignLabel ? `<span class="text-[11px] text-gray-500 font-bold truncate">${I18n.tHtml('{dest}行き', { dest: nameHtml(headsignLabel, 'headsign') })}</span>` : ''}
       </div>
     `;
   }
@@ -218,11 +228,11 @@
     const passed = stop.isThrough;
     const tagClass = 'text-[10px] font-bold px-1.5 py-0.5 rounded border';
     const tags = [
-      index === 0 ? `<span class="${tagClass} text-emerald-700 bg-emerald-50 border-emerald-200">始発</span>` : '',
-      index === total - 1 ? `<span class="${tagClass} text-rose-700 bg-rose-50 border-rose-200">終点</span>` : '',
-      passed ? `<span class="${tagClass} text-gray-500 bg-gray-100 border-gray-200">通過</span>` : '',
-      !passed && stop.noPickup && index !== total - 1 ? `<span class="${tagClass} text-gray-500 bg-gray-100 border-gray-200">降車のみ</span>` : '',
-      !passed && stop.noDropOff && index !== 0 ? `<span class="${tagClass} text-gray-500 bg-gray-100 border-gray-200">乗車のみ</span>` : ''
+      index === 0 ? `<span class="${tagClass} text-emerald-700 bg-emerald-50 border-emerald-200">${escapeHtml(t('始発'))}</span>` : '',
+      index === total - 1 ? `<span class="${tagClass} text-rose-700 bg-rose-50 border-rose-200">${escapeHtml(t('終点'))}</span>` : '',
+      passed ? `<span class="${tagClass} text-gray-500 bg-gray-100 border-gray-200">${escapeHtml(t('通過'))}</span>` : '',
+      !passed && stop.noPickup && index !== total - 1 ? `<span class="${tagClass} text-gray-500 bg-gray-100 border-gray-200">${escapeHtml(t('降車のみ'))}</span>` : '',
+      !passed && stop.noDropOff && index !== 0 ? `<span class="${tagClass} text-gray-500 bg-gray-100 border-gray-200">${escapeHtml(t('乗車のみ'))}</span>` : ''
     ].filter(Boolean).join(' ');
     return tags ? `<div class="flex flex-wrap gap-1 mt-0.5">${tags}</div>` : '';
   }
@@ -234,7 +244,7 @@
         <div class="min-w-0">
           <span data-role="rt-stop-name" data-stop-name="${escapeHtml(stop.stopName)}"
                 data-feed-id="${escapeHtml(feedId)}" data-gtfs-stop-id="${escapeHtml(String(stop.gtfsStopId || ''))}"
-                class="font-bold text-gray-800 underline decoration-dotted cursor-pointer active:text-blue-700">${escapeHtml(stop.stopName)}</span>
+                class="font-bold text-gray-800 underline decoration-dotted cursor-pointer active:text-blue-700">${nameHtml(stop.stopName, 'stop')}</span>
           ${stopTagsHtml(stop, index, total)}
         </div>
       </div>
@@ -244,7 +254,7 @@
   const sectionHeadingHtml = `
     <h2 class="text-xl font-bold text-blue-900 flex items-center mb-4">
       <span class="w-2 h-6 bg-green-500 rounded-full mr-2 shadow-sm"></span>
-      リアルタイム運行状況
+      ${escapeHtml(t('リアルタイム運行状況'))}
     </h2>
   `;
 
@@ -252,9 +262,9 @@
     container.innerHTML = `
       ${sectionHeadingHtml}
       <div class="rounded-xl border-2 border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-        <p class="font-bold">この路線のリアルタイム運行情報は一時休止しています。</p>
-        ${reason ? `<p class="mt-1">理由：${escapeHtml(reason)}</p>` : ''}
-        <p class="mt-1 text-amber-800">下の時刻表は通常どおりご利用いただけます。</p>
+        <p class="font-bold">${escapeHtml(t('この路線のリアルタイム運行情報は一時休止しています。'))}</p>
+        ${reason ? `<p class="mt-1">${escapeHtml(t('理由：{reason}', { reason }))}</p>` : ''}
+        <p class="mt-1 text-amber-800">${escapeHtml(t('下の時刻表は通常どおりご利用いただけます。'))}</p>
       </div>
     `;
   }
@@ -262,25 +272,25 @@
   function renderEmptyNotice(container) {
     container.innerHTML = `
       ${sectionHeadingHtml}
-      <p class="text-sm text-gray-500 px-1">現在表示できる運行データがありません。</p>
+      <p class="text-sm text-gray-500 px-1">${escapeHtml(t('現在表示できる運行データがありません。'))}</p>
     `;
   }
 
   function selectionActivityBadgeHtml(activeCount) {
     return activeCount > 0
-      ? `<span class="shrink-0 text-[10px] font-bold text-green-700 bg-green-50 px-2 py-1 rounded-full border border-green-200 flex items-center gap-1"><span class="w-1.5 h-1.5 bg-green-500 rounded-full"></span>運行中 ${activeCount}台</span>`
-      : `<span class="shrink-0 text-[10px] font-bold text-gray-500 bg-gray-100 px-2 py-1 rounded-full border border-gray-200">現在運行なし</span>`;
+      ? `<span class="shrink-0 text-[10px] font-bold text-green-700 bg-green-50 px-2 py-1 rounded-full border border-green-200 flex items-center gap-1"><span class="w-1.5 h-1.5 bg-green-500 rounded-full"></span>${escapeHtml(t('運行中 {n}台', { n: activeCount }))}</span>`
+      : `<span class="shrink-0 text-[10px] font-bold text-gray-500 bg-gray-100 px-2 py-1 rounded-full border border-gray-200">${escapeHtml(t('現在運行なし'))}</span>`;
   }
 
   function renderSelectionScreen(container, options, routeId) {
     container.innerHTML = `
       ${sectionHeadingHtml}
-      <p class="text-sm text-gray-500 mb-3 px-1">この路線には複数の経路があります。表示する経路を選んでください。</p>
+      <p class="text-sm text-gray-500 mb-3 px-1">${escapeHtml(t('この路線には複数の経路があります。表示する経路を選んでください。'))}</p>
       <div class="space-y-3">
         ${options.map((opt) => `
           <a href="${escapeHtml(patternHref(routeId, opt.patternKey))}"
              class="flex items-center justify-between gap-3 bg-white rounded-xl border-2 border-gray-100 shadow-sm hover:border-blue-400 active:scale-[0.99] transition-all p-4">
-            <span class="font-bold text-gray-900">${escapeHtml(opt.label)}</span>
+            <span class="font-bold text-gray-900">${opt.labelHtml}</span>
             ${selectionActivityBadgeHtml(opt.activeCount || 0)}
           </a>
         `).join('')}
@@ -330,11 +340,11 @@
       : '';
 
     const changeLinkHtml = showChangeLink
-      ? `<a href="${escapeHtml(baseHref(routeId))}" class="inline-block text-xs font-bold text-blue-700 mb-3">← 経路を変更</a>`
+      ? `<a href="${escapeHtml(baseHref(routeId))}" class="inline-block text-xs font-bold text-blue-700 mb-3">${escapeHtml(t('← 経路を変更'))}</a>`
       : '';
 
     const emptyHtml = (filteredBuses.length === 0 && filteredUnsupported.length === 0)
-      ? `<p class="text-sm text-gray-500 px-1 mt-3">現在この経路で運行中のバスはありません。</p>`
+      ? `<p class="text-sm text-gray-500 px-1 mt-3">${escapeHtml(t('現在この経路で運行中のバスはありません。'))}</p>`
       : '';
 
     container.innerHTML = `

@@ -16,6 +16,9 @@
  * ========================================================== */
 (function () {
   const API_BASE = '/api';
+  // 多言語表示（i18n.js）
+  const I18n = window.I18n;
+  const t = I18n.t;
   // このズームレベル以上に拡大したら、常時バス停名を表示する（要望対応）。
   const STOP_NAME_ZOOM_THRESHOLD = 14;
 
@@ -103,7 +106,7 @@
         fillColor: '#14b8a6',
         fillOpacity: 0.9
       }).addTo(mapInstance);
-      marker.bindTooltip(stop.stopName || '', {
+      marker.bindTooltip(I18n.nameHtml(stop.stopName || '', 'stop'), {
         direction: 'top',
         offset: [0, -4],
         permanent: mapInstance.getZoom() >= STOP_NAME_ZOOM_THRESHOLD
@@ -139,15 +142,15 @@
   }
 
   async function loadStops() {
-    setStatus('バス停を読み込み中...');
+    setStatus(t('バス停を読み込み中...'));
     try {
       const data = await fetchJson(`${API_BASE}/timetable/stops/map`);
       const stops = data.stops || [];
       addStopMarkers(stops);
-      setStatus(stops.length > 0 ? `バス停 ${stops.length}件を表示中` : 'バス停が見つかりませんでした。');
+      setStatus(stops.length > 0 ? t('バス停 {n}件を表示中', { n: stops.length }) : t('バス停が見つかりませんでした。'));
     } catch (err) {
       console.error('バス停マップの取得エラー:', err);
-      setStatus('バス停情報の取得に失敗しました。');
+      setStatus(t('バス停情報の取得に失敗しました。'));
     }
   }
 
@@ -172,7 +175,7 @@
         fillColor: '#2563eb',
         fillOpacity: 1
       }).addTo(mapInstance);
-      userMarker.bindPopup('現在地');
+      userMarker.bindPopup(I18n.escapeHtml(t('現在地')));
     }
   }
 
@@ -180,7 +183,7 @@
     const section = document.getElementById('section-stopmap');
     if (!section) return;
     section.style.display = 'block';
-    if (typeof window.setPageTitle === 'function') window.setPageTitle('バス停マップ', 'Stop Map');
+    if (typeof window.setPageTitle === 'function') window.setPageTitle(t('バス停マップ'), 'Stop Map');
     if (!initializeMap()) return;
     await loadStops();
     centerOnUserLocation();

@@ -20,6 +20,7 @@ const { getEnabledGtfsFeedIds, getPlatformDisplayNameFeedPriority } = require('.
 const { readCsv, readCsvIfExists } = require('../utils/csv');
 const { readShapePointsByShapeId, resolveTripShapeId } = require('./gtfsShapes');
 const { readFrequenciesByTripId, expandFrequencies } = require('./gtfsFrequencies');
+const { createTransferIndex, parseTransferRules, addTransferRules } = require('./gtfsTransfers');
 const { haversineDistanceMeters, estimateWalkMinutes } = require('../utils/geo');
 const {
   toHiragana,
@@ -55,6 +56,38 @@ let buildingPromise = null;
 
 function makeKey(feedId, id) {
   return `${feedId}${SEP}${id}`;
+}
+
+/**
+ * GTFSの URL 項目（stop_url など）を画面のリンクに使える形にする。
+ * http(s) 以外（javascript: など）や不正な値は空文字にして、リンクを出さない。
+ */
+function safeHttpUrl(value) {
+  const raw = String(value || '').trim();
+  if (!/^https?:\/\//i.test(raw)) return '';
+  try {
+    return new URL(raw).toString();
+  } catch (err) {
+    return '';
+  }
+}
+
+/**
+ * 全標柱が同じ値を持つときだけその値を返す（1本でも違えば空文字）。
+ * stop_desc などをバス停（標柱の集合）単位で出してよいかの判定に使う。
+ */
+function commonPlatformValue(platforms, field) {
+  const values = new Set(platforms.map((p) => p[field] || ''));
+  return values.size === 1 ? values.values().next().value : '';
+}
+
+/** 標柱の付帯情報（stop_code / stop_desc / stop_url）。画面の「バス停情報」表示用。 */
+function serializeStopInfo(stop) {
+  return {
+    stopCode: stop.stopCode || '',
+    stopDesc: stop.stopDesc || '',
+    stopUrl: stop.stopUrl || ''
+  };
 }
 
 /**
@@ -355,6 +388,7 @@ function loadFeed(index, feedId) {
       shortName: (row.route_short_name || '').trim(),
       longName: (row.route_long_name || '').trim(),
       name: (row.route_long_name || row.route_short_name || routeId).trim(),
+      description: (row.route_desc || '').trim(),
       color: (row.route_color || '').trim(),
       textColor: (row.route_text_color || '').trim(),
       agencyName: agencyNameById.get(agencyId) || defaultAgencyName || ''
@@ -377,6 +411,9 @@ function loadFeed(index, feedId) {
       stopKey: makeKey(feedId, stopId),
       stopCode: (row.stop_code || '').trim(),
       name,
+      // バス停の補足説明。GTFS-JPでは同名バス停の見分けに使われることが多い（例:「松本市鎌田」）
+      stopDesc: (row.stop_desc || '').trim(),
+      stopUrl: safeHttpUrl(row.stop_url),
       lat: Number.parseFloat(row.stop_lat),
       lon: Number.parseFloat(row.stop_lon),
       locationType: Number.parseInt(row.location_type || '0', 10) || 0,
@@ -395,6 +432,19 @@ function loadFeed(index, feedId) {
     index.stops.set(stop.stopKey, stop);
     feedStops.push(stop);
   }
+
+  // --- transfers（任意ファイル。経路検索の乗換時間 min_transfer_time、services/gtfsTransfers.js） ---
+  // 駅（親停留所）を指す行は配下の標柱へ展開するため、親 → 子の対応を渡す。
+  const childStopIdsByParent = new Map();
+  for (const stop of feedStops) {
+    if (!stop.parentStation) continue;
+    if (!childStopIdsByParent.has(stop.parentStation)) childStopIdsByParent.set(stop.parentStation, []);
+    childStopIdsByParent.get(stop.parentStation).push(stop.stopId);
+  }
+  addTransferRules(
+    index.transfers,
+    parseTransferRules(readCsvIfExists('transfers.txt', feedId), { feedId, makeKey, childStopIdsByParent })
+  );
 
   // --- shapes（任意ファイル。便詳細「地図で表示」に重ねる線形の供給元） ---
   // 無いフィードでは空のMapが返り、便の shapeId が全部 null になるだけ。
@@ -421,6 +471,8 @@ function loadFeed(index, feedId) {
       serviceKey: makeKey(feedId, (row.service_id || '').trim()),
       directionId: Number.parseInt(row.direction_id || '0', 10) || 0,
       headsign: (row.trip_headsign || '').trim(),
+      // 便名・便番号（trip_short_name）。無いフィードでは空文字
+      shortName: (row.trip_short_name || '').trim(),
       shapeId,
       shapeKey: shapeId ? makeKey(feedId, shapeId) : null,
       firstDepartureSeconds: NaN,
@@ -827,7 +879,9 @@ async function buildIndex() {
     // フィードID → { startDate, endDate }（"YYYYMMDD"）または null。GTFSデータの有効期間。
     feedValidity: new Map(),
     groups: new Map(),
-    groupAliases: new Map()
+    groupAliases: new Map(),
+    // 乗換時間の指定（transfers.txt の min_transfer_time）。経路検索だけが使う。
+    transfers: createTransferIndex()
   };
 
   const stopsByFeed = new Map();
@@ -1042,6 +1096,8 @@ function serializeStopSummary(index, group) {
     lat: group.lat,
     lon: group.lon,
     platformCount: group.platforms.length,
+    // 標柱の補足説明（stop_desc）の重複なし一覧。検索結果で同名バス停を見分けるのに使う
+    stopDescs: Array.from(new Set(group.platforms.map((p) => p.stopDesc).filter(Boolean))),
     feedIds: group.feedIds,
     routes: (group.routeKeys || [])
       .map((routeKey) => index.routes.get(routeKey))
@@ -1231,6 +1287,7 @@ async function getStopTimetable(stopKey, { date, platform } = {}) {
           routeId: trip.routeId,
           tripId: trip.tripId,
           tripDepartureTime: formatHhmm(instance.tripStartSeconds),
+          tripShortName: trip.shortName || '',
           serviceId: trip.serviceId,
           directionId: trip.directionId,
           headsign: resolveHeadsign(stopTime, trip),
@@ -1287,7 +1344,11 @@ async function getStopTimetable(stopKey, { date, platform } = {}) {
       nameRomaji: group.romaji || null,
       lat: group.lat,
       lon: group.lon,
-      aliases: group.aliases
+      aliases: group.aliases,
+      // 全標柱に共通する stop_code / stop_desc / stop_url（すべての乗り場の統合表示で使う）
+      stopCode: commonPlatformValue(group.platforms, 'stopCode'),
+      stopDesc: commonPlatformValue(group.platforms, 'stopDesc'),
+      stopUrl: commonPlatformValue(group.platforms, 'stopUrl')
     },
     requestedStopKey: stopKey,
     // 標柱が複数ある場合のみ表示モード切替を出す（仕様書 3.4 A）
@@ -1348,6 +1409,7 @@ function serializePlatform(index, stop, activeServices) {
     feedId: stop.feedId,
     platformKey: `${stop.feedId}_${stop.stopId}`,
     platformCode: stop.platformCode || '',
+    ...serializeStopInfo(stop),
     stopName: stop.name,
     lat: stop.lat,
     lon: stop.lon,
@@ -1481,6 +1543,7 @@ async function getTripDetail(feedId, routeId, tripId, departureTime, { stopId } 
     agencyName: route ? route.agencyName : '',
     headsign: displayHeadsign,
     tripHeadsign: trip.headsign || '',
+    tripShortName: trip.shortName || '',
     serviceId: trip.serviceId,
     directionId: trip.directionId,
     // この便が走る経路の線形（GTFS shapes.txt 由来、`[[lat, lon], ...]`）。

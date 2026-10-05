@@ -37,6 +37,7 @@ const {
   startTimeToUrlHhmm
 } = require('../services/realtimeTripLookup');
 const { getApproachingBuses } = require('../services/busStopApproaching');
+const { getNameDictionary } = require('../services/nameTranslations');
 const { getOperationHistoryByCarIds } = require('../services/vehicleOperationHistory');
 const { listLinkableTrips, linkVehicleToTrip, unlinkAssignment } = require('../services/manualAssignment');
 const { SUCCESS_END_REASONS } = require('../services/finishService');
@@ -326,7 +327,7 @@ router.delete('/admin/session', (req, res) => {
 router.get('/routes', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, short_name, color, text_color
+      `SELECT id, name, short_name, COALESCE(description, '') AS description, color, text_color
        FROM routes
        ORDER BY id ASC`
     );
@@ -402,6 +403,24 @@ router.get('/settings', async (req, res) => {
   } catch (err) {
     console.error('[api] /settings エラー:', err);
     res.status(500).json({ error: 'システム設定の取得に失敗しました。' });
+  }
+});
+
+// GET /api/i18n/names?lang=en -> 利用者画面の多言語表示用の名称辞書（docs/i18n.md）
+// 日本語のバス停名・路線名・行き先・事業者名 → 表示言語の名称（GTFS translations.txt の訳、
+// 無ければかなからのローマ字表記）。APIの各レスポンスは日本語名のまま返し、画面側でこの辞書を引く。
+// GTFS更新時にしか変わらないので、ブラウザに短時間キャッシュさせる。
+router.get('/i18n/names', (req, res) => {
+  const lang = String(req.query.lang || '').trim();
+  if (lang && !/^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})*$/.test(lang)) {
+    return res.status(400).json({ error: 'lang が不正です。' });
+  }
+  try {
+    res.setHeader('Cache-Control', 'public, max-age=600');
+    res.json(getNameDictionary(lang));
+  } catch (err) {
+    console.error('[api] /i18n/names エラー:', err);
+    res.status(500).json({ error: '名称辞書の取得に失敗しました。' });
   }
 });
 
@@ -2849,6 +2868,7 @@ router.post('/admin/gtfs-feeds/:feedId/refetch', requireAdminAuth, async (req, r
         require('../services/dailyTripBuilder').invalidateDailyTripCache();
         require('../services/gtfsTimetable').invalidateTimetableIndex();
         require('../services/gtfsFare').invalidateFareIndex();
+        require('../services/nameTranslations').invalidateNameTranslations();
         // 指紋の確定はseed()成功後（失敗した回の指紋を残すと毎時の更新が
         // 「内容不変」と誤判定してDBが古いまま固定される）。
         if (result.fingerprint) {

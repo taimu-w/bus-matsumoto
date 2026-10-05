@@ -11,7 +11,7 @@
 //    このプロジェクトはファイル名にハッシュを付けていないため、デプロイ後も利用者が
 //    ずっと古いapp.js等を見続ける事故になる。SWが効くのはオフラインでネットワークに
 //    失敗したときだけ。
-const CACHE_NAME = 'bustime-shell-v1';
+const CACHE_NAME = 'bustime-shell-v2';
 
 const SHELL_URLS = [
   '/',
@@ -24,6 +24,8 @@ const SHELL_URLS = [
   '/vendor/leaflet/images/marker-icon.png',
   '/vendor/leaflet/images/marker-icon-2x.png',
   '/vendor/leaflet/images/marker-shadow.png',
+  '/i18n.js',
+  '/i18n-en.js',
   '/favorites.js',
   '/spot-photos.js',
   '/timetable.js',

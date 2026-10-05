@@ -1,5 +1,8 @@
 const API_BASE = '/api';
 const POLL_MS = 20000;
+// 多言語表示（i18n.js）。t() はUI文言、I18n.nameHtml()/nameText() はバス停名・路線名などの固有名詞。
+const I18n = window.I18n;
+const t = I18n.t;
 // 自動更新をまたいで保持する状態（開いているアコーディオン・スクロール位置）
 const openTripKeys = new Set();
 
@@ -146,7 +149,7 @@ window.navigateToBusStopByFeedStop = navigateToBusStopByFeedStop;
  */
 function formatDelayLabel(minutes) {
   if (minutes === null || minutes === undefined) return '';
-  return minutes <= 1 ? '定刻通り' : `${minutes}分遅れ`;
+  return minutes <= 1 ? t('定刻通り') : t('{n}分遅れ', { n: minutes });
 }
 
 /* ---------- モーダル（CSSクラス .modal-hidden の付け外しで制御） ---------- */
@@ -168,9 +171,7 @@ document.addEventListener('click', (e) => {
 let lastGtfsExpiryKey = null;
 
 function formatJpDate(iso) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
-  if (!m) return iso || '';
-  return `${Number(m[1])}年${Number(m[2])}月${Number(m[3])}日`;
+  return I18n.formatIsoDate(iso);
 }
 
 /**
@@ -187,18 +188,20 @@ function showGtfsExpiryNotice(validity) {
   lastGtfsExpiryKey = key;
 
   const period = validity.periodStart && validity.periodEnd
-    ? `${formatJpDate(validity.periodStart)}〜${formatJpDate(validity.periodEnd)}`
+    ? t('{from}〜{to}', { from: formatJpDate(validity.periodStart), to: formatJpDate(validity.periodEnd) })
     : validity.periodEnd
-      ? `${formatJpDate(validity.periodEnd)}まで`
-      : `${formatJpDate(validity.periodStart)}以降`;
+      ? t('{date}まで', { date: formatJpDate(validity.periodEnd) })
+      : t('{date}以降', { date: formatJpDate(validity.periodStart) });
 
   const body = $('gtfs-expiry-body');
   if (body) {
     body.textContent =
-      `選択された日付（${formatJpDate(validity.date)}）は、現在の時刻表データ（GTFS）の` +
-      `有効期間（${period}）外です。\n\n` +
-      'この日のダイヤは現時点のデータに基づく暫定的なもので、ダイヤ改正により実際の運行と' +
-      '異なる可能性があります。最新の時刻は各バス事業者の情報をご確認ください。';
+      t('選択された日付（{date}）は、現在の時刻表データ（GTFS）の有効期間（{period}）外です。', {
+        date: formatJpDate(validity.date),
+        period
+      }) +
+      '\n\n' +
+      t('この日のダイヤは現時点のデータに基づく暫定的なもので、ダイヤ改正により実際の運行と異なる可能性があります。最新の時刻は各バス事業者の情報をご確認ください。');
   }
   openModal('gtfs-expiry-modal');
 }
@@ -269,7 +272,7 @@ function renderFavoritesList() {
   const favs = window.Favorites ? window.Favorites.list() : [];
 
   if (favs.length === 0) {
-    container.innerHTML = '<p class="text-sm font-bold text-gray-500 text-center py-12 px-4">まだお気に入りはありません。<br>バス路線・ルート検索・便・時刻表・バス停の各画面にある★ボタンから登録できます。</p>';
+    container.innerHTML = `<p class="text-sm font-bold text-gray-500 text-center py-12 px-4">${escapeHtml(t('まだお気に入りはありません。'))}<br>${escapeHtml(t('バス路線・ルート検索・便・時刻表・バス停の各画面にある★ボタンから登録できます。'))}</p>`;
     return;
   }
 
@@ -287,18 +290,18 @@ function renderFavoritesList() {
           <div class="flex items-center gap-2 bg-white rounded-xl border-2 border-gray-100 hover:border-amber-300 transition-all">
             <button type="button" data-role="fav-open" data-url="${escapeHtml(fav.url)}"
                     class="flex-1 min-w-0 text-left px-3 py-3 active:scale-[0.99] transition-transform">
-              <span class="block font-bold text-gray-900 truncate">${escapeHtml(fav.title)}</span>
-              ${fav.subtitle ? `<span class="block text-[11px] text-gray-500 font-bold truncate mt-0.5">${escapeHtml(fav.subtitle)}</span>` : ''}
+              <span class="block font-bold text-gray-900 truncate">${window.Favorites.titleHtml(fav)}</span>
+              ${fav.subtitle ? `<span class="block text-[11px] text-gray-500 font-bold truncate mt-0.5">${window.Favorites.subtitleHtml(fav)}</span>` : ''}
             </button>
             <button type="button" data-role="fav-remove" data-id="${escapeHtml(fav.id)}"
-                    class="shrink-0 text-gray-300 hover:text-red-500 p-3" title="お気に入り解除">
+                    class="shrink-0 text-gray-300 hover:text-red-500 p-3" title="${escapeHtml(t('お気に入り解除'))}">
               <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l2.6 5.4 5.9.7-4.3 4.1 1.1 5.9L12 16.9l-5.3 2.7 1.1-5.9-4.3-4.1 5.9-.7L12 3.5z"/></svg>
             </button>
           </div>`)
         .join('');
       return `
         <div class="mb-5">
-          <h3 class="text-xs font-bold text-gray-500 mb-2 px-1">${escapeHtml(FAV_TYPE_LABELS[type] || type)}（${groups.get(type).length}）</h3>
+          <h3 class="text-xs font-bold text-gray-500 mb-2 px-1">${escapeHtml(t(FAV_TYPE_LABELS[type] || type))}${escapeHtml(t('（{n}）', { n: groups.get(type).length }))}</h3>
           <div class="space-y-2">${items}</div>
         </div>`;
     })
@@ -316,7 +319,7 @@ function renderFavoritesList() {
 }
 
 async function renderFavoritesPage() {
-  setPageTitle('お気に入り', 'Favorites');
+  setPageTitle(t('お気に入り'), 'Favorites');
   $('section-favorites').style.display = 'block';
   renderFavoritesList();
 }
@@ -374,7 +377,7 @@ async function loadAll() {
     }
   } catch (err) {
     console.error('データ取得エラー:', err);
-    $('loading-text').textContent = '読み込みに失敗しました。しばらくして再度お試しください。';
+    $('loading-text').textContent = t('読み込みに失敗しました。しばらくして再度お試しください。');
   } finally {
     setTimeout(() => icon.classList.remove('animate-spin'), 500);
   }
@@ -392,7 +395,7 @@ function syncRouteSelector() {
   routeOptions.forEach((route) => {
     const option = document.createElement('option');
     option.value = route.id;
-    option.textContent = route.name || route.short_name || route.id;
+    option.textContent = I18n.nameText(route.name || route.short_name || route.id, 'route');
     selector.appendChild(option);
   });
 
@@ -443,7 +446,7 @@ function noticeContentHtml(notice) {
 }
 
 function openNoticeModal(notice) {
-  $('notice-modal-title').textContent = notice.title || 'お知らせ';
+  $('notice-modal-title').textContent = notice.title || t('お知らせ');
   $('notice-modal-body').innerHTML = noticeContentHtml(notice);
   openModal('notice-modal');
 }
@@ -462,7 +465,7 @@ function renderNotices(settings) {
     btn.className = 'w-full text-left bg-white p-4 rounded-xl border border-gray-300 flex items-center gap-3 active:scale-[0.99] transition-transform';
     btn.innerHTML = `
       <span class="shrink-0 text-lg">📢</span>
-      <span class="flex-1 font-bold text-gray-900 leading-snug">${escapeHtml(notice.title || 'お知らせ')}</span>
+      <span class="flex-1 font-bold text-gray-900 leading-snug">${escapeHtml(notice.title || t('お知らせ'))}</span>
       <svg class="shrink-0 w-4 h-4 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
     `;
     btn.addEventListener('click', () => openNoticeModal(notice));
@@ -523,6 +526,15 @@ function renderRouteNotices(notices) {
   }
 }
 
+/* 路線の説明（GTFS route_desc）。路線名の行の下に出し、登録が無い路線では行ごと隠す。 */
+function renderRouteDescription(route) {
+  const el = $('selected-route-desc');
+  if (!el) return;
+  const description = (route && route.description) || '';
+  el.textContent = description;
+  el.style.display = description ? 'block' : 'none';
+}
+
 // 取得に失敗しても運行情報の表示は妨げない（soft-fail。前回の表示をそのまま残す）。
 async function loadRouteNotices(routeId) {
   try {
@@ -553,11 +565,11 @@ function renderRealtimeAndSchedule(timetable, buses) {
 
   let message = null;
   if (!timetable || timetable.length === 0) {
-    message = '本日の運行はありません。';
+    message = t('本日の運行はありません。');
   } else if (!currentRealtimeSuspension) {
     const remaining = computeRemainingTrips(timetable);
     if (remaining.length === 0 && (!buses || buses.length === 0) && unsupportedTrips.length === 0) {
-      message = '本日の運行は終了しました。';
+      message = t('本日の運行は終了しました。');
     }
   }
 
@@ -618,7 +630,7 @@ function renderBuses(buses) {
       const reasonEl = $('realtime-suspended-reason');
       if (reasonEl) {
         const reason = (currentRealtimeSuspension.reason || '').trim();
-        reasonEl.textContent = reason ? `理由：${reason}` : '';
+        reasonEl.textContent = reason ? t('理由：{reason}', { reason }) : '';
         reasonEl.classList.toggle('hidden', !reason);
       }
     }
@@ -641,7 +653,9 @@ function createBusCard(bus) {
   const lastIdx = findLastArrivedIndex(stops);
   const currentStop = lastIdx >= 0 ? stops[lastIdx] : null;
   const hasDeparted = currentStop !== null;
-  const currentPos = currentStop ? `${currentStop.name}に到着済` : '始発前';
+  const currentPosHtml = currentStop
+    ? I18n.tHtml('{name}に到着済', { name: I18n.nameHtml(currentStop.name, 'stop', { block: true }) })
+    : escapeHtml(t('始発前'));
   // 行先はtrip_headsignではなくstop_headsign（現在地点のもの、無ければ始発のもの）を使う。
   // APIが既にcurrentHeadsignとして解決済み（stop_headsign未設定ならtrip_headsignにフォールバック）。
   const headsignLabel = bus.currentHeadsign || bus.headsign || '';
@@ -652,13 +666,13 @@ function createBusCard(bus) {
     : 'bg-blue-100 text-blue-800';
 
   const badge = bus.isRealtime
-    ? `<span class="text-[10px] font-bold text-green-700 bg-green-50 px-2 py-1 rounded border border-green-200 flex items-center"><span class="w-2 h-2 bg-green-500 rounded-full mr-1 animate-pulse"></span>リアルタイム運行中</span>`
-    : `<span class="text-[10px] font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded border border-gray-200">検知中…</span>`;
+    ? `<span class="text-[10px] font-bold text-green-700 bg-green-50 px-2 py-1 rounded border border-green-200 flex items-center"><span class="w-2 h-2 bg-green-500 rounded-full mr-1 animate-pulse"></span>${escapeHtml(t('リアルタイム運行中'))}</span>`
+    : `<span class="text-[10px] font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded border border-gray-200">${escapeHtml(t('検知中…'))}</span>`;
 
   // 臨時便判定は廃止した（GTFS便を先に生成し、車両を後から割り当てる方式に変更したため）。
   // 代わりに、その便の始発時刻を補助的に表示する。
   const extraBadge = bus.startTime
-    ? `<span class="ml-1 text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-1 rounded border border-blue-200">${escapeHtml(bus.startTime)}発</span>`
+    ? `<span class="ml-1 text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-1 rounded border border-blue-200">${escapeHtml(t('{time}発', { time: bus.startTime }))}</span>`
     : '';
 
   const card = document.createElement('div');
@@ -674,7 +688,7 @@ function createBusCard(bus) {
 
   // 管理画面「車両詳細情報」でバスアイコンを登録した車両はその画像、未登録なら従来のアイコン。
   const vehicleImg = window.VehicleInfo
-    ? window.VehicleInfo.iconImgHtml(bus.vehicleProfile, 'max-w-full max-h-full object-contain', 'バス')
+    ? window.VehicleInfo.iconImgHtml(bus.vehicleProfile, 'max-w-full max-h-full object-contain', t('バス'))
     : null;
   const busIconHtml = vehicleImg
     ? `<div class="w-20 h-14 flex items-center justify-center mr-3 shrink-0">${vehicleImg}</div>`
@@ -692,9 +706,9 @@ function createBusCard(bus) {
         <div class="flex items-center">
           ${busIconHtml}
           <div>
-            <p class="text-[10px] text-gray-400 font-bold">現在の位置</p>
-            <p class="text-xl font-bold text-gray-900">${escapeHtml(currentPos)}</p>
-            ${headsignLabel ? `<p class="text-[11px] text-gray-600 font-bold mt-1">${escapeHtml(headsignLabel)}行き</p>` : ''}
+            <p class="text-[10px] text-gray-400 font-bold">${escapeHtml(t('現在の位置'))}</p>
+            <p class="text-xl font-bold text-gray-900">${currentPosHtml}</p>
+            ${headsignLabel ? `<p class="text-[11px] text-gray-600 font-bold mt-1">${I18n.tHtml('{dest}行き', { dest: I18n.nameHtml(headsignLabel, 'headsign') })}</p>` : ''}
           </div>
         </div>
         ${arrowHtml}
@@ -771,7 +785,9 @@ function createUnsupportedBusCard(trip) {
 
   const nowMinutes = new Date().getHours() * 60 + new Date().getMinutes();
   const currentStop = findScheduleCurrentStop(stops, nowMinutes);
-  const currentPos = currentStop ? `${currentStop.stopName}付近` : '始発前';
+  const currentPosHtml = currentStop
+    ? I18n.tHtml('{name}付近', { name: I18n.nameHtml(currentStop.stopName, 'stop', { block: true }) })
+    : escapeHtml(t('始発前'));
   // リアルタイム対応便（createBusCard）と同じ考え方で、現在地点のstop_headsign
   // （まだ発車していなければ始発のもの）を使う。trip_headsignへのフォールバックも同様。
   const headsignLabel = (currentStop && currentStop.stopHeadsign)
@@ -779,9 +795,9 @@ function createUnsupportedBusCard(trip) {
     || trip.headsign
     || '';
 
-  const badge = `<span class="text-[10px] font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded border border-gray-200">リアルタイム非対応</span>`;
+  const badge = `<span class="text-[10px] font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded border border-gray-200">${escapeHtml(t('リアルタイム非対応'))}</span>`;
   const extraBadge = trip.startTime
-    ? `<span class="ml-1 text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-1 rounded border border-blue-200">${escapeHtml(trip.startTime)}発</span>`
+    ? `<span class="ml-1 text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-1 rounded border border-blue-200">${escapeHtml(t('{time}発', { time: trip.startTime }))}</span>`
     : '';
 
   const card = document.createElement('div');
@@ -806,9 +822,9 @@ function createUnsupportedBusCard(trip) {
             <svg class="w-8 h-8" fill="currentColor" viewBox="0 0 24 24"><path d="M18,11H6V6h12M16.5,17A1.5,1.5 0 0,1 15,15.5A1.5,1.5 0 0,1 16.5,14A1.5,1.5 0 0,1 18,15.5A1.5,1.5 0 0,1 16.5,17M7.5,17A1.5,1.5 0 0,1 6,15.5A1.5,1.5 0 0,1 7.5,14A1.5,1.5 0 0,1 9,15.5A1.5,1.5 0 0,1 7.5,17M4,16c0,0.88 0.39,1.67 1,2.22V20a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1h8v1a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1.78c0.61-0.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8,0.5-8,4V16Z"></path></svg>
           </div>
           <div>
-            <p class="text-[10px] text-gray-400 font-bold">現在の位置</p>
-            <p class="text-xl font-bold text-gray-900">${escapeHtml(currentPos)}</p>
-            ${headsignLabel ? `<p class="text-[11px] text-gray-600 font-bold mt-1">${escapeHtml(headsignLabel)}行き</p>` : ''}
+            <p class="text-[10px] text-gray-400 font-bold">${escapeHtml(t('現在の位置'))}</p>
+            <p class="text-xl font-bold text-gray-900">${currentPosHtml}</p>
+            ${headsignLabel ? `<p class="text-[11px] text-gray-600 font-bold mt-1">${I18n.tHtml('{dest}行き', { dest: I18n.nameHtml(headsignLabel, 'headsign') })}</p>` : ''}
           </div>
         </div>
         ${arrowHtml}
@@ -869,7 +885,7 @@ function computeRemainingTrips(timetable) {
   // これは横田信大循環線専用の表示で、他路線では誤った行先が出てしまうバグだった。
   const allTrips = [];
   tripsByDirection.forEach((trips, directionId) => {
-    const fallbackLabel = `${directionId === 0 ? '下り' : '上り'}方面`;
+    const fallbackLabelHtml = escapeHtml(t(directionId === 0 ? '下り方面' : '上り方面'));
 
     const filteredTrips = trips
       .map((trip) => {
@@ -885,8 +901,10 @@ function computeRemainingTrips(timetable) {
       .filter((t) => t.minutes >= nowMinutes - 15);
 
     filteredTrips.forEach((t) => {
-      const directionLabel = t.trip.headsign ? `${t.trip.headsign}方面` : fallbackLabel;
-      allTrips.push({ ...t, directionLabel });
+      const directionLabelHtml = t.trip.headsign
+        ? I18n.tHtml('{dest}方面', { dest: I18n.nameHtml(t.trip.headsign, 'headsign') })
+        : fallbackLabelHtml;
+      allTrips.push({ ...t, directionLabelHtml });
     });
   });
 
@@ -900,29 +918,30 @@ function renderSchedule(timetable) {
   container.innerHTML = '';
 
   if (!timetable || timetable.length === 0) {
-    container.innerHTML = '<p class="text-sm text-gray-500 px-1">時刻表データがありません。</p>';
+    container.innerHTML = `<p class="text-sm text-gray-500 px-1">${escapeHtml(t('時刻表データがありません。'))}</p>`;
     return;
   }
 
   const allTrips = computeRemainingTrips(timetable);
 
   if (allTrips.length === 0) {
-    container.innerHTML = '<p class="text-sm text-gray-500 px-1">本日の残り便はありません。</p>';
+    container.innerHTML = `<p class="text-sm text-gray-500 px-1">${escapeHtml(t('本日の残り便はありません。'))}</p>`;
     return;
   }
 
-  allTrips.forEach((t) => container.appendChild(createScheduleCard(t.trip, t.firstTime, t.directionLabel)));
+  allTrips.forEach((item) => container.appendChild(createScheduleCard(item.trip, item.firstTime, item.directionLabelHtml)));
 }
 
-function createScheduleCard(trip, firstTime, directionLabel = '') {
+// directionLabelHtml はエスケープ済みのHTML（行き先名の訳＋日本語併記を含むため）。
+function createScheduleCard(trip, firstTime, directionLabelHtml = '') {
   const card = document.createElement('div');
   card.className = 'bg-white rounded-xl border border-gray-200 overflow-hidden';
-  const directionBadge = directionLabel ? `<span class="text-xs text-blue-700 bg-blue-50 px-2 py-1 rounded border border-blue-200 mr-2">${escapeHtml(directionLabel)}</span>` : '';
+  const directionBadge = directionLabelHtml ? `<span class="text-xs text-blue-700 bg-blue-50 px-2 py-1 rounded border border-blue-200 mr-2">${directionLabelHtml}</span>` : '';
   card.innerHTML = `
     <div class="px-4 py-3 flex justify-between items-center cursor-pointer active:bg-gray-50" data-role="toggle">
-      <span class="font-bold text-gray-800">${directionBadge}${escapeHtml(firstTime)} 発</span>
+      <span class="font-bold text-gray-800">${directionBadge}${escapeHtml(t('{time} 発', { time: firstTime }))}</span>
       <div class="flex items-center gap-2">
-        <span class="text-xs text-gray-400 font-bold">全${trip.stops.length}停留所</span>
+        <span class="text-xs text-gray-400 font-bold">${escapeHtml(t('全{n}停留所', { n: trip.stops.length }))}</span>
         <svg data-role="arrow" class="w-5 h-5 text-gray-300 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"></path></svg>
       </div>
     </div>
@@ -937,21 +956,21 @@ function createScheduleCard(trip, firstTime, directionLabel = '') {
       // タグの意味はtimetable.js の renderScheduleRows() と揃える（降車のみ/乗車のみ/終点等）。
       const passed = stop.isThrough;
       const tags = [
-        index === 0 ? '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5">始発</span>' : '',
-        index === sortedStops.length - 1 ? '<span class="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-1.5 py-0.5">終点</span>' : '',
-        passed ? '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">通過</span>' : '',
-        !passed && stop.noPickup && index !== sortedStops.length - 1 ? '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">降車のみ</span>' : '',
-        !passed && stop.noDropOff && index !== 0 ? '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">乗車のみ</span>' : ''
+        index === 0 ? `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5">${escapeHtml(t('始発'))}</span>` : '',
+        index === sortedStops.length - 1 ? `<span class="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-1.5 py-0.5">${escapeHtml(t('終点'))}</span>` : '',
+        passed ? `<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">${escapeHtml(t('通過'))}</span>` : '',
+        !passed && stop.noPickup && index !== sortedStops.length - 1 ? `<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">${escapeHtml(t('降車のみ'))}</span>` : '',
+        !passed && stop.noDropOff && index !== 0 ? `<span class="text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">${escapeHtml(t('乗車のみ'))}</span>` : ''
       ].filter(Boolean).join(' ');
 
       const row = document.createElement('div');
       row.className = 'flex justify-between items-center gap-2 px-3 py-2 rounded-lg bg-white border border-gray-100';
       row.innerHTML = `
         <div class="min-w-0">
-          <span data-role="stop-name-link" class="font-bold text-gray-800 underline decoration-dotted cursor-pointer active:text-blue-700">${escapeHtml(stop.stopName)}</span>
+          <span data-role="stop-name-link" class="font-bold text-gray-800 underline decoration-dotted cursor-pointer active:text-blue-700">${I18n.nameHtml(stop.stopName, 'stop')}</span>
           ${tags ? `<div class="flex flex-wrap gap-1 mt-0.5">${tags}</div>` : ''}
         </div>
-        <span class="font-bold text-blue-800 shrink-0">${escapeHtml(passed ? '通過' : (stop.scheduledTime || '--'))}</span>
+        <span class="font-bold text-blue-800 shrink-0">${escapeHtml(passed ? t('通過') : (stop.scheduledTime || '--'))}</span>
       `;
       // バス停名タップで、標柱単位で識別されたバス停詳細ページへ（補完仕様書 3.6.2）。
       row.querySelector('[data-role="stop-name-link"]').addEventListener('click', (e) => {
@@ -969,7 +988,7 @@ function createScheduleCard(trip, firstTime, directionLabel = '') {
 // 画面左上のタイトルは常に「バスタイム」固定（ページごとのタイトルには変更しない）。
 // サブタイトルだけを画面ごとに切り替える。
 function setPageTitle(title, subtitle) {
-  $('page-title').textContent = 'バスタイム';
+  $('page-title').textContent = t('バスタイム');
   $('page-subtitle').textContent = subtitle;
 }
 
@@ -1011,7 +1030,7 @@ function renderRouteList() {
   routeOptions.forEach((route) => {
     // 表示名は必ずGTFSのroute名/略称から取る。両方欠けている内部ID
     // （"guruttomatsumoto1"等の処理用コード）をそのまま利用者に見せないこと。
-    const displayName = route.name || route.short_name || '路線';
+    const displayName = route.name || route.short_name || t('路線');
     const accent = parseHexColor(route.color) ? `#${String(route.color).replace('#', '')}` : '#93c5fd';
 
     const row = document.createElement('div');
@@ -1026,7 +1045,7 @@ function renderRouteList() {
     // 見えなくなるのを避けるため、帯の縁に常に薄い暗色の輪郭を重ねておく。
     link.innerHTML = `
       <span class="min-w-0">
-        <p class="font-bold text-lg text-blue-900 truncate">${escapeHtml(displayName)}</p>
+        <p class="font-bold text-lg text-blue-900 truncate">${I18n.nameHtml(displayName, 'route', { block: true })}</p>
       </span>
       <svg class="w-5 h-5 text-gray-300 shrink-0 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>
     `;
@@ -1166,7 +1185,7 @@ function createBusIcon(bus) {
   // （stop_headsign未設定ならtrip_headsignにフォールバック。currentHeadsignはAPI側で解決済み）。
   const label = bus.currentHeadsign || bus.headsign || '';
   const labelHtml = label
-    ? `<div class="bus-marker-label" data-abbrev-fit style="background:${labelBg};color:${labelFg};">${escapeHtml(label)}</div>`
+    ? `<div class="bus-marker-label" data-abbrev-fit style="background:${labelBg};color:${labelFg};">${I18n.nameHtml(label, 'headsign')}</div>`
     : '';
   // 管理画面「車両詳細情報」でバスアイコンを登録した車両は、その画像だけを描く（背景・枠なし。路線カラーはラベルで示す）。
   // 画像は左向きなので、APIの heading（進行方向）に合わせて反転・回転する（vehicle-info.js の mapMarkerPhoto）。
@@ -1206,16 +1225,16 @@ function createBusIcon(bus) {
 function busPopupHtml(bus) {
   const label = bus.currentHeadsign || bus.headsign || '';
   const delay = bus.delayMinutes || 0;
-  const delayLabel = formatDelayLabel(bus.delayMinutes) || '定刻通り';
+  const delayLabel = formatDelayLabel(bus.delayMinutes) || t('定刻通り');
   const delayClass = delay >= 5 ? 'text-red-600' : 'text-blue-700';
   const detailUrl = buildTripDetailUrl(bus, { view: 'realtime' });
 
   const lines = [];
-  lines.push(`<div class="font-bold text-sm">${escapeHtml(bus.routeName || '不明な路線')}</div>`);
-  if (label) lines.push(`<div class="text-xs text-gray-700 mt-0.5">${escapeHtml(label)}行き</div>`);
+  lines.push(`<div class="font-bold text-sm">${bus.routeName ? I18n.nameHtml(bus.routeName, 'route', { block: true }) : escapeHtml(t('不明な路線'))}</div>`);
+  if (label) lines.push(`<div class="text-xs text-gray-700 mt-0.5">${I18n.tHtml('{dest}行き', { dest: I18n.nameHtml(label, 'headsign') })}</div>`);
   lines.push(`<div class="text-xs font-bold ${delayClass} mt-1">${escapeHtml(delayLabel)}</div>`);
   if (detailUrl) {
-    lines.push(`<button type="button" data-role="tt-bus-detail-btn" data-url="${escapeHtml(detailUrl)}" class="mt-2 w-full text-xs font-bold text-white bg-sky-600 rounded-lg px-3 py-1.5">便の詳細を見る</button>`);
+    lines.push(`<button type="button" data-role="tt-bus-detail-btn" data-url="${escapeHtml(detailUrl)}" class="mt-2 w-full text-xs font-bold text-white bg-sky-600 rounded-lg px-3 py-1.5">${escapeHtml(t('便の詳細を見る'))}</button>`);
   }
   return lines.join('');
 }
@@ -1277,7 +1296,7 @@ function setBusMapStatus(text) {
 function busMapFilterRouteName() {
   if (busMapRouteFilter === 'all') return '';
   const route = routeOptions.find((r) => r.id === busMapRouteFilter);
-  return route ? (route.name || route.short_name || '') : '';
+  return route ? I18n.nameOnly(route.name || route.short_name || '', 'route') : '';
 }
 
 /** バスマップの路線フィルタ用セレクトに選択肢を流し込み、現在値へ同期する。 */
@@ -1290,12 +1309,12 @@ function syncBusMapRouteSelector() {
     busMapRouteFilter = 'all';
   }
 
-  selector.innerHTML = '<option value="all">すべての路線</option>';
+  selector.innerHTML = `<option value="all">${escapeHtml(t('すべての路線'))}</option>`;
   routeOptions.forEach((route) => {
     const option = document.createElement('option');
     option.value = route.id;
     // 表示名は必ずGTFSのroute名/略称から。内部IDは利用者に見せない。
-    option.textContent = route.name || route.short_name || route.id;
+    option.textContent = I18n.nameText(route.name || route.short_name || route.id, 'route');
     selector.appendChild(option);
   });
   selector.value = busMapRouteFilter;
@@ -1314,24 +1333,24 @@ async function loadBusMapBuses() {
     const data = await fetchJson(`${API_BASE}/buses-for-map${query}`);
     const buses = data.buses || [];
     updateBusMarkers(buses);
-    const time = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+    const time = new Date().toLocaleTimeString(I18n.locale(), { hour: '2-digit', minute: '2-digit' });
     const routeName = busMapFilterRouteName();
-    const prefix = routeName ? `${routeName}：` : '';
+    const prefix = routeName ? t('{route}：', { route: routeName }) : '';
 
     // 管理画面「リアルタイム休止」中の路線はバスがそもそも返ってこない。
     // 選択中の路線が休止対象なら理由を明示し、全路線表示なら一部休止中である旨を小さく添える。
     const suspendedRouteIds = data.suspendedRouteIds || [];
     if (busMapRouteFilter !== 'all' && suspendedRouteIds.includes(busMapRouteFilter)) {
-      setBusMapStatus(`${prefix}リアルタイム運行情報を一時休止しています（${time} 更新）`);
+      setBusMapStatus(`${prefix}${t('リアルタイム運行情報を一時休止しています（{time} 更新）', { time })}`);
     } else {
-      const suffix = suspendedRouteIds.length > 0 ? '／一部路線は運行情報を休止中' : '';
+      const suffix = suspendedRouteIds.length > 0 ? t('／一部路線は運行情報を休止中') : '';
       setBusMapStatus(buses.length > 0
-        ? `${prefix}運行中 ${buses.length}台（${time} 更新）${suffix}`
-        : `${prefix}現在運行中のバスはありません（${time} 更新）${suffix}`);
+        ? `${prefix}${t('運行中 {n}台（{time} 更新）', { n: buses.length, time })}${suffix}`
+        : `${prefix}${t('現在運行中のバスはありません（{time} 更新）', { time })}${suffix}`);
     }
   } catch (err) {
     console.error('バス情報取得エラー:', err);
-    setBusMapStatus('バス情報の取得に失敗しました。');
+    setBusMapStatus(t('バス情報の取得に失敗しました。'));
   }
 }
 
@@ -1373,19 +1392,19 @@ async function addUserLocation() {
       fillColor: '#2563eb',
       fillOpacity: 1
     }).addTo(mapInstance);
-    userMarker.bindPopup('現在地');
+    userMarker.bindPopup(t('現在地'));
   }
 }
 
 async function renderMapMenu() {
-  setPageTitle('マップ', 'Map Menu');
+  setPageTitle(t('マップ'), 'Map Menu');
   $('section-map').style.display = 'block';
 }
 
 async function renderBusMap() {
-  setPageTitle('バスマップ', 'Bus Map');
+  setPageTitle(t('バスマップ'), 'Bus Map');
   $('section-busmap').style.display = 'block';
-  setBusMapStatus('バス位置を読み込み中...');
+  setBusMapStatus(t('バス位置を読み込み中...'));
 
   // 路線フィルタ（#/busmap/<feedId>/<routeId>）をURLから復元する。
   // 選択肢の表示に路線一覧が要るので先に取得するが、取得失敗は致命ではない
@@ -1480,7 +1499,7 @@ async function renderCurrentRoute() {
   const state = parseHashRoute();
   try {
     if (state.page === 'home') {
-      setPageTitle('バスタイム', 'Real-time Bus Guide');
+      setPageTitle(t('バスタイム'), 'Real-time Bus Guide');
       $('section-home').style.display = 'block';
       $('notices').style.display = 'block';
       loadNotices();
@@ -1511,7 +1530,7 @@ async function renderCurrentRoute() {
         window.location.hash = routeHref(routeOptions[0].id);
         return;
       }
-      setPageTitle('リアルタイム運行情報', 'Select a Route');
+      setPageTitle(t('リアルタイム運行情報'), 'Select a Route');
       renderRouteList();
       $('section-route-list').style.display = 'block';
       return;
@@ -1524,8 +1543,9 @@ async function renderCurrentRoute() {
     if (state.routeId !== selectedRouteId) renderRouteNotices([]);
     selectedRouteId = state.routeId;
     const selectedRoute = routeOptions.find((route) => route.id === selectedRouteId);
-    setPageTitle(selectedRoute?.name || 'リアルタイム運行情報', 'Realtime Timetable');
-    $('selected-route-name').textContent = selectedRoute?.short_name || selectedRoute?.name || '';
+    setPageTitle(selectedRoute?.name || t('リアルタイム運行情報'), 'Realtime Timetable');
+    $('selected-route-name').innerHTML = I18n.nameHtml(selectedRoute?.short_name || selectedRoute?.name || '', 'route');
+    renderRouteDescription(selectedRoute);
     $('selected-route-fav').innerHTML = (window.Favorites && selectedRoute)
       ? window.Favorites.starButtonHtml(routeFavorite(selectedRoute), { size: 'w-9 h-9' })
       : '';
@@ -1550,7 +1570,7 @@ function isDiagramMode() { return realtimeDisplayMode === 'diagram'; }
 
 function updateDisplayModeToggleUI() {
   const label = $('realtime-display-mode-label');
-  if (label) label.textContent = isDiagramMode() ? '基本表示' : 'カード表示';
+  if (label) label.textContent = isDiagramMode() ? t('基本表示') : t('カード表示');
 }
 
 function setDisplayMode(mode) {
@@ -1571,7 +1591,7 @@ function updateAutoRefreshToggleUI() {
   const label = $('auto-refresh-label');
   if (!dot || !label) return;
   dot.className = `w-2 h-2 rounded-full shrink-0 ${autoRefreshEnabled ? 'bg-green-500' : 'bg-gray-400'}`;
-  label.textContent = `自動更新 ${autoRefreshEnabled ? 'ON' : 'OFF'}`;
+  label.textContent = autoRefreshEnabled ? t('自動更新 ON') : t('自動更新 OFF');
 }
 
 function setAutoRefreshEnabled(enabled, persist = true) {
@@ -1601,7 +1621,7 @@ async function checkServerLoad() {
     const status = await fetchJson(`${API_BASE}/server-load`);
     if (status.highLoad && autoRefreshEnabled) {
       setAutoRefreshEnabled(false, false);
-      showLoadToast('現在アクセスが集中しているため、自動更新を一時的にOFFにしました。「更新」ボタンで手動更新できます。');
+      showLoadToast(t('現在アクセスが集中しているため、自動更新を一時的にOFFにしました。「更新」ボタンで手動更新できます。'));
     }
   } catch (err) {
     // 負荷判定の取得失敗は自動更新の可否に影響させない（サイレントに無視）
@@ -1660,7 +1680,13 @@ window.addEventListener('hashchange', renderCurrentRoute);
 window.addEventListener('popstate', renderCurrentRoute);
 // timetable.js から呼び出せるようにグローバルへ公開する
 window.renderCurrentRoute = renderCurrentRoute;
-renderCurrentRoute();
+// 静的HTMLの文言を表示言語へ訳し、言語切替ボタンを置いてから最初の画面を描く。
+// 英語表示では名称辞書（/api/i18n/names）の到着を待つ（上限あり。I18n.ready 参照）。
+I18n.translateStatic(document.body);
+if ($('lang-switch-slot')) {
+  $('lang-switch-slot').innerHTML = I18n.toggleButtonHtml('on-brand-btn bg-white text-blue-800 rounded-lg shadow-md px-2 flex items-center gap-1 text-xs font-bold', { compact: true });
+}
+I18n.ready.then(renderCurrentRoute);
 setInterval(() => {
   if (!autoRefreshEnabled) return;
   const page = parseHashRoute().page;

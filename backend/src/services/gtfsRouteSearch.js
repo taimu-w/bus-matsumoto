@@ -23,6 +23,7 @@ const {
 } = require('./gtfsTimetable');
 const { expandFrequencies } = require('./gtfsFrequencies');
 const { getFareIndex, lookupFare } = require('./gtfsFare');
+const { lookupMinTransferSeconds } = require('./gtfsTransfers');
 const { haversineDistanceMeters, estimateWalkMinutes, estimateWalkSeconds } = require('../utils/geo');
 const { findLiveAssignment, buildBusEntry } = require('./realtimeTripLookup');
 const { getSuspendedRouteIdSet } = require('./realtimeSuspension');
@@ -40,7 +41,9 @@ const WALK_RADIUS_RELAXED_METERS = 800;
 // 徒歩の所要時間は utils/geo.js の estimateWalkSeconds/estimateWalkMinutes（直線距離に迂回係数・
 // 信号待ちを織り込んだ推定）を使う。乗り継ぎ可否の判定は上の直線距離しきい値のまま。
 const MIN_WALK_SECONDS = 60;
-// 同一バス停での乗り継ぎに必要な最低の余裕時間
+// 同一バス停での乗り継ぎに必要な最低の余裕時間。
+// GTFS transfers.txt で標柱の組に min_transfer_time が指定されていれば、その組だけ指定値を優先する
+// （同一バス停ならこの余裕の代わり、徒歩乗継なら「徒歩＋余裕」の代わり。gtfsTransfers.js）。
 const MIN_TRANSFER_SECONDS = 60;
 // ラウンド数 = 乗車回数。3なら乗換2回まで。
 const MAX_ROUNDS = 3;
@@ -84,7 +87,8 @@ const WALK_PENALTY_RATIO = 0.5;
  * 旧クライアント・既存のURL・お気に入りが何も付けずに叩いても挙動が変わらないようにするため。
  *
  * @param {object} options searchJourneys() のオプション（クエリ文字列由来の文字列も受ける）
- * @returns {{maxTransfers:number|null, allowWalkTransfer:boolean, minTransferSeconds:number, isDefault:boolean}}
+ * @returns {{maxTransfers:number|null, allowWalkTransfer:boolean, minTransferSeconds:number,
+ *            transferFloorSeconds:number, isDefault:boolean}}
  */
 function normalizeSearchPreferences(options = {}) {
   // 乗換回数の上限。null＝指定なし（段階的フォールバックのラウンド数に任せる＝従来どおり）。
@@ -103,16 +107,21 @@ function normalizeSearchPreferences(options = {}) {
 
   // 乗り換えに要求する最低の余裕時間（分）。未指定なら従来の MIN_TRANSFER_SECONDS。
   let minTransferSeconds = MIN_TRANSFER_SECONDS;
+  // transfers.txt の min_transfer_time を使う乗換の下限。利用者が余裕時間を明示したときだけ
+  // その値を下回らせない（詳細設定は絞る方向にだけ効かせる）。未指定なら指定値をそのまま使う。
+  let transferFloorSeconds = 0;
   const parsedMargin = Number.parseInt(options.minTransferMinutes, 10);
   if (Number.isFinite(parsedMargin)) {
     minTransferSeconds =
       Math.min(Math.max(parsedMargin, TRANSFER_MARGIN_MIN_MINUTES), TRANSFER_MARGIN_MAX_MINUTES) * 60;
+    transferFloorSeconds = minTransferSeconds;
   }
 
   return {
     maxTransfers,
     allowWalkTransfer,
     minTransferSeconds,
+    transferFloorSeconds,
     isDefault:
       maxTransfers === null && allowWalkTransfer && minTransferSeconds === MIN_TRANSFER_SECONDS
   };
@@ -177,6 +186,8 @@ function buildBoardingsByGroup(index) {
         list.push({
           tripKey,
           tripIndex: stopTime.tripIndex,
+          // 乗る標柱（transfers.txt の乗換時間を標柱の組で引くため）
+          stopKey: stopTime.stopKey,
           offsetSeconds: offset,
           departureSeconds: stopTime.departureSeconds + offset
         });
@@ -221,6 +232,8 @@ function buildAlightingsByGroup(index) {
         list.push({
           tripKey,
           tripIndex: stopTime.tripIndex,
+          // 降りる標柱（transfers.txt の乗換時間を標柱の組で引くため）
+          stopKey: stopTime.stopKey,
           offsetSeconds: offset,
           arrivalSeconds: arrivalRaw + offset
         });
@@ -409,6 +422,112 @@ function alignPredictedSeconds(predictedTime, scheduleSeconds) {
 }
 
 /* ==========================================================
+ * 乗換時間の指定（transfers.txt の min_transfer_time）
+ * ========================================================== */
+
+function tripRef(index, tripKey) {
+  const trip = index.trips.get(tripKey);
+  return { tripKey, routeKey: trip ? trip.routeKey : null };
+}
+
+/**
+ * 出発時刻指定の探索で、ラウンド round のラベルからバス停グループ groupKey に
+ * 「直前にどの便をどの標柱で降りたか」を求める。徒歩で来た場合は徒歩の起点で降りた便。
+ * 降車標柱から始まる乗換時間の指定が無ければ null（＝既定の乗換余裕のまま）。
+ *
+ * @returns {null|{stopKey:string, trip:object, baseSeconds:number, earliestSeconds:number}}
+ *   baseSeconds は降車時刻。earliestSeconds は指定値のうち最短のものを使ったときの最早乗車時刻
+ *   （乗車候補の二分探索の起点に使う）。
+ */
+function specifiedTransferFrom(index, labelByRound, round, groupKey, floorSeconds) {
+  if (!index.transfers || index.transfers.size === 0) return null;
+  let label = labelByRound[round].get(groupKey);
+  const walk = label && label.type === 'walk' ? label : null;
+  if (walk) label = labelByRound[walk.fromRound] && labelByRound[walk.fromRound].get(walk.fromGroupKey);
+  if (!label || label.type !== 'bus') return null;
+
+  const stopTime = (index.stopTimesByTrip.get(label.tripKey) || [])[label.alightIndex];
+  const entry = stopTime && index.transfers.byFrom.get(stopTime.stopKey);
+  if (!entry) return null;
+  const baseSeconds = walk ? walk.departureSeconds : label.arrivalSeconds;
+  return {
+    stopKey: stopTime.stopKey,
+    trip: tripRef(index, label.tripKey),
+    baseSeconds,
+    earliestSeconds: baseSeconds + Math.max(entry.minSeconds, floorSeconds)
+  };
+}
+
+/**
+ * specifiedTransferFrom の時間軸を反転させたもの（到着時刻指定の探索用）。
+ * groupKey から「次にどの便をどの標柱で乗るか」を求める。徒歩で離れる場合は徒歩の先で乗る便。
+ *
+ * @returns {null|{stopKey:string, trip:object, baseSeconds:number, latestSeconds:number}}
+ *   baseSeconds は乗車（発車）時刻。latestSeconds は指定値のうち最短のものを使ったときの最遅降車時刻。
+ */
+function specifiedTransferTo(index, labelByRound, round, groupKey, floorSeconds) {
+  if (!index.transfers || index.transfers.size === 0) return null;
+  let label = labelByRound[round].get(groupKey);
+  const walk = label && label.type === 'walk' ? label : null;
+  if (walk) label = labelByRound[walk.toRound] && labelByRound[walk.toRound].get(walk.toGroupKey);
+  if (!label || label.type !== 'bus') return null;
+
+  const stopTime = (index.stopTimesByTrip.get(label.tripKey) || [])[label.boardIndex];
+  const entry = stopTime && index.transfers.byTo.get(stopTime.stopKey);
+  if (!entry) return null;
+  const baseSeconds = walk ? walk.arrivalSeconds : label.departureSeconds;
+  return {
+    stopKey: stopTime.stopKey,
+    trip: tripRef(index, label.tripKey),
+    baseSeconds,
+    latestSeconds: baseSeconds - Math.max(entry.minSeconds, floorSeconds)
+  };
+}
+
+/**
+ * 経路のラベル列に、乗換時間の指定を表示用に反映する。
+ * - 指定のある乗換のバス区間には specifiedTransferSeconds（下限適用後）を付ける（乗換リスク判定で使う）。
+ * - 徒歩を挟む乗換で指定値が徒歩の推定より短ければ、徒歩区間をその長さに縮める
+ *   （指定値は徒歩を含む乗換全体の所要時間のため。縮めないと次の便の発車後に徒歩が終わる表示になる）。
+ * 到着時刻指定のラベルは normalizeReverseLabels() 済み（徒歩が直前の降車時刻に寄せてある）であること。
+ */
+function applySpecifiedTransfers(index, labels, floorSeconds) {
+  let previousBus = null;
+  let walkBetween = null;
+  for (const label of labels) {
+    if (label.type === 'walk') {
+      walkBetween = label;
+      continue;
+    }
+    label.specifiedTransferSeconds = null;
+    if (previousBus) {
+      const fromStopTime = (index.stopTimesByTrip.get(previousBus.tripKey) || [])[previousBus.alightIndex];
+      const toStopTime = (index.stopTimesByTrip.get(label.tripKey) || [])[label.boardIndex];
+      const seconds = fromStopTime && toStopTime
+        ? lookupMinTransferSeconds(
+            index.transfers,
+            fromStopTime.stopKey,
+            toStopTime.stopKey,
+            tripRef(index, previousBus.tripKey),
+            tripRef(index, label.tripKey)
+          )
+        : null;
+      if (seconds !== null) {
+        const effective = Math.max(seconds, floorSeconds);
+        label.specifiedTransferSeconds = effective;
+        if (walkBetween && effective < walkBetween.walkSeconds) {
+          walkBetween.walkSeconds = effective;
+          walkBetween.arrivalSeconds = walkBetween.departureSeconds + effective;
+        }
+      }
+    }
+    previousBus = label;
+    walkBetween = null;
+  }
+  return labels;
+}
+
+/* ==========================================================
  * RAPTOR（ラウンド型）探索
  * ========================================================== */
 
@@ -428,7 +547,9 @@ function runRaptor(ctx, originTimes, destinationKeys) {
     maxRounds,
     windowSeconds,
     // 詳細設定で伸ばせる乗換余裕。未指定なら従来の既定値。
-    minTransferSeconds = MIN_TRANSFER_SECONDS
+    minTransferSeconds = MIN_TRANSFER_SECONDS,
+    // transfers.txt の指定値に課す下限（利用者が乗換余裕を明示したときだけ0より大きい）
+    transferFloorSeconds = 0
   } = ctx;
   const index = searchIndex.index;
   const boardingsByGroup = searchIndex.boardingsByGroup;
@@ -508,7 +629,12 @@ function runRaptor(ctx, originTimes, destinationKeys) {
       const readySeconds = arrivalByRound[round - 1].get(groupKey);
       if (readySeconds === undefined) continue;
       // 最初の乗車には乗換余裕を課さない
-      const departAfter = round === 1 ? readySeconds : readySeconds + minTransferSeconds;
+      const defaultDepartAfter = round === 1 ? readySeconds : readySeconds + minTransferSeconds;
+      // 降りた標柱から乗換時間が指定されていれば、その乗車標柱に限って指定値で判定する
+      const transfer = round === 1
+        ? null
+        : specifiedTransferFrom(index, labelByRound, round - 1, groupKey, transferFloorSeconds);
+      const departAfter = transfer ? Math.min(defaultDepartAfter, transfer.earliestSeconds) : defaultDepartAfter;
       const boardings = boardingsByGroup.get(groupKey);
       if (!boardings) continue;
 
@@ -522,6 +648,15 @@ function runRaptor(ctx, originTimes, destinationKeys) {
           const boarding = boardings[i];
           if (boarding.departureSeconds > shiftedTo) break;
           if (!shift.activeTripKeys.has(boarding.tripKey)) continue;
+          if (transfer) {
+            const seconds = lookupMinTransferSeconds(
+              index.transfers, transfer.stopKey, boarding.stopKey, transfer.trip, tripRef(index, boarding.tripKey)
+            );
+            const earliest = seconds === null
+              ? defaultDepartAfter
+              : transfer.baseSeconds + Math.max(seconds, transferFloorSeconds);
+            if (boarding.departureSeconds + shift.offsetSeconds < earliest) continue;
+          }
 
           const instanceKey = `${boarding.tripKey}|${boarding.offsetSeconds}|${shift.offsetSeconds}`;
           if (scanned.has(instanceKey)) continue;
@@ -640,6 +775,7 @@ function upperBoundByArrival(alightings, seconds) {
  *   最早到着の最小化   ⇔ 最遅出発の最大化
  *   乗車（pickup可）    ⇔ 降車（drop_off可）から遡る
  *   乗換余裕はラウンド1（＝最初の乗車）で免除 ⇔ ラウンド1（＝最後の降車）で免除
+ *   乗換時間の指定は降りた標柱から引く（specifiedTransferFrom） ⇔ 次に乗る標柱から引く（specifiedTransferTo）
  *   基準時刻＋探索窓で打ち切り ⇔ 基準時刻−探索窓で打ち切り
  *
  * @param {object} ctx buildContext() の戻り値
@@ -654,7 +790,8 @@ function runRaptorReverse(ctx, destinationTimes, originKeys) {
     activeTripsByShift,
     maxRounds,
     windowSeconds,
-    minTransferSeconds = MIN_TRANSFER_SECONDS
+    minTransferSeconds = MIN_TRANSFER_SECONDS,
+    transferFloorSeconds = 0
   } = ctx;
   const index = searchIndex.index;
   const alightingsByGroup = getAlightingsByGroup(searchIndex);
@@ -731,7 +868,12 @@ function runRaptorReverse(ctx, destinationTimes, originKeys) {
       const readySeconds = departureByRound[round - 1].get(groupKey);
       if (readySeconds === undefined) continue;
       // ラウンド1＝最後の降車（目的地に着くだけ）なので乗換余裕は要らない
-      const arriveBefore = round === 1 ? readySeconds : readySeconds - minTransferSeconds;
+      const defaultArriveBefore = round === 1 ? readySeconds : readySeconds - minTransferSeconds;
+      // 次に乗る標柱へ乗換時間が指定されていれば、その降車標柱に限って指定値で判定する（順向きと対）
+      const transfer = round === 1
+        ? null
+        : specifiedTransferTo(index, labelByRound, round - 1, groupKey, transferFloorSeconds);
+      const arriveBefore = transfer ? Math.max(defaultArriveBefore, transfer.latestSeconds) : defaultArriveBefore;
       const alightings = alightingsByGroup.get(groupKey);
       if (!alightings) continue;
 
@@ -746,6 +888,15 @@ function runRaptorReverse(ctx, destinationTimes, originKeys) {
           const alighting = alightings[i];
           if (alighting.arrivalSeconds < shiftedFrom) break;
           if (!shift.activeTripKeys.has(alighting.tripKey)) continue;
+          if (transfer) {
+            const seconds = lookupMinTransferSeconds(
+              index.transfers, alighting.stopKey, transfer.stopKey, tripRef(index, alighting.tripKey), transfer.trip
+            );
+            const latest = seconds === null
+              ? defaultArriveBefore
+              : transfer.baseSeconds - Math.max(seconds, transferFloorSeconds);
+            if (alighting.arrivalSeconds + shift.offsetSeconds > latest) continue;
+          }
 
           const instanceKey = `${alighting.tripKey}|${alighting.offsetSeconds}|${shift.offsetSeconds}`;
           if (scanned.has(instanceKey)) continue;
@@ -881,9 +1032,11 @@ function serializeStopRef(index, stop, groupKey) {
 
 /**
  * ラベル列を1つの経路オブジェクトへ変換する（リアルタイム・運賃は後段で付ける）。
+ * transferFloorSeconds は探索時と同じ値を渡す（乗換時間の指定の反映に使う。applySpecifiedTransfers）。
  */
-function buildJourney(index, labels) {
+function buildJourney(index, labels, transferFloorSeconds = 0) {
   const legs = [];
+  applySpecifiedTransfers(index, labels, transferFloorSeconds);
 
   for (const label of labels) {
     if (label.type === 'walk') {
@@ -953,6 +1106,10 @@ function buildJourney(index, labels) {
       routeTextColor: route ? route.textColor : '',
       agencyName: route ? route.agencyName : '',
       tripId: trip.tripId,
+      // 便名・便番号（GTFS trip_short_name）。無ければ空文字
+      tripShortName: trip.shortName || '',
+      // この区間へ乗り換えるのに transfers.txt で指定された乗換時間（秒、下限適用後）。指定が無ければ null
+      specifiedTransferSeconds: label.specifiedTransferSeconds ?? null,
       // 便詳細ページのURL用。実便の始発時刻（frequencies由来のずれのみ反映。
       // 日跨ぎのずれは「その便のダイヤ上の始発時刻」ではないので足さない）。
       tripDepartureTime: formatHhmm(
@@ -1089,8 +1246,11 @@ function flagTransferRisks(journey, minTransferSeconds = MIN_TRANSFER_SECONDS) {
       : null;
     const effectiveDeparture = departureRt !== null ? departureRt : nextBusLeg.departureSeconds;
 
-    // 徒歩を挟む乗換は徒歩所要時間そのものが必要な間隔。同一停留所なら探索時と同じ乗換余裕。
-    const requiredGapSeconds = walkLeg ? walkLeg.arrivalSeconds - walkLeg.departureSeconds : minTransferSeconds;
+    // transfers.txt で乗換時間が指定された乗換は探索時と同じ指定値。それ以外は、
+    // 徒歩を挟む乗換なら徒歩所要時間そのもの、同一停留所なら探索時と同じ乗換余裕。
+    const requiredGapSeconds = Number.isFinite(nextBusLeg.specifiedTransferSeconds)
+      ? nextBusLeg.specifiedTransferSeconds
+      : walkLeg ? walkLeg.arrivalSeconds - walkLeg.departureSeconds : minTransferSeconds;
 
     if (arrivalRt + requiredGapSeconds > effectiveDeparture) {
       nextBusLeg.transferRisk = {
@@ -1295,7 +1455,11 @@ function collectJourneys(ctx, baseTimes, targetKeys, limit, timeMode = 'departur
     // 出発時刻指定なら「最も早い出発」、到着時刻指定なら「最も遅い到着」を次回の基準にする
     let pivot = reverse ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY;
     for (const result of results) {
-      const journey = buildJourney(index, reverse ? normalizeReverseLabels(result.labels) : result.labels);
+      const journey = buildJourney(
+        index,
+        reverse ? normalizeReverseLabels(result.labels) : result.labels,
+        ctx.transferFloorSeconds
+      );
       if (!journey) continue;
       const key = journeyKey(journey);
       if (seen.has(key)) continue;
@@ -1390,7 +1554,11 @@ function pickRecommended(journeys, timeMode = 'departure') {
  * 探索コンテキスト（運行日・徒歩半径・ラウンド数・探索窓）を組み立てる。
  * 前日サービスの24時超え便・翌日サービスの便も取り込む（仕様書 5.2）。
  */
-function buildContext(searchIndex, dateStr, { radiusMeters, maxRounds, windowSeconds, minTransferSeconds }) {
+function buildContext(
+  searchIndex,
+  dateStr,
+  { radiusMeters, maxRounds, windowSeconds, minTransferSeconds, transferFloorSeconds }
+) {
   return {
     searchIndex,
     footpaths: getFootpaths(searchIndex, radiusMeters),
@@ -1402,7 +1570,9 @@ function buildContext(searchIndex, dateStr, { radiusMeters, maxRounds, windowSec
     maxRounds,
     windowSeconds,
     // 詳細設定の「乗り換えの余裕時間」。省略時は従来の既定値。
-    minTransferSeconds: Number.isFinite(minTransferSeconds) ? minTransferSeconds : MIN_TRANSFER_SECONDS
+    minTransferSeconds: Number.isFinite(minTransferSeconds) ? minTransferSeconds : MIN_TRANSFER_SECONDS,
+    // transfers.txt の乗換時間の指定に課す下限（normalizeSearchPreferences 参照）
+    transferFloorSeconds: Number.isFinite(transferFloorSeconds) ? transferFloorSeconds : 0
   };
 }
 
@@ -1439,7 +1609,8 @@ function applyPreferencesToStep(step, preferences) {
       preferences.maxTransfers === null
         ? step.maxRounds
         : Math.min(step.maxRounds, preferences.maxTransfers + 1),
-    minTransferSeconds: preferences.minTransferSeconds
+    minTransferSeconds: preferences.minTransferSeconds,
+    transferFloorSeconds: preferences.transferFloorSeconds
   };
 }
 
@@ -1459,7 +1630,7 @@ function runRelaxationSearch({ searchIndex, dateStr, searchTimes, searchTargets,
 
   for (const step of RELAXATION_STEPS) {
     const effective = applyPreferencesToStep(step, preferences);
-    const attemptKey = `${effective.radiusMeters}|${effective.maxRounds}|${effective.windowSeconds}|${effective.minTransferSeconds}`;
+    const attemptKey = `${effective.radiusMeters}|${effective.maxRounds}|${effective.windowSeconds}|${effective.minTransferSeconds}|${effective.transferFloorSeconds}`;
     if (attempted.has(attemptKey)) continue;
     attempted.add(attemptKey);
 
@@ -1571,6 +1742,8 @@ function serializeSpotRef(spot) {
     stopId: null,
     feedId: null,
     name: spot.name,
+    // 英語表示でスポット名をローマ字表記にするため（frontend/i18n.js の spotName）
+    romaji: spot.romaji || null,
     platformCode: '',
     lat: spot.lat,
     lon: spot.lng,
@@ -1811,8 +1984,8 @@ async function searchJourneys(options = {}) {
     timeMode,
     preferences: serializePreferences(preferences),
     gtfsValidity: describeDateValidity(index, dateStr),
-    viaSpotFrom: origin.viaSpot ? { spotId: origin.viaSpot.spotId, name: origin.viaSpot.name } : null,
-    viaSpotTo: destination.viaSpot ? { spotId: destination.viaSpot.spotId, name: destination.viaSpot.name } : null
+    viaSpotFrom: origin.viaSpot ? { spotId: origin.viaSpot.spotId, name: origin.viaSpot.name, romaji: origin.viaSpot.romaji || null } : null,
+    viaSpotTo: destination.viaSpot ? { spotId: destination.viaSpot.spotId, name: destination.viaSpot.name, romaji: destination.viaSpot.romaji || null } : null
   };
 
   if (origin.groups.length === 0 || destination.groups.length === 0) {
@@ -1953,10 +2126,10 @@ async function searchJourneys(options = {}) {
     // common の版（spotId＋name のみ）を、実際に採用したバス停までの徒歩距離・分数付きへ
     // 差し替える。「〈松本城〉から徒歩○分の△△バス停発」のような注記に使う。
     viaSpotFrom: origin.viaSpot
-      ? { spotId: origin.viaSpot.spotId, name: origin.viaSpot.name, ...buildSpotWalkInfo(origin, actualFromKey) }
+      ? { spotId: origin.viaSpot.spotId, name: origin.viaSpot.name, romaji: origin.viaSpot.romaji || null, ...buildSpotWalkInfo(origin, actualFromKey) }
       : null,
     viaSpotTo: destination.viaSpot
-      ? { spotId: destination.viaSpot.spotId, name: destination.viaSpot.name, ...buildSpotWalkInfo(destination, actualToKey) }
+      ? { spotId: destination.viaSpot.spotId, name: destination.viaSpot.name, romaji: destination.viaSpot.romaji || null, ...buildSpotWalkInfo(destination, actualToKey) }
       : null,
     fuzzy: origin.fuzzy || destination.fuzzy,
     fuzzyFrom: origin.fuzzy ? origin.groups.map(serializeEndpoint) : null,
@@ -2131,6 +2304,13 @@ module.exports = {
   attachSpotWalkLegs,
   legDisplayDepartureSeconds,
   legDisplayArrivalSeconds,
+  normalizeSearchPreferences,
+  // 回帰テスト用（合成したGTFSインデックスで探索を回す）
+  buildBoardingsByGroup,
+  runRaptor,
+  runRaptorReverse,
+  normalizeReverseLabels,
+  buildJourney,
   // 調査・将来の再利用向け
   getSearchIndex
 };

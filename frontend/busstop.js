@@ -17,6 +17,11 @@
 (function () {
   const API_BASE = '/api';
   const APPROACHING_POLL_MS = 20000; // 既存のTRIP_REALTIME_POLL_MSと統一（仕様書 3.5.3）
+  // 多言語表示（i18n.js）
+  const I18n = window.I18n;
+  const t = I18n.t;
+  const tHtml = I18n.tHtml;
+  const nameHtml = I18n.nameHtml;
 
   // 画面をまたいで保持する状態
   let searchQuery = '';
@@ -130,7 +135,7 @@
 
   function formatDelayLabel(minutes) {
     if (minutes === null || minutes === undefined) return '';
-    return minutes <= 1 ? '定刻通り' : `${minutes}分遅れ`;
+    return minutes <= 1 ? t('定刻通り') : t('{n}分遅れ', { n: minutes });
   }
 
   /* ---------- お知らせ本文のリンク記法（トップ画面 app.js / 運行状況 servicestatus.js と同じ） ----------
@@ -208,8 +213,38 @@
    */
   function platformLabel(platform) {
     const code = platform.platformCode;
+    if (!code) return t('のりば（{id}）', { id: platform.stopId });
+    return /^\d+$/.test(code) ? t('{n}番のりば', { n: code }) : t(code);
+  }
+
+  /** お気に入りに保存する日本語のりば名（保存値は表示言語によらず日本語にそろえる）。 */
+  function platformLabelJa(platform) {
+    const code = platform.platformCode;
     if (!code) return `のりば（${platform.stopId}）`;
     return /^\d+$/.test(code) ? `${code}番のりば` : code;
+  }
+
+  /**
+   * バス停の付帯情報（GTFS stop_desc / stop_code / stop_url）。どれも無ければ ''。
+   * info は乗り場が確定していればその乗り場、統合表示ならバス停（全乗り場に共通する値だけを持つ）。
+   * timetable.js の stopInfoHtml と同一ロジック。
+   */
+  function stopInfoHtml(info) {
+    if (!info) return '';
+    const rows = [];
+    if (info.stopDesc) rows.push(`<p class="text-sm font-bold text-gray-700">${esc(info.stopDesc)}</p>`);
+    if (info.stopCode) rows.push(`<p class="text-[11px] font-bold text-gray-500">${esc(t('停留所番号：{code}', { code: info.stopCode }))}</p>`);
+    if (info.stopUrl) {
+      rows.push(`<a href="${esc(info.stopUrl)}" target="_blank" rel="noopener noreferrer" class="inline-block text-xs font-bold text-indigo-700 underline">${esc(t('このバス停の詳しい情報（外部サイト）'))}</a>`);
+    }
+    return rows.length ? `<div class="mt-2 space-y-0.5">${rows.join('')}</div>` : '';
+  }
+
+  /** 方面（行き先の並び）のHTML。英語表示では各行き先を訳し日本語を併記する。 */
+  function destinationsHtml(headsigns, limit) {
+    const list = (headsigns || []).slice(0, limit).map((h) => h.headsign).filter(Boolean);
+    if (list.length === 0) return '';
+    return tHtml('{dest}方面', { dest: list.map((h) => nameHtml(h, 'headsign')).join(I18n.isJa ? '・' : ' / ') });
   }
 
   /** 表示モード（すべての乗り場・乗り場別）に応じて、行き先が確定している標柱を返す。複数標柱かつ未選択ならnull。 */
@@ -224,31 +259,42 @@
   /** お気に入り対象。標柱を選択中ならその乗り場単独、未選択（すべての乗り場）ならその状態で登録する。 */
   function busStopFavorite(data, platform) {
     const platformId = platform ? platform.stopId : '';
+    // subtitle は日本語表示用（お気に入り一覧にそのまま出す）。英語表示では subtitleI18n から組み立てる。
     let subtitle = 'バス停';
-    if (data.hasMultiplePlatforms) subtitle = platform ? `バス停・${platformLabel(platform)}` : 'バス停・すべての乗り場';
+    let subtitleI18n = [['t', 'バス停']];
+    if (data.hasMultiplePlatforms) {
+      const code = platform ? platform.platformCode : '';
+      subtitle = platform ? `バス停・${platformLabelJa(platform)}` : 'バス停・すべての乗り場';
+      subtitleI18n = !platform
+        ? [['t', 'バス停・すべての乗り場']]
+        : /^\d+$/.test(code)
+          ? [['t', 'バス停・{n}番のりば', { n: code }]]
+          : [['t', 'バス停・{platform}', { platform: platformLabelJa(platform) }]];
+    }
     return {
       id: `busstop|${data.stop.stopKey}|${platformId}`,
       type: 'busstop',
       title: data.stop.stopName,
       subtitle,
+      subtitleI18n,
       url: busStopUrl(data.stop.stopKey, { platform: platformId || null })
     };
   }
 
   /* ---------- 画面: 検索 ---------- */
   function renderSearchView() {
-    setTitle('バス停検索', 'Bus Stop Search');
+    setTitle(t('バス停検索'), 'Bus Stop Search');
     root().innerHTML = `
       <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-bold text-indigo-900">バス停検索</h2>
-        <a href="/" data-spa class="text-sm font-bold text-indigo-700">メニューへ戻る</a>
+        <h2 class="text-xl font-bold text-indigo-900">${esc(t('バス停検索'))}</h2>
+        <a href="/" data-spa class="text-sm font-bold text-indigo-700">${esc(t('メニューへ戻る'))}</a>
       </div>
       <div class="bg-white rounded-2xl shadow-sm border-2 border-indigo-200 p-5">
-        <label class="block text-sm font-bold text-gray-700 mb-2" for="bs-search-input">バス停名で検索</label>
+        <label class="block text-sm font-bold text-gray-700 mb-2" for="bs-search-input">${esc(t('バス停名で検索'))}</label>
         <input id="bs-search-input" type="search" autocomplete="off"
-               placeholder="漢字・ひらがな・カタカナ・ローマ字で入力（例：松本 / まつもと / matsumoto）"
+               placeholder="${esc(t('漢字・ひらがな・カタカナ・ローマ字で入力（例：松本 / まつもと / matsumoto）'))}"
                class="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:outline-none font-bold">
-        <p class="text-[11px] text-gray-500 font-bold mt-2">入力するとすぐに候補が表示されます。</p>
+        <p class="text-[11px] text-gray-500 font-bold mt-2">${esc(t('入力するとすぐに候補が表示されます。'))}</p>
         <div id="bs-search-results" class="mt-4 space-y-2"></div>
       </div>
     `;
@@ -286,32 +332,35 @@
       renderSearchResults(container, data.stops || []);
     } catch (err) {
       if (seq !== searchSeq) return;
-      container.innerHTML = `<p class="text-sm font-bold text-red-600">検索に失敗しました：${esc(err.message)}</p>`;
+      container.innerHTML = `<p class="text-sm font-bold text-red-600">${esc(t('検索に失敗しました：{message}', { message: err.message }))}</p>`;
     }
   }
 
   /** 検索結果カード1件分のHTML。「近くのバス停」候補でも見た目を揃えるため共通化する。 */
   function stopCardHtml(stop) {
     const reading = [stop.nameHiragana, stop.nameRomaji].filter(Boolean).join(' / ');
+    // GTFS stop_desc（同名バス停の見分けに使われることが多い）
+    const descs = (stop.stopDescs || []).join('・');
     const chips = (stop.routes || [])
       .slice(0, 6)
       .map((route) => {
         const bg = parseHexColor(route.color) ? `#${route.color.replace('#', '')}` : '#e2e8f0';
         const fg = chipTextColor(route.color, route.textColor);
-        return `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full" style="background:${esc(bg)};color:${esc(fg)}">${esc(route.shortName || route.name)}</span>`;
+        return `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full" style="background:${esc(bg)};color:${esc(fg)}">${nameHtml(route.shortName || route.name, 'route')}</span>`;
       })
       .join('');
-    const more = (stop.routes || []).length > 6 ? `<span class="text-[10px] font-bold text-gray-500">ほか${stop.routes.length - 6}路線</span>` : '';
+    const more = (stop.routes || []).length > 6 ? `<span class="text-[10px] font-bold text-gray-500">${esc(t('ほか{n}路線', { n: stop.routes.length - 6 }))}</span>` : '';
     const badge = Number.isFinite(stop.walkMinutes)
-      ? `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1 shrink-0">徒歩約${stop.walkMinutes}分</span>`
-      : `<span class="text-[10px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-2 py-1 shrink-0">${stop.platformCount}乗り場</span>`;
+      ? `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1 shrink-0">${esc(t('徒歩約{n}分', { n: stop.walkMinutes }))}</span>`
+      : `<span class="text-[10px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-2 py-1 shrink-0">${esc(t('{n}乗り場', { n: stop.platformCount }))}</span>`;
     return `
       <a href="${esc(busStopUrl(stop.stopKey))}" data-spa
          class="block bg-white border-2 border-gray-200 rounded-xl p-3 hover:border-indigo-500 active:scale-[0.99] transition-all">
         <div class="flex items-center justify-between gap-2">
           <div class="min-w-0">
-            <p class="font-bold text-lg text-gray-900 truncate">${esc(stop.stopName)}</p>
+            <p class="font-bold text-lg text-gray-900 truncate">${nameHtml(stop.stopName, 'stop')}</p>
             ${reading ? `<p class="text-[11px] text-gray-500 font-bold truncate">${esc(reading)}</p>` : ''}
+            ${descs ? `<p class="text-xs text-gray-600 font-bold truncate">${esc(descs)}</p>` : ''}
           </div>
           ${badge}
         </div>
@@ -321,7 +370,7 @@
 
   function renderSearchResults(container, stops) {
     if (stops.length === 0) {
-      container.innerHTML = '<p class="text-sm font-bold text-gray-500">該当するバス停が見つかりませんでした。</p>';
+      container.innerHTML = `<p class="text-sm font-bold text-gray-500">${esc(t('該当するバス停が見つかりませんでした。'))}</p>`;
       return;
     }
 
@@ -368,7 +417,7 @@
   /** 検索欄が空のときの初期表示。自動フォーカスの代わりにお気に入りバス停・近くのバス停を
    *  候補として出す（お気に入りを一番上、その次に近い順。soft-fail：取得できなければ何も出さない）。 */
   async function showNearbyStops(container) {
-    container.innerHTML = '<p class="text-sm font-bold text-gray-400 py-3 text-center">近くのバス停を確認中...</p>';
+    container.innerHTML = `<p class="text-sm font-bold text-gray-400 py-3 text-center">${esc(t('近くのバス停を確認中...'))}</p>`;
     const [favoriteStops, nearbyStops] = await Promise.all([getFavoriteStops(), getNearbyStops()]);
     // 取得を待つ間に入力・画面遷移されていたら上書きしない
     if (searchQuery.trim() || document.getElementById('bs-search-results') !== container) return;
@@ -380,10 +429,10 @@
     }
     const sections = [];
     if (favoriteStops.length > 0) {
-      sections.push(`<p class="text-xs font-bold text-gray-500 px-1">お気に入りバス停</p><div class="mt-2 space-y-2">${favoriteStops.map(stopCardHtml).join('')}</div>`);
+      sections.push(`<p class="text-xs font-bold text-gray-500 px-1">${esc(t('お気に入りバス停'))}</p><div class="mt-2 space-y-2">${favoriteStops.map(stopCardHtml).join('')}</div>`);
     }
     if (nearbyOnlyStops.length > 0) {
-      sections.push(`<p class="text-xs font-bold text-gray-500 px-1 ${favoriteStops.length > 0 ? 'mt-4' : ''}">現在地から近いバス停</p><div class="mt-2 space-y-2">${nearbyOnlyStops.map(stopCardHtml).join('')}</div>`);
+      sections.push(`<p class="text-xs font-bold text-gray-500 px-1 ${favoriteStops.length > 0 ? 'mt-4' : ''}">${esc(t('現在地から近いバス停'))}</p><div class="mt-2 space-y-2">${nearbyOnlyStops.map(stopCardHtml).join('')}</div>`);
     }
     container.innerHTML = sections.join('');
   }
@@ -401,7 +450,7 @@
     destroyPlatformPickerMap();
     stopApproachingPolling();
     const seq = ++renderSeq;
-    root().innerHTML = '<p class="text-sm font-bold text-gray-500 py-10 text-center">バス停情報を読み込み中...</p>';
+    root().innerHTML = `<p class="text-sm font-bold text-gray-500 py-10 text-center">${esc(t('バス停情報を読み込み中...'))}</p>`;
 
     const date = todayString();
     let data;
@@ -414,8 +463,8 @@
       if (seq !== renderSeq) return;
       root().innerHTML = `
         <div class="bg-white rounded-2xl border-2 border-red-200 p-5">
-          <p class="font-bold text-red-700">${esc(err.status === 404 ? '指定のバス停が見つかりませんでした。' : err.message)}</p>
-          <button data-role="bs-back" class="inline-block mt-4 text-sm font-bold text-indigo-700">← 戻る</button>
+          <p class="font-bold text-red-700">${esc(err.status === 404 ? t('指定のバス停が見つかりませんでした。') : err.message)}</p>
+          <button data-role="bs-back" class="inline-block mt-4 text-sm font-bold text-indigo-700">${esc(t('← 戻る'))}</button>
         </div>`;
       // このページは検索結果・経路検索・時刻表・お気に入りなど複数の入口から来ることがあるため、
       // 「検索画面へ」固定ではなく直前の画面へ戻る（履歴が無ければ検索画面にフォールバック）。
@@ -424,7 +473,7 @@
       return;
     }
 
-    setTitle(data.stop.stopName, 'Bus Stop');
+    setTitle(I18n.nameText(data.stop.stopName, 'stop'), 'Bus Stop');
 
     // 別名で開かれた場合は正規のURLへ置き換える（timetable.jsと同じブックマーク正規化）
     if (data.stop.stopKey !== state.stopKey) {
@@ -436,16 +485,17 @@
 
     root().innerHTML = `
       <div class="flex items-center justify-between mb-3">
-        <button data-role="bs-back" class="text-sm font-bold text-indigo-700">← 戻る</button>
-        <a href="/" data-spa class="text-sm font-bold text-gray-500">メニュー</a>
+        <button data-role="bs-back" class="text-sm font-bold text-indigo-700">${esc(t('← 戻る'))}</button>
+        <a href="/" data-spa class="text-sm font-bold text-gray-500">${esc(t('メニュー'))}</a>
       </div>
 
       <div class="bg-white rounded-2xl shadow-sm border-2 border-indigo-200 p-5 mb-4">
         <div class="flex items-start justify-between gap-2">
           <div class="min-w-0">
-            <p class="text-xs text-indigo-600 font-bold">バス停</p>
-            <h2 class="text-2xl font-bold text-indigo-900 leading-tight">${esc(data.stop.stopName)}</h2>
+            <p class="text-xs text-indigo-600 font-bold">${esc(t('バス停'))}</p>
+            <h2 class="text-2xl font-bold text-indigo-900 leading-tight">${nameHtml(data.stop.stopName, 'stop', { block: true })}</h2>
             ${reading ? `<p class="text-[11px] text-gray-500 font-bold mt-1">${esc(reading)}</p>` : ''}
+            ${stopInfoHtml(platform_ || data.stop)}
           </div>
           ${window.Favorites ? window.Favorites.starButtonHtml(busStopFavorite(data, platform_)) : ''}
         </div>
@@ -455,12 +505,12 @@
       ${renderChooser(data)}
 
       <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-200 p-4 mb-4">
-        <p class="text-xs font-bold text-gray-500 mb-2">このバス停でできること</p>
+        <p class="text-xs font-bold text-gray-500 mb-2">${esc(t('このバス停でできること'))}</p>
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
           <a href="${esc(timetableUrl(data.stop.stopKey, { platform: platform_ ? platform_.stopId : null }))}" data-spa
-             class="block text-center bg-sky-600 text-white py-3 rounded-xl font-bold text-sm shadow hover:bg-sky-700">時刻表へ</a>
-          <button data-role="bs-goto" class="bg-emerald-600 text-white py-3 rounded-xl font-bold text-sm shadow hover:bg-emerald-700">このバス停に行く</button>
-          <button data-role="bs-showmap" class="bg-teal-600 text-white py-3 rounded-xl font-bold text-sm shadow hover:bg-teal-700">マップで見る</button>
+             class="block text-center bg-sky-600 text-white py-3 rounded-xl font-bold text-sm shadow hover:bg-sky-700">${esc(t('時刻表へ'))}</a>
+          <button data-role="bs-goto" class="bg-emerald-600 text-white py-3 rounded-xl font-bold text-sm shadow hover:bg-emerald-700">${esc(t('このバス停に行く'))}</button>
+          <button data-role="bs-showmap" class="bg-teal-600 text-white py-3 rounded-xl font-bold text-sm shadow hover:bg-teal-700">${esc(t('マップで見る'))}</button>
         </div>
       </div>
 
@@ -469,18 +519,18 @@
 
       <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-200 p-4">
         <div class="flex items-center justify-between mb-2">
-          <p class="text-xs font-bold text-gray-500">接近中のバス情報</p>
-          <span class="text-[10px] font-bold text-gray-400">30分以内に到着予定の便</span>
+          <p class="text-xs font-bold text-gray-500">${esc(t('接近中のバス情報'))}</p>
+          <span class="text-[10px] font-bold text-gray-400">${esc(t('30分以内に到着予定の便'))}</span>
         </div>
-        <div id="bs-approaching-list"><p class="text-sm font-bold text-gray-400 py-3 text-center">読み込み中...</p></div>
+        <div id="bs-approaching-list"><p class="text-sm font-bold text-gray-400 py-3 text-center">${esc(t('読み込み中...'))}</p></div>
       </div>
 
       <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-200 p-4 mt-4">
         <div class="flex items-center justify-between mb-2">
-          <p class="text-xs font-bold text-gray-500">周辺の観光スポット</p>
-          <span class="text-[10px] font-bold text-gray-400">半径500m以内・近い順</span>
+          <p class="text-xs font-bold text-gray-500">${esc(t('周辺の観光スポット'))}</p>
+          <span class="text-[10px] font-bold text-gray-400">${esc(t('半径500m以内・近い順'))}</span>
         </div>
-        <div id="bs-nearby-spots-list"><p class="text-sm font-bold text-gray-400 py-3 text-center">読み込み中...</p></div>
+        <div id="bs-nearby-spots-list"><p class="text-sm font-bold text-gray-400 py-3 text-center">${esc(t('読み込み中...'))}</p></div>
       </div>
     `;
 
@@ -527,7 +577,7 @@
       ? `<p class="font-bold text-gray-900 text-sm mb-1.5">${esc(notice.title)}</p>`
       : '';
     const image = notice.imageUrl
-      ? `<img src="${esc(notice.imageUrl)}" alt="${esc(notice.title || 'お知らせ')}"
+      ? `<img src="${esc(notice.imageUrl)}" alt="${esc(notice.title || t('お知らせ'))}"
              class="w-full rounded-xl border border-amber-200 object-contain bg-white mb-2" loading="lazy">`
       : '';
     const body = notice.body
@@ -552,12 +602,12 @@
 
   function renderBusstopNotices(container, res, platformObj, data) {
     const platformHeading = platformObj && data.hasMultiplePlatforms
-      ? `${platformLabel(platformObj)}のお知らせ`
-      : 'この乗り場のお知らせ';
+      ? t('{platform}のお知らせ', { platform: platformLabel(platformObj) })
+      : t('この乗り場のお知らせ');
 
     // バス停単位は統合表示（または乗り場が1か所）のときだけ。バス停単位を先、乗り場単位を後に並べる。
     const isIntegratedView = !data.hasMultiplePlatforms || !platformObj;
-    const html = (isIntegratedView ? noticeCardHtml('このバス停のお知らせ', res.stopNotices) : '')
+    const html = (isIntegratedView ? noticeCardHtml(t('このバス停のお知らせ'), res.stopNotices) : '')
       + (platformObj ? noticeCardHtml(platformHeading, res.platformNotices) : '');
     container.innerHTML = html;
   }
@@ -571,17 +621,17 @@
     const selected = data.selectedPlatform;
     const selectedInfo = selected
       ? `<div class="mt-3 flex items-center justify-between bg-indigo-50 border border-indigo-200 rounded-xl px-3 py-2">
-           <span class="text-sm font-bold text-indigo-900">表示中の乗り場：${esc(platformLabel(selected))}</span>
-           <button data-role="change-platform" class="text-xs font-bold text-indigo-700 underline">変更</button>
+           <span class="text-sm font-bold text-indigo-900">${esc(t('表示中の乗り場：{platform}', { platform: platformLabel(selected) }))}</span>
+           <button data-role="change-platform" class="text-xs font-bold text-indigo-700 underline">${esc(t('変更'))}</button>
          </div>`
       : '';
 
     return `
       <div class="mt-4">
-        <p class="text-[11px] font-bold text-gray-500 mb-1">表示モード（この停留所には乗り場が${data.platforms.length}か所あります）</p>
+        <p class="text-[11px] font-bold text-gray-500 mb-1">${esc(t('表示モード（この停留所には乗り場が{n}か所あります）', { n: data.platforms.length }))}</p>
         <div class="flex gap-2">
-          <button data-role="mode-all" class="flex-1 py-2.5 rounded-lg font-bold text-sm transition-all ${allActive ? activeClass : idleClass}">すべての乗り場</button>
-          <button data-role="mode-platform" class="flex-1 py-2.5 rounded-lg font-bold text-sm transition-all ${allActive ? idleClass : activeClass}">乗り場別</button>
+          <button data-role="mode-all" class="flex-1 py-2.5 rounded-lg font-bold text-sm transition-all ${allActive ? activeClass : idleClass}">${esc(t('すべての乗り場'))}</button>
+          <button data-role="mode-platform" class="flex-1 py-2.5 rounded-lg font-bold text-sm transition-all ${allActive ? idleClass : activeClass}">${esc(t('乗り場別'))}</button>
         </div>
         ${selectedInfo}
       </div>`;
@@ -604,8 +654,8 @@
     return `
       <div class="bg-white rounded-2xl shadow-sm border-2 border-indigo-100 p-4 mb-4">
         <div class="flex gap-2 mb-3">
-          ${tab('map', '地図から選ぶ')}
-          ${tab('headsign', '方面から選ぶ')}
+          ${tab('map', esc(t('地図から選ぶ')))}
+          ${tab('headsign', esc(t('方面から選ぶ')))}
         </div>
         ${body}
       </div>`;
@@ -621,12 +671,12 @@
                 const bg = parseHexColor(h.color) ? `#${h.color.replace('#', '')}` : '#e2e8f0';
                 const fg = chipTextColor(h.color, h.textColor);
                 return `<div class="flex items-center gap-2 py-1">
-                    <span class="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0" style="background:${esc(bg)};color:${esc(fg)}">${esc(h.routeShortName || h.routeName)}</span>
-                    <span class="text-sm font-bold text-gray-800 truncate" data-abbrev-fit>${esc(h.headsign || '行先表示なし')}</span>
+                    <span class="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0" style="background:${esc(bg)};color:${esc(fg)}">${nameHtml(h.routeShortName || h.routeName, 'route')}</span>
+                    <span class="text-sm font-bold text-gray-800 truncate" data-abbrev-fit>${h.headsign ? nameHtml(h.headsign, 'headsign') : esc(t('行先表示なし'))}</span>
                   </div>`;
               })
               .join('')
-          : '<p class="text-xs font-bold text-gray-400 py-1">この日の運行はありません</p>';
+          : `<p class="text-xs font-bold text-gray-400 py-1">${esc(t('この日の運行はありません'))}</p>`;
 
         return `
           <button data-role="pick-platform" data-platform="${esc(platform.stopId)}"
@@ -635,6 +685,7 @@
               <span class="font-bold text-gray-900">${esc(platformLabel(platform))}</span>
               <span class="text-[10px] font-bold text-gray-400">${esc(platform.stopId)}</span>
             </div>
+            ${platform.stopDesc ? `<p class="text-xs font-bold text-gray-600">${esc(platform.stopDesc)}</p>` : ''}
             <div class="mt-1">${headsigns}</div>
           </button>`;
       })
@@ -719,7 +770,7 @@
     destroyPlatformPickerMap();
     const points = data.platforms.filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon));
     if (points.length === 0) {
-      el.innerHTML = '<p class="text-sm font-bold text-gray-500 p-4">位置情報が登録されていません。</p>';
+      el.innerHTML = `<p class="text-sm font-bold text-gray-500 p-4">${esc(t('位置情報が登録されていません。'))}</p>`;
       return;
     }
 
@@ -740,11 +791,11 @@
         })
       }).addTo(platformPickerMap);
 
-      const destinations = platform.headsigns.slice(0, 3).map((h) => h.headsign).filter(Boolean).join('・');
+      const destinations = destinationsHtml(platform.headsigns, 3);
       marker.bindPopup(
         `<div style="font-weight:700">${esc(platformLabel(platform))}</div>` +
-        (destinations ? `<div style="font-size:11px">${esc(destinations)}方面</div>` : '') +
-        '<div style="font-size:11px;color:var(--acc-indigo-text);font-weight:700;margin-top:4px">この乗り場を見る</div>'
+        (destinations ? `<div style="font-size:11px">${destinations}</div>` : '') +
+        `<div style="font-size:11px;color:var(--acc-indigo-text);font-weight:700;margin-top:4px">${esc(t('この乗り場を見る'))}</div>`
       );
       marker.on('click', () => {
         navigate(busStopUrl(data.stop.stopKey, { platform: platform.stopId }));
@@ -784,12 +835,12 @@
 
     list.innerHTML = data.platforms
       .map((p) => {
-        const destinations = p.headsigns.slice(0, 2).map((h) => h.headsign).filter(Boolean).join('・');
+        const destinations = destinationsHtml(p.headsigns, 2);
         return `
           <button data-role="bs-pick" data-stop-id="${esc(p.stopId)}"
                   class="w-full text-left bg-white border-2 border-gray-200 rounded-xl p-3 hover:border-emerald-500 active:scale-[0.99] transition-all">
             <span class="font-bold text-gray-900">${esc(platformLabel(p))}</span>
-            ${destinations ? `<span class="block text-[11px] text-gray-500 font-bold mt-0.5">${esc(destinations)}方面</span>` : ''}
+            ${destinations ? `<span class="block text-[11px] text-gray-500 font-bold mt-0.5">${destinations}</span>` : ''}
           </button>`;
       })
       .join('');
@@ -834,7 +885,7 @@
       if (!el) return;
       const points = platforms.filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon));
       if (points.length === 0) {
-        el.innerHTML = '<p class="text-sm font-bold text-gray-500 p-4">位置情報が登録されていません。</p>';
+        el.innerHTML = `<p class="text-sm font-bold text-gray-500 p-4">${esc(t('位置情報が登録されていません。'))}</p>`;
         return;
       }
 
@@ -855,11 +906,11 @@
           })
         }).addTo(overviewMapInstance);
 
-        const destinations = (platform.headsigns || []).slice(0, 3).map((h) => h.headsign).filter(Boolean).join('・');
+        const destinations = destinationsHtml(platform.headsigns, 3);
         marker.bindPopup(
           `<div style="font-weight:700">${esc(platformLabel(platform))}</div>` +
-          (destinations ? `<div style="font-size:11px">${esc(destinations)}方面</div>` : '') +
-          (navigable ? '<div style="font-size:11px;color:var(--acc-emerald-text);font-weight:700;margin-top:4px">この乗り場の詳細を見る</div>' : '')
+          (destinations ? `<div style="font-size:11px">${destinations}</div>` : '') +
+          (navigable ? `<div style="font-size:11px;color:var(--acc-emerald-text);font-weight:700;margin-top:4px">${esc(t('この乗り場の詳細を見る'))}</div>` : '')
         );
         if (navigable) {
           marker.on('click', () => {
@@ -905,13 +956,13 @@
     } catch (err) {
       if (seq !== renderSeq) return;
       // リアルタイム取得の失敗は静的情報の表示を妨げない（soft-fail、仕様書5.2）
-      container.innerHTML = '<p class="text-sm font-bold text-gray-400 py-3 text-center">接近中のバス情報を取得できませんでした。</p>';
+      container.innerHTML = `<p class="text-sm font-bold text-gray-400 py-3 text-center">${esc(t('接近中のバス情報を取得できませんでした。'))}</p>`;
     }
   }
 
   function renderApproachingList(container, buses, data, platform) {
     if (buses.length === 0) {
-      container.innerHTML = '<p class="text-sm font-bold text-gray-400 py-3 text-center">現在、30分以内に到着予定の便はありません。</p>';
+      container.innerHTML = `<p class="text-sm font-bold text-gray-400 py-3 text-center">${esc(t('現在、30分以内に到着予定の便はありません。'))}</p>`;
       return;
     }
 
@@ -923,16 +974,16 @@
         const bg = style.hex || '#e2e8f0';
         const fg = chipTextColor(bus.routeColor, bus.routeTextColor);
         const timeLabel = bus.hasRealtime ? (bus.predictedArrivalTime || bus.scheduledArrivalTime) : bus.scheduledArrivalTime;
-        const delayLabel = bus.hasRealtime ? (formatDelayLabel(bus.delayMinutes) || '定刻通り') : '';
-        const posLabel = bus.hasRealtime
+        const delayLabel = bus.hasRealtime ? (formatDelayLabel(bus.delayMinutes) || t('定刻通り')) : '';
+        const posLabelHtml = bus.hasRealtime
           ? [
-              bus.currentStopName ? `${bus.currentStopName}通過済` : '始発前',
-              bus.remainingStops !== null && bus.remainingStops !== undefined ? `あと${bus.remainingStops}停留所` : ''
+              bus.currentStopName ? tHtml('{name}通過済', { name: nameHtml(bus.currentStopName, 'stop') }) : esc(t('始発前')),
+              bus.remainingStops !== null && bus.remainingStops !== undefined ? esc(t('あと{n}停留所', { n: bus.remainingStops })) : ''
             ].filter(Boolean).join(' ／ ')
-          : '時刻表どおりの到着予想';
+          : esc(t('時刻表どおりの到着予想'));
         const badge = bus.hasRealtime
-          ? '<span class="text-[10px] font-bold text-green-700 bg-green-50 px-2 py-0.5 rounded border border-green-200 inline-flex items-center"><span class="w-1.5 h-1.5 bg-green-500 rounded-full mr-1 animate-pulse"></span>リアルタイム</span>'
-          : '<span class="text-[10px] font-bold text-gray-500 bg-gray-100 px-2 py-0.5 rounded border border-gray-200">時刻表</span>';
+          ? `<span class="text-[10px] font-bold text-green-700 bg-green-50 px-2 py-0.5 rounded border border-green-200 inline-flex items-center"><span class="w-1.5 h-1.5 bg-green-500 rounded-full mr-1 animate-pulse"></span>${esc(t('リアルタイム'))}</span>`
+          : `<span class="text-[10px] font-bold text-gray-500 bg-gray-100 px-2 py-0.5 rounded border border-gray-200">${esc(t('時刻表'))}</span>`;
 
         const url = bus.tripDepartureTime ? tripUrl(bus, backUrl) : null;
         const tag = url ? 'a' : 'div';
@@ -942,13 +993,13 @@
           <${tag} ${hrefAttr} class="block border-2 border-gray-200 rounded-xl p-3 ${url ? 'hover:border-indigo-500 active:scale-[0.99] transition-all' : ''}">
             <div class="flex items-center justify-between gap-2">
               <div class="flex items-center gap-2 min-w-0">
-                <span class="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0" style="background:${esc(bg)};color:${esc(fg)}">${esc(bus.routeName)}</span>
-                <span class="text-sm font-bold text-gray-800 truncate" data-abbrev-fit>${esc(bus.headsign || '行先表示なし')}行</span>
+                <span class="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0" style="background:${esc(bg)};color:${esc(fg)}">${nameHtml(bus.routeName, 'route')}</span>
+                <span class="text-sm font-bold text-gray-800 truncate" data-abbrev-fit>${bus.headsign ? tHtml('{dest}行き', { dest: nameHtml(bus.headsign, 'headsign') }) : esc(t('行先表示なし'))}</span>
               </div>
               ${badge}
             </div>
             <div class="flex items-center justify-between mt-2">
-              <p class="text-[11px] font-bold text-gray-500">${esc(posLabel)}</p>
+              <p class="text-[11px] font-bold text-gray-500">${posLabelHtml}</p>
               <div class="text-right">
                 <span class="text-lg font-bold text-gray-900">${esc(timeLabel || '--')}</span>
                 ${delayLabel ? `<span class="block text-[10px] font-bold text-gray-500">${esc(delayLabel)}</span>` : ''}
@@ -972,7 +1023,7 @@
     } catch (err) {
       if (seq !== renderSeq) return;
       // 観光スポット情報の取得失敗はバス停情報自体の表示を妨げない（soft-fail）
-      container.innerHTML = '<p class="text-sm font-bold text-gray-400 py-3 text-center">観光スポット情報を取得できませんでした。</p>';
+      container.innerHTML = `<p class="text-sm font-bold text-gray-400 py-3 text-center">${esc(t('観光スポット情報を取得できませんでした。'))}</p>`;
     }
   }
 
@@ -980,9 +1031,9 @@
   function spotLinkLabel(url) {
     try {
       const host = new URL(url).hostname.replace(/^www\./, '');
-      return `公式サイト（${host}）を見る`;
+      return t('公式サイト（{host}）を見る', { host });
     } catch {
-      return '公式サイトを見る';
+      return t('公式サイトを見る');
     }
   }
 
@@ -1003,7 +1054,7 @@
 
   function renderNearbySpots(container, spots) {
     if (spots.length === 0) {
-      container.innerHTML = '<p class="text-sm font-bold text-gray-400 py-3 text-center">周辺に観光スポットはありません。</p>';
+      container.innerHTML = `<p class="text-sm font-bold text-gray-400 py-3 text-center">${esc(t('周辺に観光スポットはありません。'))}</p>`;
       return;
     }
     container.innerHTML = spots
@@ -1012,12 +1063,12 @@
           ${spotPhotoStrip(spot)}
           <div class="p-3">
             <div class="flex items-start justify-between gap-2">
-              <p class="font-bold text-gray-900">${esc(spot.name)}</p>
-              <span class="shrink-0 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">徒歩${esc(spot.walkMinutes)}分</span>
+              <p class="font-bold text-gray-900">${I18n.spotNameHtml(spot, { block: true })}</p>
+              <span class="shrink-0 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">${esc(t('徒歩{n}分', { n: spot.walkMinutes }))}</span>
             </div>
-            ${spot.hours ? `<p class="text-xs text-gray-500 mt-1">営業時間：${esc(spot.hours)}</p>` : ''}
-            ${spot.stayDuration ? `<p class="text-xs text-gray-500">滞在目安：${esc(spot.stayDuration)}</p>` : ''}
-            ${spot.description ? `<p class="text-xs text-gray-600 mt-1 line-clamp-3">${esc(spot.description)}</p>` : ''}
+            ${I18n.spotField(spot, 'hours') ? `<p class="text-xs text-gray-500 mt-1">${esc(t('営業時間：{value}', { value: I18n.spotField(spot, 'hours') }))}</p>` : ''}
+            ${I18n.spotField(spot, 'stayDuration') ? `<p class="text-xs text-gray-500">${esc(t('滞在目安：{value}', { value: I18n.spotField(spot, 'stayDuration') }))}</p>` : ''}
+            ${I18n.spotField(spot, 'description') ? `<p class="text-xs text-gray-600 mt-1 line-clamp-3">${esc(I18n.spotField(spot, 'description'))}</p>` : ''}
             ${spot.url ? `
               <a href="${esc(spot.url)}" target="_blank" rel="noopener noreferrer" data-spot-link="${esc(spot.spotId)}"
                  class="inline-flex items-center gap-1 mt-2 text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-full px-3 py-1 hover:bg-indigo-100">

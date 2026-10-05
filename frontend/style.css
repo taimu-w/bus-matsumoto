@@ -799,3 +799,37 @@ summary.list-none::-webkit-details-marker {
     transition-duration: 0.01ms;
   }
 }
+
+/* ==========================================================
+   多言語表示（i18n.js の nameHtml / spotNameHtml）
+   英語表示で訳したバス停名・路線名・行き先・観光スポット名に、
+   現地の案内表示と照らし合わせられるよう日本語表記を小さく添える。
+   色は親要素の文字色を薄めて使う（路線カラーのチップの上でも読めるように）。
+   ========================================================== */
+.i18n-ja {
+  margin-left: 0.35em;
+  font-size: 0.78em;
+  font-weight: 500;
+  opacity: 0.72;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.i18n-ja-block {
+  display: block;
+  margin-left: 0;
+  margin-top: 0.1em;
+}
+/* 幅の狭い所（時刻表の分のタイル・バスマップのラベル）では2行目に回す */
+.tt-min-sub .i18n-ja,
+.bus-marker-label .i18n-ja {
+  display: block;
+  margin-left: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 英語表示では名前が長くなり、1行に切り詰める（.truncate）と日本語併記ごと見えなくなるため、
+   訳した名前を含む行だけ折り返して全部見せる（日本語表示の見た目は変えない）。 */
+html:not([lang="ja"]) .truncate:has(.i18n-ja) {
+  white-space: normal;
+  overflow: visible;
+}

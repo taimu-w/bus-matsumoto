@@ -261,15 +261,24 @@ async function seedRoutes(client, feedId) {
     targetRouteNames.set(qualifiedRouteId, routeName);
 
     await client.query(
-      `INSERT INTO routes (id, name, short_name, color, text_color, feed_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO routes (id, name, short_name, description, color, text_color, feed_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (id) DO UPDATE
          SET name = EXCLUDED.name,
              short_name = EXCLUDED.short_name,
+             description = EXCLUDED.description,
              color = EXCLUDED.color,
              text_color = EXCLUDED.text_color,
              feed_id = EXCLUDED.feed_id`,
-      [qualifiedRouteId, routeName, row.route_short_name || '', row.route_color || '', row.route_text_color || '', feedId]
+      [
+        qualifiedRouteId,
+        routeName,
+        row.route_short_name || '',
+        (row.route_desc || '').trim(),
+        row.route_color || '',
+        row.route_text_color || '',
+        feedId
+      ]
     );
   }
 
@@ -289,15 +298,23 @@ async function seedRoutesStatic(client) {
     targetRouteNames.set(row.route_id, routeName);
 
     await client.query(
-      `INSERT INTO routes (id, name, short_name, color, text_color, feed_id)
-       VALUES ($1, $2, $3, $4, $5, NULL)
+      `INSERT INTO routes (id, name, short_name, description, color, text_color, feed_id)
+       VALUES ($1, $2, $3, $4, $5, $6, NULL)
        ON CONFLICT (id) DO UPDATE
          SET name = EXCLUDED.name,
              short_name = EXCLUDED.short_name,
+             description = EXCLUDED.description,
              color = EXCLUDED.color,
              text_color = EXCLUDED.text_color,
              feed_id = NULL`,
-      [row.route_id, routeName, row.route_short_name || '', row.route_color || '', row.route_text_color || '']
+      [
+        row.route_id,
+        routeName,
+        row.route_short_name || '',
+        (row.route_desc || '').trim(),
+        row.route_color || '',
+        row.route_text_color || ''
+      ]
     );
   }
 

@@ -1254,6 +1254,13 @@ async function migrate() {
       CREATE UNIQUE INDEX IF NOT EXISTS ux_vehicle_labels_name ON vehicle_labels (name) WHERE name IS NOT NULL
     `);
 
+    // ==========================================================
+    // 51. 路線の説明（GTFS route_desc）。リアルタイム時刻表の路線ページに出す。
+    //     値は seed.js の seedRoutes() が routes.txt から入れる。
+    //     新規環境ではschema.sqlに含まれているため実質no-op。
+    // ==========================================================
+    await client.query(`ALTER TABLE routes ADD COLUMN IF NOT EXISTS description TEXT`);
+
     await client.query('COMMIT');
     console.log('[migrate] マイグレーション完了');
   } catch (err) {

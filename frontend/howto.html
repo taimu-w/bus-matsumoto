@@ -26,6 +26,8 @@
         <h1 class="text-xl font-bold tracking-tight truncate">使い方</h1>
       </div>
       <div class="flex items-center gap-2 shrink-0">
+        <!-- 言語切替（日本語／English）。中身はページ末尾のスクリプトが I18n.toggleButtonHtml() で入れる。 -->
+        <span id="lang-switch-slot" class="contents"></span>
         <a href="/" class="on-brand-btn bg-white text-blue-800 px-3 rounded-lg shadow-md text-xs font-bold flex items-center">ホームへ</a>
       </div>
     </div>
@@ -358,5 +360,16 @@
       </a>
     </div>
   </nav>
+  <!-- 多言語表示（docs/i18n.md）。このページの文言は i18n-en.js の辞書で訳す。
+       文言を変えたら辞書のキー（日本語の原文）も合わせて更新すること（無いものは日本語のまま出る）。 -->
+  <script src="/i18n.js"></script>
+  <script src="/i18n-en.js"></script>
+  <script>
+    window.I18n.translateStatic(document.body);
+    document.getElementById('lang-switch-slot').innerHTML = window.I18n.toggleButtonHtml(
+      'on-brand-btn bg-white text-blue-800 rounded-lg shadow-md px-2 flex items-center gap-1 text-xs font-bold',
+      { compact: true }
+    );
+  </script>
 </body>
 </html>

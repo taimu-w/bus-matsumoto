@@ -13,6 +13,8 @@
   // 内容を大きく変えたときはこの値を上げると、既存の利用者にも一度だけ再表示される。
   const SEEN_KEY = 'busTimeOnboardingSeen';
   const SEEN_VALUE = '1';
+  // 多言語表示（i18n.js）。SLIDES の文言は描画時に t() で訳す（辞書は i18n-en.js）。
+  const t = window.I18n ? window.I18n.t : (s) => s;
 
   const SVG_BUS =
     '<svg class="w-9 h-9" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18,11H6V6h12M16.5,17A1.5,1.5 0 0,1 15,15.5A1.5,1.5 0 0,1 16.5,14A1.5,1.5 0 0,1 18,15.5A1.5,1.5 0 0,1 16.5,17M7.5,17A1.5,1.5 0 0,1 6,15.5A1.5,1.5 0 0,1 7.5,14A1.5,1.5 0 0,1 9,15.5A1.5,1.5 0 0,1 7.5,17M4,16c0,0.88 0.39,1.67 1,2.22V20a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1h8v1a1,1 0 0,0 1,1h1a1,1 0 0,0 1-1v-1.78c0.61-0.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8,0.5-8,4V16Z"/></svg>';
@@ -73,10 +75,11 @@
 
     root.querySelector('[data-role="ob-slide"]').innerHTML = `
       <div class="w-20 h-20 mx-auto rounded-2xl flex items-center justify-center ${s.wrap} ${s.fg}">${s.svg}</div>
-      <p class="text-[11px] font-black tracking-widest ${s.fg} uppercase mt-4">${s.badge}</p>
-      <h3 id="onboarding-title" class="text-xl font-black text-gray-900 mt-1 leading-snug">${s.title}</h3>
-      <p class="text-sm text-gray-600 leading-relaxed mt-2">${s.body}</p>
-      ${isLast ? '<p class="text-[11px] text-gray-400 mt-4">この案内は「使い方」ページからいつでも見直せます。</p>' : ''}
+      <p class="text-[11px] font-black tracking-widest ${s.fg} uppercase mt-4">${t(s.badge)}</p>
+      <h3 id="onboarding-title" class="text-xl font-black text-gray-900 mt-1 leading-snug">${t(s.title)}</h3>
+      <p class="text-sm text-gray-600 leading-relaxed mt-2">${t(s.body)}</p>
+      ${isLast ? `<p class="text-[11px] text-gray-400 mt-4">${t('この案内は「使い方」ページからいつでも見直せます。')}</p>` : ''}
+      ${idx === 0 && window.I18n ? `<div class="mt-4">${window.I18n.toggleButtonHtml('text-xs font-bold text-blue-700 border-2 border-blue-200 rounded-full px-3 py-1')}</div>` : ''}
     `;
 
     root.querySelector('[data-role="ob-dots"]').innerHTML = SLIDES
@@ -86,7 +89,7 @@
     const prevBtn = root.querySelector('[data-role="ob-prev"]');
     const nextBtn = root.querySelector('[data-role="ob-next"]');
     prevBtn.style.visibility = idx === 0 ? 'hidden' : 'visible';
-    nextBtn.textContent = isLast ? 'はじめる' : '次へ';
+    nextBtn.textContent = isLast ? t('はじめる') : t('次へ');
   }
 
   function cleanUrl() {

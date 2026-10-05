@@ -19,6 +19,25 @@ GTFSデータから、利用者がバス停名で検索し、時刻表と各便�
 インデックスは初回アクセス時（およびサーバー起動時の事前構築）に作られ、30分でTTL失効します。
 GTFS更新に成功すると`gtfsFeedManager.js`が`invalidateTimetableIndex()`を呼び、次回アクセスで作り直されます。
 
+## GTFSの任意項目の表示（stop_code / stop_desc / stop_url / platform_code / trip_short_name）
+
+値があるときだけ表示し、空のフィードでは何も出しません。
+
+| 項目 | 表示箇所 |
+|---|---|
+| `stop_desc` | バス停ページ・時刻表のバス停詳細の見出し下、乗り場選択（方面から選ぶ）の各乗り場、検索結果カード（標柱の`stop_desc`の重複なし一覧＝`stopDescs`。同名バス停の見分け用） |
+| `stop_code` | 見出し下に「停留所番号」 |
+| `stop_url` | 見出し下に外部リンク。`http(s)`以外のURLは`safeHttpUrl()`で捨てる（`javascript:`等をリンクにしない） |
+| `platform_code` | 「◯番のりば」表示（数字以外の値はそのまま） |
+| `trip_short_name` | 便詳細の情報行・時刻表の分タイルのツールチップ・経路検索の乗車区間に「便名」 |
+
+見出し下の`stop_*`は、乗り場が確定していればその乗り場（`platforms[]`の値）、すべての乗り場の統合表示なら
+**全乗り場に共通する値だけ**（APIの`stop.stopCode`/`stopDesc`/`stopUrl`。1本でも違えば空）を出します。
+乗り場ごとに違う説明を統合表示で1つに決め打ちすると、別の乗り場の説明を出してしまうためです。
+
+`route_desc`はリアルタイム時刻表の路線ページ（`#/realtime/...`）の路線名の行の下に出します
+（`routes.description`、`/api/routes`の`description`）。
+
 ## shapes.txt の取り込み（便詳細「地図で表示」の経路）
 
 `shapes.txt`も`OPTIONAL_GTFS_FILES`です（**`REQUIRED`に足してはいけません**。理由は`translations.txt`と同じ）。

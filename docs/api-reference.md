@@ -17,10 +17,11 @@
 
 | メソッド | パス | 概要 |
 |---|---|---|
-| GET | `/api/routes` | 利用可能な路線一覧（GTFSの`routes.txt`由来） |
+| GET | `/api/routes` | 利用可能な路線一覧（GTFSの`routes.txt`由来）。各要素`{ id, name, short_name, description, color, text_color }`（`description`＝`route_desc`、無ければ空文字） |
 | GET | `/api/route-shapes` | 路線図マップ用の路線の線形（GTFS`shapes.txt`由来。`route_shapes`テーブル）。`{ routes: [{ id, name, short_name, color, text_color, shapes: [{ shapeId, points }] }] }`で、`points`は`[[lat, lon], ...]`（`shape_pt_sequence`昇順・小数6桁）。**線形を1本も持たない路線は返さない**（地図に描く線が無い路線は絞り込みの選択肢にも出さないため）。リアルタイム休止では除外しない（返すのは運行状況ではなく静的な経路のため） |
 | GET | `/api/settings` | 通常のお知らせ（`notices`。最大3件・各要素`{title, body, imageUrl, startDate, endDate}`。**配信期間内のものだけ**を返す）・重要なお知らせ（`importantNotice`＝`{body, imageUrl, startDate, endDate}`。配信期間外なら中身は空） |
 | GET | `/api/server-load` | 現在のサイト閲覧数とサーバー負荷状況（自動更新の自動OFF判定に使用） |
+| GET | `/api/i18n/names?lang=en` | 多言語表示用の名称辞書（[i18n.md](i18n.md)）。`{ lang, stops, routes, headsigns, agencies }`で、各辞書は`{ 日本語名: [表示名, source] }`（`source`は`gtfs`＝translations.txtの訳／`romaji`＝ローマ字表記・かなからの変換）。訳もかなも無い名前は載らない。`lang=ja`（または省略）は空の辞書。`lang`が言語タグの形式でなければ400。`Cache-Control: max-age=600` |
 | GET | `/api/stops` | 指定路線（`routeId`必須）のバス停マスタ。方向・通過順に並び、標柱の`gtfs_stop_id`を含む（路線図マップで1路線選択時のバス停表示・乗り場別ページへの遷移に使用） |
 | GET | `/api/stops/search` | バス停名の部分一致検索（全路線対応） |
 | GET | `/api/timetable` | 本日運行対象の便の時刻表（`daily_trips`ベース。frequencies由来の仮想便も含む） |

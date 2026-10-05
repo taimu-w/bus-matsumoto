@@ -40,7 +40,7 @@ docker compose up --build
 ```
 `docker-entrypoint.sh`がコンテナ起動のたびに、DB接続待機 → `migrate.js` → `seed.js` → `server.js`起動、を実行します。利用者向け画面：`http://localhost:3000`、管理画面：`http://localhost:3000/admin`。
 
-`backend/test/`に、DBやネットワークを必要としない純粋関数（`utils/time.js`・`utils/geo.js`・`utils/kana.js`・`services/gtfsFrequencies.js`・`config/directionMapping.js`、および`services/busStopApproaching.js`・`services/gtfsCalendar.js`のうちDB/ファイルI/Oを伴わない部分だけを切り出した関数）の現在の挙動を固定する軽量な回帰テストがあります。追加依存なしでNode組み込みの`node --test`（Node 18+）で実行します。`npm test`で実行できます。lint設定は存在しません。テスト・lintのnpmスクリプトを追加する際は、既存の挙動を変えない範囲であることを確認した上で行ってください。
+`backend/test/`に、DBやネットワークを必要としない純粋関数（`utils/time.js`・`utils/geo.js`・`utils/kana.js`・`services/gtfsFrequencies.js`・`services/gtfsTransfers.js`・`config/directionMapping.js`、および`services/busStopApproaching.js`・`services/gtfsCalendar.js`のうちDB/ファイルI/Oを伴わない部分だけを切り出した関数）の現在の挙動を固定する軽量な回帰テストがあります。追加依存なしでNode組み込みの`node --test`（Node 18+）で実行します。`npm test`で実行できます。lint設定は存在しません。テスト・lintのnpmスクリプトを追加する際は、既存の挙動を変えない範囲であることを確認した上で行ってください。
 
 PostgreSQL接続は`DATABASE_URL`（ホスティング環境向け、SSL接続前提）または`PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD`（ローカル向け）で設定します。調整可能な環境変数（判定半径・タイムアウト閾値・ポーリング間隔など）は`backend/.env.example`を参照してください。**これらの運用パラメータは、環境変数に加えて管理画面「運用パラメータ設定」（`GET/PUT/DELETE /api/admin/runtime-settings`）からも編集できます。** 定義一覧は`backend/src/config/runtimeSettingsCatalog.js`、値の解決（優先順位: 管理画面での上書き値(DB, `system_settings`テーブル) > 環境変数 > コード既定値）は`backend/src/services/runtimeSettings.js`が担います。管理画面で一切編集しなければ環境変数だけで動きます。位置情報フィードやGTFS ZIPフィードのURLは環境変数**でもDBでもなく**、`backend/src/config/feeds.js`（コード）で管理されています（管理画面から編集できません）。外部ID⇔GTFS route_idの対応は`route_external_ids`テーブル（DB）で管理され、管理画面（`/api/admin/route-mappings`）から編集できます。位置情報CSVの方向値⇔GTFS `direction_id`の対応も`route_direction_rules`テーブル（DB）で管理され、管理画面「方向マッピング」（`/api/admin/direction-rules`）から編集できます（行が無い路線は既定で「方向で絞り込まない」）。
 
@@ -131,6 +131,7 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 - **徒歩ありの探索結果に、徒歩なしの探索結果を必ず混ぜています。** 徒歩を許すと「1駅手前で降りて歩く」方が最速になり、枝刈りでバスだけの案が消えてしまうためです。
 - 結果0件のときは条件を段階的に緩め（`RELAXATION_STEPS`）、それでも0件なら「次の運行日」「その日の始発」「近くのバス停」を返します。**「見つかりませんでした」だけを返さないこと。**
 - **詳細設定（乗換回数の上限・徒歩での乗り継ぎ・乗換の余裕時間）は、探索条件を「絞る方向」にだけ効かせます（`applyPreferencesToStep()`）。** 段階的フォールバックは0件のとき条件を緩めますが、利用者が明示した上限は超えさせないでください（「乗り換えなし」で検索したのに段階3のフォールバックで乗換つきの案が出る、という事故になります）。正規化は`normalizeSearchPreferences()`の1箇所に集約し、**未指定・不正値はすべて既定の探索条件へ落とします**（既存のURL・お気に入りの挙動を変えないため）。乗換余裕は探索時とリアルタイム反映後の乗換リスク判定（`flagTransferRisks()`）で同じ値を使ってください。詳細設定つきで0件になったときは、翌日以降を探す前に既定条件で探し直して原因を切り分け、設定が原因なら`no-route-with-conditions`を返して画面に解除の導線を出させます。
+- **GTFS`transfers.txt`（任意ファイル）で標柱の組に`min_transfer_time`が指定されていれば、その乗換だけ既定の乗換時間（同一バス停の乗換余裕／徒歩乗継の「徒歩＋余裕」）より指定値を優先します**（`services/gtfsTransfers.js`）。順向き（`specifiedTransferFrom`）と逆向き（`specifiedTransferTo`）は対で、`flagTransferRisks()`も同じ値（バス区間の`specifiedTransferSeconds`）で判定します。利用者が乗換余裕を明示したときだけ、その値を指定値の下限にします。詳細は[docs/route-search.md](docs/route-search.md)。
 - 運賃は`gtfsFare.js`が`fare_attributes.txt`/`fare_rules.txt`（**任意ファイル**）から引きます。該当ルールが無ければ「運賃不明」とし、推測はしません。
 - 画面は**「経路一覧」→「経路詳細」の2階層**です（URLは`/routesearch?…`と`/routesearch?…&journey=N`）。一覧は出発／到着時刻・所要時間・運賃・乗換回数・徒歩・おすすめ・直通と路線カラーのバーだけのシンプル表示で、カード全体が詳細を開くボタンです。乗り換え時刻・通過バス停・区間ごとのリアルタイム・便詳細への導線は詳細側にあります。**バッジ・運賃文言・所要時間バーは2画面で同じ関数（`journeyBadges()`/`journeyFareText()`/`renderDurationBar()`）を共用してください**（同じ経路が画面によって違う見た目・違う運賃表記になるのを防ぐため）。詳細内の「前の経路／次の経路」は`replaceState`で移動し（履歴を積まない）、「経路一覧へ戻る」は`smartBack()`でブラウザの戻ると同じ動きにします。`journey`は並び順であって恒久的なIDではないので、指定の経路が無いときは`journey`を外して一覧を表示します（エラーにしない）。
 - リアルタイムは**本日の検索のときだけ**、確定した経路に`realtimeTripLookup.js`経由で後から重ねます（重ね合わせに失敗しても定刻で成立させるsoft-fail）。
@@ -142,7 +143,7 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 
 - バス停の統合キー：同一ベースID＋同名なら`{stop_id}`、名前が違えば`{gtfs_id}_{stop_id}`。さらに同名かつ400m以内のバス停を1件へ統合し（2フィードに同じ物理バス停が別IDで入っているため）、使われなくなったキーは別名として残します。
 - **のりば（標柱）の座標統合**：バス停統合とは別レイヤーで、同一バス停内の標柱のうち座標差0.1m以内のものを1本に畳みます（`mergeCoincidentPlatforms`）。2フィードが同じ物理のりばを別`stop_id`で登録しているため必要。代表標柱（表示名・のりばキー）は`config/feeds.js`の`PLATFORM_DISPLAY_NAME_FEED_PRIORITY`（既定でぐるっと松本バス1）で選び、両フィードの`stop_times`を代表標柱に合算します。畳んだ標柱の行は`index.stops`に残す（`mergedInto`）＝経路検索が`stop_times`→`groupKey`で解決するため消せません。詳細は[docs/timetable-search.md](docs/timetable-search.md)。
-- よみがな・ローマ字は`translations.txt`から取得し、ローマ字が無ければ`utils/kana.js`がヘボン式で自動生成します。漢字→よみがなの変換は行いません。
+- よみがな・ローマ字は`translations.txt`から取得し、ローマ字が無ければ`utils/kana.js`がヘボン式で自動生成します。漢字→よみがなの変換は行いません。（英語表示の名称辞書は別系統。上の「多言語表示」参照）
 - 画面は**この機能だけHistory API（パス`/timetable...`）でルーティング**します。他画面はハッシュ（`#/realtime`など）のままです。
 
 ### スポット検索（`services/spotSearch.js` / `frontend/spotsearch.js`）
@@ -156,6 +157,14 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 - 画面はパスルーティング（`/spotsearch`）。路線チップからリアルタイム時刻表（**ハッシュ**ルーティング`#/realtime/...`）へ移るときは`pushState('/#/realtime/...')`でpathnameを`/`に戻してから`renderCurrentRoute()`を呼びます。**自由文字列が路線に解決したリダイレクトだけ`replaceState`**（`?q=`のURLを履歴に残すと戻るたびに再リダイレクトするため）。
 - **検索回数（`spot_search_counts`）は`spotSearch.js`が書き、分析用の読み出し（タップ回数とのマージ）も`spotSearch.getSpotEngagementStats()`が担います。`touristSpots.js`は`spot_search_counts`を参照しません**（循環参照防止。依存は`spotSearch.js`→`touristSpots.js`の一方向）。`tourist_spot_link_clicks`と同じく外部キーは張らず、`spot_id=''`（空文字）は「観光スポット以外（バス停・地名）に解決した検索」。
 - **観光スポットの識別子（`tourist_spots.id`、TEXT）は管理画面「観光スポット管理」のテキスト一括入力の1列目で管理者が指定します**（`services/touristSpots.js`、[docs/tourist-spots.md](docs/tourist-spots.md)）。名称による名寄せはせず、IDが同じなら名称が変わっても同一スポット。全件洗い替えはこのIDをキーにUPSERT＋テキストに無いIDをDELETE。`tourist_spot_link_clicks`/`spot_search_counts`の`spot_id`もこのIDです。
+
+### 多言語表示（`frontend/i18n.js` / `frontend/i18n-en.js` / `services/nameTranslations.js`）
+
+利用者画面は日本語／英語で表示できます（管理画面は日本語のみ）。詳細は[docs/i18n.md](docs/i18n.md)。
+
+- **画面の文言は日本語の文言そのものをキーに`t('…')`で引きます**（辞書は`i18n-en.js`）。利用者画面に日本語の文言を足したり変えたりしたら、`i18n-en.js`のキーも同じ文字列にすること（無いと英語表示でもその文言だけ日本語のまま出ます）。静的HTMLは`I18n.translateStatic()`がテキストノード単位で訳します。
+- **バス停名・路線名・行き先などの固有名詞はAPIでは日本語のまま返し、画面側で`/api/i18n/names`の名称辞書を引きます**（`I18n.nameHtml()`等）。辞書はGTFS`translations.txt`の訳 → ローマ字表記 → かなからのヘボン式、の順で作り、どれも無ければ日本語のまま。英語表示で訳した名前には**必ず日本語表記を併記**します（`nameHtml`/`nameText`）。名前を描く箇所で`esc(stop.name)`のように直接出さないこと。
+- 名称辞書のキャッシュはGTFS更新成功時に`invalidateNameTranslations()`で破棄します（`invalidateTimetableIndex()`と同じ2か所）。
 
 ### フロントエンド
 
@@ -172,7 +181,7 @@ computeAndStoreAllArrivals()  ⑧ 全active割り当ての到着予測を一括�
 
 ## 既知の注意点（理解せずに「修正」しないこと）
 
-- **`frequencies.txt`・`translations.txt`・`fare_attributes.txt`・`fare_rules.txt`・`feed_info.txt`・`shapes.txt`を`gtfsFeedManager.js`の`REQUIRED_GTFS_FILES`に足してはいけません。** 持たないフィードがあると、必須にした瞬間にGTFS更新が全フィードで「必須ファイル欠損」となり、システム全体が止まります。`OPTIONAL_GTFS_FILES`側に置いてあるのは意図的です（`translations.txt`が無い場合の扱いは`gtfsTimetable.js`が、運賃ファイルが無い場合の扱いは`gtfsFare.js`が「運賃不明」として吸収します。`feed_info.txt`が無い場合のGTFS有効期間は`gtfsTimetable.js`の`computeFeedValidity()`が`calendar.txt`／`calendar_dates.txt`から推定します。`shapes.txt`が無いフィード・線形が無い路線は路線図マップに出ないだけです）。
+- **`frequencies.txt`・`translations.txt`・`fare_attributes.txt`・`fare_rules.txt`・`feed_info.txt`・`shapes.txt`・`transfers.txt`を`gtfsFeedManager.js`の`REQUIRED_GTFS_FILES`に足してはいけません。** 持たないフィードがあると、必須にした瞬間にGTFS更新が全フィードで「必須ファイル欠損」となり、システム全体が止まります。`OPTIONAL_GTFS_FILES`側に置いてあるのは意図的です（`translations.txt`が無い場合の扱いは`gtfsTimetable.js`が、運賃ファイルが無い場合の扱いは`gtfsFare.js`が「運賃不明」として吸収します。`feed_info.txt`が無い場合のGTFS有効期間は`gtfsTimetable.js`の`computeFeedValidity()`が`calendar.txt`／`calendar_dates.txt`から推定します。`shapes.txt`が無いフィード・線形が無い路線は路線図マップに出ないだけです）。
 - **`MANAGED_GTFS_FILES`にファイルを追加したら、展開済みディレクトリを再展開させる必要があります。** 内容不変（HTTP 304／ハッシュ一致）のスキップ判定は`isExtractedSetCurrent()`が担い、展開マーカー`.extracted.json`（前回の管理対象ファイル集合＋実際に配置したファイル名）と突き合わせます。マーカーが無い／集合がコードと食い違う場合はスキップしないため、コード側でファイルを増やせば次の更新で必ずディスクへ降りてきます。**この判定を「`REQUIRED_GTFS_FILES`の存在確認」だけに戻さないでください。** 戻すと、配信元のZIPが変わるまで新しい任意ファイルが永久に展開されず、それを使う機能がエラーも出ないまま「データ0件」で固定されます（`shapes.txt`追加時に実際に踏みました）。
 - **GTFSの`trips.txt`から便と線形を結び付けるとき、`shape_id`列だけを見ないでください。** ぐるっと松本バス1は全便の`shape_id`が空欄で、代わりに日本標準のGTFS拡張列`jp_pattern_id`が`shapes.txt`の`shape_id`と1対1で対応しています。`shape_id`だけで判定すると、`shapes.txt`に47本の線形があるのに路線図が1本も描けません。この判定は`services/gtfsShapes.js`の`resolveTripShapeId()`に一本化してあり（`db/seed.js`の`seedShapes()`＝路線図マップと、`services/gtfsTimetable.js`＝便詳細「地図で表示」の両方が使う）、**自前で書き直さないでください**。代替キーを使うのは「その値が`shapes.txt`に`shape_id`として実在するとき」だけなので、対応が無いフィードで誤った線形を拾うことはありません。
 - **便詳細の「地図で表示」に重ねる線形は、その便の1本（`getTripDetail()`が返す`shapePoints`）だけにしてください。** 路線の全線形（`/api/route-shapes`が返す往路・復路・枝分かれ）を重ねると、**その便が通らない道まで経路として見えます**。路線図マップ（`/routemap`）が路線単位で全線形を描くのとは目的が違います。線形が無い便では線を描かないだけで、バス位置とバス停は従来どおり表示します。開いたときの表示範囲を「バスの現在地中心・ズーム16」から経路全体のfitBoundsへ変えないこと（肝心の現在位置が読み取れなくなります）。

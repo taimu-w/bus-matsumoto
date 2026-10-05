@@ -38,6 +38,8 @@
     <!-- ヘッダー上のボタンは .on-brand-btn を付けること。
          帯の上専用の配色を style.css 側で当てている。 -->
     <div class="flex items-center gap-2 flex-wrap justify-end shrink-0">
+      <!-- 言語切替（日本語／English）。中身は app.js が I18n.toggleButtonHtml() で入れる。 -->
+      <span id="lang-switch-slot" class="contents"></span>
       <label class="on-brand-btn bg-white text-blue-800 rounded-lg shadow-md px-2 py-1 flex items-center gap-2 text-xs font-bold" style="display:none;">
         <span>路線</span>
         <select id="route-select" class="bg-transparent outline-none text-blue-800 font-bold">
@@ -282,6 +284,8 @@
       <span id="selected-route-name" class="text-sm font-bold text-gray-600 truncate"></span>
       <span id="selected-route-fav" class="shrink-0"></span>
     </div>
+    <!-- 路線の説明（GTFS route_desc）。登録されている路線だけ表示する（app.jsのrenderRouteDescription）。 -->
+    <p id="selected-route-desc" class="-mt-3 mb-4 text-xs font-bold text-gray-600 whitespace-pre-wrap leading-relaxed" style="display:none;"></p>
     <!-- 路線お知らせ（管理画面「路線お知らせ」）。お知らせがあるときだけ表示する。
          リアルタイム運行情報の表示領域を狭めないよう題名だけを1行ずつ並べ、
          タップで詳細（画像＋本文）をnotice-modalで開く（app.jsのrenderRouteNotices）。 -->
@@ -564,6 +568,9 @@
 <!-- favorites.js・spot-photos.js・timetable.js・stopmap.js・routemap.js・busstop.js・routesearch.js・spotsearch.js・onboarding.js・realtime-diagram.js は app.js より先に読み込む（app.js の初回ルーティングから参照するため）。
      spot-photos.js は busstop.js・routesearch.js・spotsearch.js が観光スポットの写真描画に使う共通モジュールなので、それらより先に置く。
      text-abbrev.js は系統名・行き先の表示略称を扱う共通モジュールで、busstop.js・timetable.js・app.js が使うためそれらより先に置く。 -->
+<!-- i18n.js（多言語表示の共通モジュール）と i18n-en.js（英語の文言辞書）は、他のすべてのスクリプトより先に読み込む。 -->
+<script src="/i18n.js"></script>
+<script src="/i18n-en.js"></script>
 <script src="/favorites.js"></script>
 <script src="/spot-photos.js"></script>
 <script src="/text-abbrev.js"></script>

@@ -23,6 +23,8 @@
       <p class="text-[10px] opacity-90 font-bold uppercase tracking-widest">Alpico Traffic Status</p>
     </div>
     <div class="flex items-center gap-2 flex-wrap justify-end shrink-0">
+      <!-- 言語切替（日本語／English）。中身は servicestatus.js が I18n.toggleButtonHtml() で入れる。 -->
+      <span id="lang-switch-slot" class="contents"></span>
       <a href="/" class="on-brand-btn bg-white text-blue-800 px-3 rounded-lg shadow-md text-xs font-bold flex items-center">トップへ</a>
       <button id="refresh-btn" class="on-brand-btn bg-white text-blue-800 px-2.5 rounded-lg shadow-md flex items-center gap-1">
         <svg id="refresh-icon" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -44,6 +46,8 @@
 
   <div class="bg-white rounded-2xl shadow-sm border-2 border-blue-100 p-4 mb-6">
     <p class="text-sm font-bold text-gray-700">出典：アルピコ交通株式会社 公式サイト（松本地区）</p>
+    <!-- 英語表示のときだけ servicestatus.js が表示する（運行状況の本文は公式サイトの日本語のまま）。 -->
+    <p id="ja-source-note" class="text-xs text-amber-700 font-bold mt-1" style="display:none;"></p>
     <p id="source-updated" class="text-xs text-gray-500 mt-1"></p>
     <p id="scraped-at" class="text-[10px] text-gray-400 mt-1"></p>
   </div>
@@ -89,6 +93,8 @@
   </div>
 </nav>
 
+<script src="/i18n.js"></script>
+<script src="/i18n-en.js"></script>
 <script src="servicestatus.js"></script>
 </body>
 </html>

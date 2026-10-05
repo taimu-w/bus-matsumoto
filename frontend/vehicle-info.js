@@ -8,6 +8,9 @@
 //
 // アイコン未登録の車両では iconImgHtml() が null を返すので、呼び出し側は従来のアイコン（🚌等）を描く。
 (function () {
+  // 多言語表示（i18n.js）。管理画面（admin.html）は i18n.js を読み込まないので、無ければ日本語のまま。
+  const t = window.I18n ? window.I18n.t : (s) => s;
+
   function esc(value) {
     return String(value ?? '')
       .replace(/&/g, '&amp;')
@@ -64,7 +67,7 @@
     if (rotate) transforms.push(`rotate(${rotate}deg)`);
     if (flip) transforms.push('scaleX(-1)');
     const style = transforms.length ? `transform:${transforms.join(' ')};` : '';
-    const img = iconImgHtml(profile, '', 'バス', style);
+    const img = iconImgHtml(profile, '', t('バス'), style);
     if (!img) return null;
     const rad = (rotate * Math.PI) / 180;
     const w = Math.ceil(Math.abs(MARKER_W * Math.cos(rad)) + Math.abs(MARKER_H * Math.sin(rad)));
@@ -78,8 +81,8 @@
   function featureRowHtml(label, value) {
     if (value !== true && value !== false) return '';
     const badge = value
-      ? '<span class="text-xs font-bold text-green-800 bg-green-100 border border-green-200 rounded-full px-2.5 py-0.5">対応</span>'
-      : '<span class="text-xs font-bold text-gray-600 bg-gray-100 border border-gray-200 rounded-full px-2.5 py-0.5">非対応</span>';
+      ? `<span class="text-xs font-bold text-green-800 bg-green-100 border border-green-200 rounded-full px-2.5 py-0.5">${esc(t('対応'))}</span>`
+      : `<span class="text-xs font-bold text-gray-600 bg-gray-100 border border-gray-200 rounded-full px-2.5 py-0.5">${esc(t('非対応'))}</span>`;
     return `
       <div class="flex items-center justify-between gap-3 py-2 border-b border-gray-100 last:border-b-0">
         <span class="text-sm font-bold text-gray-800">${esc(label)}</span>
@@ -89,15 +92,15 @@
 
   function detailBodyHtml(profile) {
     const p = profile || {};
-    const image = iconImgHtml(p, 'max-h-full max-w-full object-contain', '車両の外観');
+    const image = iconImgHtml(p, 'max-h-full max-w-full object-contain', t('車両の外観'));
     const imageHtml = image
       ? `<div class="bg-gray-50 rounded-2xl h-44 flex items-center justify-center p-3 mb-4">${image}</div>`
       : '';
 
-    const featureRows = featureRowHtml('ノンステップバス', p.nonStep) + featureRowHtml('車いす対応', p.wheelchair);
+    const featureRows = featureRowHtml(t('ノンステップバス'), p.nonStep) + featureRowHtml(t('車いす対応'), p.wheelchair);
     const featureHtml = featureRows
       ? `<div class="mb-4">
-           <p class="text-xs font-bold text-gray-500 mb-1">車両の設備</p>
+           <p class="text-xs font-bold text-gray-500 mb-1">${esc(t('車両の設備'))}</p>
            <div class="bg-white border border-gray-200 rounded-xl px-3">${featureRows}</div>
          </div>`
       : '';
@@ -106,16 +109,16 @@
     const note = typeof p.paymentNote === 'string' ? p.paymentNote.trim() : '';
     const paymentHtml = (methods.length > 0 || note)
       ? `<div class="mb-4">
-           <p class="text-xs font-bold text-gray-500 mb-1">お支払い方法</p>
+           <p class="text-xs font-bold text-gray-500 mb-1">${esc(t('お支払い方法'))}</p>
            ${methods.length > 0
-             ? `<div class="flex flex-wrap gap-1.5">${methods.map((m) => `<span class="text-sm font-bold text-blue-900 bg-blue-50 border border-blue-200 rounded-lg px-2.5 py-1">${esc(m.label)}</span>`).join('')}</div>`
+             ? `<div class="flex flex-wrap gap-1.5">${methods.map((m) => `<span class="text-sm font-bold text-blue-900 bg-blue-50 border border-blue-200 rounded-lg px-2.5 py-1">${esc(t(m.label))}</span>`).join('')}</div>`
              : ''}
            ${note ? `<p class="text-xs text-gray-700 mt-2 whitespace-pre-wrap">${esc(note)}</p>` : ''}
          </div>`
       : '';
 
     const emptyHtml = (!featureHtml && !paymentHtml)
-      ? '<p class="text-sm text-gray-500 mb-4">この車両の設備・お支払い方法の情報は登録されていません。</p>'
+      ? `<p class="text-sm text-gray-500 mb-4">${esc(t('この車両の設備・お支払い方法の情報は登録されていません。'))}</p>`
       : '';
 
     return `
@@ -123,7 +126,7 @@
       ${featureHtml}
       ${paymentHtml}
       ${emptyHtml}
-      <p class="text-[11px] text-gray-400">車両の入れ替え等により、実際の車両と異なる場合があります。</p>`;
+      <p class="text-[11px] text-gray-400">${esc(t('車両の入れ替え等により、実際の車両と異なる場合があります。'))}</p>`;
   }
 
   /** 車両詳細ポップアップ（index.html の #vehicle-detail-modal）を開く。title は便の行先など。 */

@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS routes (
   id            TEXT PRIMARY KEY,
   name          TEXT NOT NULL,
   short_name    TEXT,
+  -- GTFS route_desc（路線の説明）。リアルタイム時刻表の路線ページに出す。無ければ空文字
+  description   TEXT,
   color         TEXT,
   text_color    TEXT,
   feed_id       TEXT,

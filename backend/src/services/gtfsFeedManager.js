@@ -43,13 +43,17 @@ const REQUIRED_GTFS_FILES = [
 // shapes.txt は路線図マップ（`/routemap`）が描く路線の線形の供給元。
 // 同じ理由で REQUIRED にはしない。持たないフィード・持たない路線は
 // 路線図マップに出さないだけで、他の機能には一切影響しない。
+//
+// transfers.txt は経路検索の乗換時間（min_transfer_time）の供給元（gtfsTransfers.js）。
+// 同じ理由で REQUIRED にはしない。持たないフィードでは既定の乗換余裕・徒歩時間で探索する。
 const OPTIONAL_GTFS_FILES = [
   'frequencies.txt',
   'translations.txt',
   'fare_attributes.txt',
   'fare_rules.txt',
   'feed_info.txt',
-  'shapes.txt'
+  'shapes.txt',
+  'transfers.txt'
 ];
 
 const MANAGED_GTFS_FILES = [...REQUIRED_GTFS_FILES, ...OPTIONAL_GTFS_FILES];
@@ -475,6 +479,8 @@ async function updateAllGtfsFeeds() {
       require('./gtfsTimetable').invalidateTimetableIndex();
       // 運賃インデックス（経路検索の運賃表示）も同じくGTFSファイル由来。
       require('./gtfsFare').invalidateFareIndex();
+      // 多言語表示の名称辞書（translations.txt 由来）も同じくGTFSファイル由来。
+      require('./nameTranslations').invalidateNameTranslations();
       console.log('[gtfsFeedManager] GTFS更新に伴いDBへ再投入しました。');
 
       // 指紋の確定は seed() 成功後。ここより手前で書くと、seed() が失敗した回の

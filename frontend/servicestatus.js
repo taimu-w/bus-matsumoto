@@ -1,4 +1,7 @@
 const API_BASE = '/api';
+// 多言語表示（i18n.js）。運行状況の本文（路線名・詳細）はアルピコ交通公式サイトの日本語のまま表示する。
+const I18n = window.I18n;
+const t = I18n.t;
 
 function $(id) { return document.getElementById(id); }
 
@@ -54,7 +57,7 @@ function createRouteCard(route) {
   card.innerHTML = `
     <div class="flex justify-between items-start gap-3 mb-2">
       <h3 class="font-bold text-gray-900 leading-snug">${escapeHtml(route.name)}</h3>
-      <span class="shrink-0 text-xs font-bold px-2.5 py-1 rounded border ${statusBadgeClass(status)}">${escapeHtml(status || '情報なし')}</span>
+      <span class="shrink-0 text-xs font-bold px-2.5 py-1 rounded border ${statusBadgeClass(status)}">${escapeHtml(status ? t(status) : t('情報なし'))}</span>
     </div>
     ${route.detail ? `<p class="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">${linkifyDetail(route.detail)}</p>` : ''}
   `;
@@ -93,9 +96,9 @@ function render(data) {
 
   categories.forEach((category) => container.appendChild(createCategorySection(category)));
 
-  $('source-updated').textContent = data.sourceUpdatedAt ? `公式サイト表示の更新日時：${data.sourceUpdatedAt}` : '';
+  $('source-updated').textContent = data.sourceUpdatedAt ? t('公式サイト表示の更新日時：{time}', { time: data.sourceUpdatedAt }) : '';
   const scrapedAt = data.scrapedAt ? new Date(data.scrapedAt) : null;
-  $('scraped-at').textContent = scrapedAt ? `本システムでの取得日時：${scrapedAt.toLocaleString('ja-JP')}` : '';
+  $('scraped-at').textContent = scrapedAt ? t('本システムでの取得日時：{time}', { time: scrapedAt.toLocaleString(I18n.locale()) }) : '';
 }
 
 async function loadStatus() {
@@ -119,5 +122,13 @@ async function loadStatus() {
   }
 }
 
+I18n.translateStatic(document.body);
+if ($('lang-switch-slot')) {
+  $('lang-switch-slot').innerHTML = I18n.toggleButtonHtml('on-brand-btn bg-white text-blue-800 rounded-lg shadow-md px-2 flex items-center gap-1 text-xs font-bold', { compact: true });
+}
+if (!I18n.isJa && $('ja-source-note')) {
+  $('ja-source-note').textContent = t('運行状況の内容は公式サイトの日本語のまま表示しています。');
+  $('ja-source-note').style.display = 'block';
+}
 $('refresh-btn').addEventListener('click', loadStatus);
 loadStatus();

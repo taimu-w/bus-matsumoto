@@ -27,9 +27,16 @@
     return cache;
   }
 
+  // 日本語以外の表示では略称を使わない。略称辞書は日本語の系統名・行き先に対するもので、
+  // 英語表示の要素は訳した名前＋日本語併記（i18n.js の nameHtml）の入れ子構造になっており、
+  // textContent での置き換えをすると併記が消えるため。
+  function isDisabled() {
+    return Boolean(window.I18n && !window.I18n.isJa);
+  }
+
   // 同期関数。キャッシュ未ロード時・辞書が空のときは text をそのまま返す（安全側フォールバック）。
   function apply(text) {
-    if (!text || !cache || cache.length === 0) return text;
+    if (!text || !cache || cache.length === 0 || isDisabled()) return text;
     let result = text;
     for (const { original, abbreviation } of cache) {
       if (original && result.includes(original)) {
@@ -42,7 +49,7 @@
   // root配下の [data-abbrev-fit] 要素のうち、実際にはみ出しているものだけを略称表示に切り替える。
   // CSSの省略記号（ellipsis）はそのまま残すため、略称を適用してもなおはみ出す場合はellipsisが効く。
   function fitAll(root) {
-    if (!cache || cache.length === 0) return;
+    if (!cache || cache.length === 0 || isDisabled()) return;
     const scope = root || document;
     const targets = scope.querySelectorAll ? scope.querySelectorAll('[data-abbrev-fit]') : [];
     targets.forEach((el) => {

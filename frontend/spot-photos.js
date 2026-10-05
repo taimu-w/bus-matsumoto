@@ -23,6 +23,8 @@
   const TICK_MS = 1000;
   const SWIPE_THRESHOLD_PX = 40;
   const READY_ATTR = 'data-spot-carousel-ready';
+  // 多言語表示（i18n.js）。管理画面は i18n.js を読み込まないので、無ければ日本語のまま。
+  const t = window.I18n ? window.I18n.t : (s, p) => String(s).replace(/\{(\w+)\}/g, (m, k) => (p && k in p ? p[k] : m));
 
   const prefersReducedMotion =
     typeof window.matchMedia === 'function' &&
@@ -57,7 +59,9 @@
 
     const height = options.height || '10rem';
     const wrapClass = options.wrapClass ? ` ${options.wrapClass}` : '';
-    const name = spot && spot.name ? String(spot.name) : '';
+    const name = spot && spot.name
+      ? (window.I18n ? window.I18n.spotNameText(spot) : String(spot.name))
+      : '';
     const styleAttr = ` style="--spot-carousel-h:${esc(height)}"`;
 
     // 1枚だけなら従来どおり全幅の静止画（操作要素なし）。
@@ -72,7 +76,7 @@
     const slides = photos
       .map(
         (url, i) =>
-          `<img class="spot-carousel-slide" src="${esc(url)}" alt="${esc(name)}（${i + 1}/${photos.length}）"` +
+          `<img class="spot-carousel-slide" src="${esc(url)}" alt="${esc(t('{name}（{i}/{n}）', { name, i: i + 1, n: photos.length }))}"` +
           `${i === 0 ? '' : ' loading="lazy"'} draggable="false">`
       )
       .join('');
@@ -81,7 +85,7 @@
       .map(
         (_, i) =>
           `<button type="button" class="spot-carousel-dot${i === 0 ? ' is-active' : ''}" ` +
-          `data-spot-carousel-goto="${i}" aria-label="${i + 1}枚目を表示"></button>`
+          `data-spot-carousel-goto="${i}" aria-label="${esc(t('{n}枚目を表示', { n: i + 1 }))}"></button>`
       )
       .join('');
 
@@ -92,10 +96,10 @@
 
     return (
       `<div class="spot-carousel${wrapClass}"${styleAttr} data-spot-carousel ` +
-      `role="group" aria-roledescription="カルーセル"${name ? ` aria-label="${esc(name)}の写真"` : ''}>` +
+      `role="group" aria-roledescription="${esc(t('カルーセル'))}"${name ? ` aria-label="${esc(t('{name}の写真', { name }))}"` : ''}>` +
       `<div class="spot-carousel-viewport"><div class="spot-carousel-track">${slides}</div></div>` +
-      `<button type="button" class="spot-carousel-nav spot-carousel-prev" data-spot-carousel-dir="-1" aria-label="前の写真">${prevIcon}</button>` +
-      `<button type="button" class="spot-carousel-nav spot-carousel-next" data-spot-carousel-dir="1" aria-label="次の写真">${nextIcon}</button>` +
+      `<button type="button" class="spot-carousel-nav spot-carousel-prev" data-spot-carousel-dir="-1" aria-label="${esc(t('前の写真'))}">${prevIcon}</button>` +
+      `<button type="button" class="spot-carousel-nav spot-carousel-next" data-spot-carousel-dir="1" aria-label="${esc(t('次の写真'))}">${nextIcon}</button>` +
       `<div class="spot-carousel-dots">${dots}</div>` +
       '</div>'
     );

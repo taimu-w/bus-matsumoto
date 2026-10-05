@@ -27,6 +27,9 @@
  * ========================================================== */
 (function () {
   const API_BASE = '/api';
+  // 多言語表示（i18n.js）
+  const I18n = window.I18n;
+  const t = I18n.t;
   // 線形の太さ。実線の下に透明な太い線を重ねて、細い線でもタップしやすくする。
   const LINE_WEIGHT = 4;
   const TAP_TARGET_WEIGHT = 16;
@@ -88,7 +91,7 @@
 
   /** 表示名は必ずGTFSのroute名/略称から取る（内部IDは利用者に見せない）。 */
   function routeDisplayName(route) {
-    return route.name || route.short_name || '路線';
+    return route.name || route.short_name || t('路線');
   }
 
   /** 現在の絞り込みを載せた /routemap のURL。'all' は素の /routemap。 */
@@ -162,10 +165,10 @@
     const wrap = document.createElement('div');
     wrap.className = 'min-w-[11rem]';
     wrap.innerHTML = `
-      <p class="font-bold text-blue-900 text-sm leading-snug mb-2">${escapeHtml(routeDisplayName(route))}</p>
+      <p class="font-bold text-blue-900 text-sm leading-snug mb-2">${I18n.nameHtml(routeDisplayName(route), 'route', { block: true })}</p>
       <button type="button" data-role="routemap-goto"
         class="w-full bg-blue-700 text-white text-xs font-bold px-3 py-2 rounded-lg active:scale-[0.98] transition-transform">
-        リアルタイム時刻表をひらく
+        ${escapeHtml(t('リアルタイム時刻表をひらく'))}
       </button>
     `;
     wrap.querySelector('[data-role="routemap-goto"]').addEventListener('click', () => {
@@ -309,7 +312,7 @@
       marker.on('tooltipclose', () => {
         if (armedStopMarker === marker) armedStopMarker = null;
       });
-      marker.bindTooltip(escapeHtml(stop.name), stopTooltipOptions(showLabels));
+      marker.bindTooltip(I18n.nameHtml(stop.name, 'stop'), stopTooltipOptions(showLabels));
       group.addLayer(marker);
     });
     armedStopMarker = null;
@@ -373,13 +376,13 @@
 
     if (routeFilter === 'all') {
       setStatus(visibleCount > 0
-        ? `路線図 ${visibleCount}路線を表示中（路線をタップすると時刻表へ移動できます）`
-        : '路線図を表示できる路線がありません。');
+        ? t('路線図 {n}路線を表示中（路線をタップすると時刻表へ移動できます）', { n: visibleCount })
+        : t('路線図を表示できる路線がありません。'));
     } else {
       const selected = routeLayers.find(({ route }) => route.id === routeFilter);
       setStatus(selected
-        ? `${routeDisplayName(selected.route)}：路線をタップすると時刻表へ移動できます`
-        : '選択した路線の路線図が見つかりませんでした。');
+        ? t('{route}：路線をタップすると時刻表へ移動できます', { route: I18n.nameText(routeDisplayName(selected.route), 'route') })
+        : t('選択した路線の路線図が見つかりませんでした。'));
     }
   }
 
@@ -388,11 +391,11 @@
     const selector = document.getElementById('routemap-route-select');
     if (!selector) return;
 
-    selector.innerHTML = '<option value="all">すべての路線</option>';
+    selector.innerHTML = `<option value="all">${escapeHtml(t('すべての路線'))}</option>`;
     routeLayers.forEach(({ route }) => {
       const option = document.createElement('option');
       option.value = route.id;
-      option.textContent = routeDisplayName(route);
+      option.textContent = I18n.nameText(routeDisplayName(route), 'route');
       selector.appendChild(option);
     });
     selector.value = routeFilter;
@@ -409,7 +412,7 @@
   }
 
   async function loadRouteShapes() {
-    setStatus('路線図を読み込み中...');
+    setStatus(t('路線図を読み込み中...'));
     if (!cachedRoutes) {
       const data = await fetchJson(`${API_BASE}/route-shapes`);
       cachedRoutes = data.routes || [];
@@ -444,21 +447,21 @@
       fillColor: '#2563eb',
       fillOpacity: 1
     }).addTo(mapInstance);
-    userMarker.bindPopup('現在地');
+    userMarker.bindPopup(escapeHtml(t('現在地')));
   }
 
   async function render() {
     const section = document.getElementById('section-routemap');
     if (!section) return;
     section.style.display = 'block';
-    if (typeof window.setPageTitle === 'function') window.setPageTitle('路線図マップ', 'Route Map');
+    if (typeof window.setPageTitle === 'function') window.setPageTitle(t('路線図マップ'), 'Route Map');
     if (!initializeMap()) return;
 
     try {
       await loadRouteShapes();
     } catch (err) {
       console.error('路線図の取得エラー:', err);
-      setStatus('路線図の取得に失敗しました。');
+      setStatus(t('路線図の取得に失敗しました。'));
     }
     overlayUserLocation();
   }

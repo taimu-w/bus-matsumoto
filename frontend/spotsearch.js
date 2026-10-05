@@ -25,6 +25,15 @@
  * ========================================================== */
 (function () {
   const API_BASE = '/api';
+  // 多言語表示（i18n.js）
+  const I18n = window.I18n;
+  const t = I18n.t;
+  const nameHtml = I18n.nameHtml;
+  // 予約タグ「近い」（値は日本語のまま。表示だけ訳す）
+  const NEAR_TAG = '近い';
+  function tagLabel(tag) {
+    return tag === NEAR_TAG ? t('近い') : tag;
+  }
 
   // 画面をまたいで保持する状態
   let searchTimer = null;
@@ -108,7 +117,7 @@
     const fg = chipTextColor(route.color, route.textColor);
     return `<button type="button" data-role="ss-route" data-feed="${esc(route.feedId)}" data-route="${esc(route.routeId)}"
                    class="text-[11px] font-bold px-2.5 py-1 rounded-full shrink-0 active:scale-95 transition-transform"
-                   style="background:${esc(bg)};color:${esc(fg)}">${esc(route.shortName || route.name)}</button>`;
+                   style="background:${esc(bg)};color:${esc(fg)}">${nameHtml(route.shortName || route.name, 'route')}</button>`;
   }
 
   /** 路線を1行1件で並べる行ボタン（左端に路線カラーの帯）。
@@ -121,7 +130,7 @@
       <button type="button" data-role="ss-route" data-feed="${esc(route.feedId)}" data-route="${esc(route.routeId)}"
               class="w-full flex items-center gap-3 text-left bg-white rounded-xl border-2 border-gray-100 hover:border-emerald-400 active:scale-[0.99] transition-all p-3"
               style="border-left:6px solid ${esc(accent)};box-shadow:inset 3px 0 0 rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.05)">
-        <span class="font-bold text-gray-900 truncate">${esc(route.name || route.shortName)}</span>
+        <span class="font-bold text-gray-900 truncate">${nameHtml(route.name || route.shortName, 'route')}</span>
         <svg class="w-4 h-4 text-gray-300 shrink-0 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>
       </button>`;
   }
@@ -130,9 +139,9 @@
   function spotLinkLabel(url) {
     try {
       const host = new URL(url).hostname.replace(/^www\./, '');
-      return `公式サイト（${host}）を見る`;
+      return t('公式サイト（{host}）を見る', { host });
     } catch {
-      return '公式サイトを見る';
+      return t('公式サイトを見る');
     }
   }
 
@@ -200,7 +209,7 @@
   async function render() {
     if (!root()) return;
     const seq = ++renderSeq;
-    setTitle('スポット検索', 'Spot Search');
+    setTitle(t('スポット検索'), 'Spot Search');
 
     const state = readState();
 
@@ -214,20 +223,20 @@
 
     root().innerHTML = `
       <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-bold text-emerald-900">スポット検索</h2>
-        <a href="/" data-spa class="text-sm font-bold text-emerald-700">メニューへ戻る</a>
+        <h2 class="text-xl font-bold text-emerald-900">${esc(t('スポット検索'))}</h2>
+        <a href="/" data-spa class="text-sm font-bold text-emerald-700">${esc(t('メニューへ戻る'))}</a>
       </div>
       <div class="bg-white rounded-2xl shadow-sm border-2 border-emerald-200 p-5">
-        <label class="block text-sm font-bold text-gray-700 mb-2" for="ss-input">スポット・バス停・路線で検索</label>
+        <label class="block text-sm font-bold text-gray-700 mb-2" for="ss-input">${esc(t('スポット・バス停・路線で検索'))}</label>
         <input id="ss-input" type="search" autocomplete="off"
-               placeholder="漢字・ひらがな・ローマ字で入力（例：松本城 / まつもとじょう / matsumoto）"
+               placeholder="${esc(t('漢字・ひらがな・ローマ字で入力（例：松本城 / まつもとじょう / matsumoto）'))}"
                class="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-emerald-500 focus:outline-none font-bold">
-        <p class="text-[11px] text-gray-500 font-bold mt-2">1文字でも候補が出ます。観光スポットを選ぶと、そのスポット情報と付近のバス停・路線を表示します。</p>
+        <p class="text-[11px] text-gray-500 font-bold mt-2">${esc(t('1文字でも候補が出ます。観光スポットを選ぶと、そのスポット情報と付近のバス停・路線を表示します。'))}</p>
         <div id="ss-suggest" class="mt-3 space-y-1"></div>
         <button type="button" data-role="ss-go-tags"
                 class="mt-3 w-full flex items-center justify-center gap-1.5 text-sm font-bold text-emerald-800 bg-emerald-50 border-2 border-emerald-200 rounded-xl px-4 py-2.5 hover:bg-emerald-100 active:scale-[0.99] transition-all">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M7 7h.01M7 3h5a2 2 0 011.414.586l7 7a2 2 0 010 2.828l-5 5a2 2 0 01-2.828 0l-7-7A2 2 0 013 10V5a2 2 0 012-2z"/></svg>
-          名称がわからないときはタグで探す
+          ${esc(t('名称がわからないときはタグで探す'))}
         </button>
       </div>
       <div id="ss-result" class="mt-6"></div>
@@ -294,14 +303,14 @@
     const chips = (stop.routes || []).slice(0, 5).map((route) => {
       const bg = parseHexColor(route.color) ? `#${route.color.replace('#', '')}` : '#e2e8f0';
       const fg = chipTextColor(route.color, route.textColor);
-      return `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full" style="background:${esc(bg)};color:${esc(fg)}">${esc(route.shortName || route.name)}</span>`;
+      return `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full" style="background:${esc(bg)};color:${esc(fg)}">${nameHtml(route.shortName || route.name, 'route')}</span>`;
     }).join('');
     return `
       <button type="button" data-role="ss-pick" data-index="${index}"
               class="w-full text-left bg-white border-2 border-emerald-100 rounded-lg p-3 hover:bg-emerald-50 active:scale-95 transition-all">
         <span class="flex items-center gap-1.5">
-          <span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded shrink-0">バス停</span>
-          <span class="font-bold text-gray-900 truncate">${esc(stop.stopName)}</span>
+          <span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded shrink-0">${esc(t('バス停'))}</span>
+          <span class="font-bold text-gray-900 truncate">${nameHtml(stop.stopName, 'stop')}</span>
         </span>
         ${reading ? `<span class="block text-[11px] text-gray-400">${esc(reading)}</span>` : ''}
         ${chips ? `<span class="flex flex-wrap gap-1 mt-1">${chips}</span>` : ''}
@@ -316,8 +325,8 @@
         ${photo ? `<img src="${esc(photo)}" alt="" class="w-10 h-10 rounded-lg object-cover shrink-0">` : ''}
         <span class="min-w-0">
           <span class="flex items-center gap-1.5">
-            <span class="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">スポット</span>
-            <span class="font-bold text-gray-900 truncate">${esc(spot.name)}</span>
+            <span class="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">${esc(t('スポット'))}</span>
+            <span class="font-bold text-gray-900 truncate">${I18n.spotNameHtml(spot)}</span>
           </span>
           ${spot.kana ? `<span class="block text-[11px] text-gray-400">${esc(spot.kana)}${spot.romaji ? ` / ${esc(spot.romaji)}` : ''}</span>` : ''}
         </span>
@@ -330,9 +339,9 @@
     return `
       <button type="button" data-role="ss-pick" data-index="${index}"
               class="w-full text-left bg-white border-2 border-emerald-100 rounded-lg p-3 hover:bg-emerald-50 active:scale-95 transition-all flex items-center gap-2">
-        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0" style="background:${esc(bg)};color:${esc(fg)}">路線</span>
-        <span class="font-bold text-gray-900 truncate">${esc(route.name)}</span>
-        <span class="ml-auto text-[11px] font-bold text-emerald-700 shrink-0">リアルタイム時刻表 ›</span>
+        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0" style="background:${esc(bg)};color:${esc(fg)}">${esc(t('路線'))}</span>
+        <span class="font-bold text-gray-900 truncate">${nameHtml(route.name, 'route')}</span>
+        <span class="ml-auto text-[11px] font-bold text-emerald-700 shrink-0">${esc(t('リアルタイム時刻表 ›'))}</span>
       </button>`;
   }
 
@@ -341,7 +350,7 @@
     const spots = data.spots || [];
     const routes = data.routes || [];
     if (stops.length === 0 && spots.length === 0 && routes.length === 0) {
-      box.innerHTML = '<p class="text-xs font-bold text-gray-500 px-1">一致するスポット・バス停・路線がありません。</p>';
+      box.innerHTML = `<p class="text-xs font-bold text-gray-500 px-1">${esc(t('一致するスポット・バス停・路線がありません。'))}</p>`;
       return;
     }
     // 表示順: 観光スポット → バス停 → 路線
@@ -368,12 +377,13 @@
       goToRealtimeTimetable(item.feedId, item.routeId);
       return;
     }
+    // name は結果ページで入力欄に戻す表示用の文字列（英語表示では訳＋日本語）。
     if (item.kind === 'spot') {
-      selected = { kind: 'spot', name: item.name };
+      selected = { kind: 'spot', name: I18n.spotNameText(item) };
       navigate(buildUrl({ spotId: item.spotId }));
       return;
     }
-    selected = { kind: 'stop', name: item.stopName };
+    selected = { kind: 'stop', name: I18n.nameText(item.stopName, 'stop') };
     navigate(buildUrl({ stopKey: item.stopKey }));
   }
 
@@ -416,8 +426,8 @@
     const favoriteKeys = new Set(favoriteStops.map((stop) => stop.stopKey));
     const nearbyOnly = nearbyStops.filter((stop) => !favoriteKeys.has(stop.stopKey));
     const groups = [
-      { label: 'お気に入りバス停', stops: favoriteStops },
-      { label: '近くのバス停', stops: nearbyOnly }
+      { label: t('お気に入りバス停'), stops: favoriteStops },
+      { label: t('近くのバス停'), stops: nearbyOnly }
     ].filter((group) => group.stops.length > 0);
     if (groups.length === 0) {
       box.innerHTML = '';
@@ -447,7 +457,7 @@
     if (!container) return;
     container.innerHTML = `
       <div class="bg-emerald-50 border-2 border-emerald-200 rounded-2xl p-4">
-        <p class="text-sm font-bold text-emerald-900">検索しています...</p>
+        <p class="text-sm font-bold text-emerald-900">${esc(t('検索しています...'))}</p>
       </div>`;
 
     let result;
@@ -461,7 +471,7 @@
       if (seq !== renderSeq) return;
       container.innerHTML = `
         <div class="bg-red-50 border-2 border-red-300 rounded-2xl p-4">
-          <p class="text-sm font-bold text-red-900">スポット検索に失敗しました：${esc(err.message)}</p>
+          <p class="text-sm font-bold text-red-900">${esc(t('スポット検索に失敗しました：{message}', { message: t(err.message) }))}</p>
         </div>`;
       return;
     }
@@ -476,7 +486,7 @@
     // 対象名で検索欄を埋める（?spot= / ?stop= の直リンク・リロードからの復元）
     const input = document.getElementById('ss-input');
     if (input && !input.value.trim() && result.origin && result.origin.name) {
-      input.value = result.origin.name;
+      input.value = result.spot ? I18n.spotNameText(result.spot) : I18n.nameText(result.origin.name, 'stop');
     }
 
     container.innerHTML = result.found ? renderResult(result) : renderNotFound(result);
@@ -495,16 +505,16 @@
       <div class="bg-white rounded-2xl shadow-sm border-2 border-amber-200 overflow-hidden mb-4">
         ${spotPhotoStrip(spot)}
         <div class="p-4">
-          <p class="text-xs text-amber-700 font-bold">スポット情報</p>
-          <p class="text-xl font-bold text-gray-900 mt-0.5">${esc(spot.name)}</p>
+          <p class="text-xs text-amber-700 font-bold">${esc(t('スポット情報'))}</p>
+          <p class="text-xl font-bold text-gray-900 mt-0.5">${I18n.spotNameHtml(spot, { block: true })}</p>
           ${spot.kana ? `<p class="text-[11px] text-gray-400 mt-0.5">${esc(spot.kana)}${spot.romaji ? ` / ${esc(spot.romaji)}` : ''}</p>` : ''}
-          ${spot.hours ? `<p class="text-xs text-gray-500 mt-2">営業時間：${esc(spot.hours)}</p>` : ''}
-          ${spot.stayDuration ? `<p class="text-xs text-gray-500">滞在目安：${esc(spot.stayDuration)}</p>` : ''}
-          ${spot.description ? `<p class="text-sm text-gray-700 mt-2 leading-relaxed">${esc(spot.description)}</p>` : ''}
+          ${I18n.spotField(spot, 'hours') ? `<p class="text-xs text-gray-500 mt-2">${esc(t('営業時間：{value}', { value: I18n.spotField(spot, 'hours') }))}</p>` : ''}
+          ${I18n.spotField(spot, 'stayDuration') ? `<p class="text-xs text-gray-500">${esc(t('滞在目安：{value}', { value: I18n.spotField(spot, 'stayDuration') }))}</p>` : ''}
+          ${I18n.spotField(spot, 'description') ? `<p class="text-sm text-gray-700 mt-2 leading-relaxed">${esc(I18n.spotField(spot, 'description'))}</p>` : ''}
           ${Array.isArray(spot.tags) && spot.tags.length ? `
             <div class="flex flex-wrap gap-1.5 mt-2.5">
               ${spot.tags.map((tag) => `<button type="button" data-role="ss-tag-link" data-tag="${esc(tag)}"
-                   class="text-[11px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-1 hover:bg-emerald-100">#${esc(tag)}</button>`).join('')}
+                   class="text-[11px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-1 hover:bg-emerald-100">#${esc(tagLabel(tag))}</button>`).join('')}
             </div>` : ''}
           ${spot.url ? `
             <a href="${esc(spot.url)}" target="_blank" rel="noopener noreferrer" data-spot-link="${esc(spot.spotId)}"
@@ -522,18 +532,18 @@
   function nearbyStopCardHtml(stop) {
     const reading = [stop.nameHiragana, stop.nameRomaji].filter(Boolean).join(' / ');
     const distanceBadge = stop.isPrimary
-      ? '<span class="text-[10px] font-bold text-emerald-800 bg-emerald-100 border border-emerald-300 rounded px-2 py-1 shrink-0">このバス停</span>'
+      ? `<span class="text-[10px] font-bold text-emerald-800 bg-emerald-100 border border-emerald-300 rounded px-2 py-1 shrink-0">${esc(t('このバス停'))}</span>`
       : (Number.isFinite(stop.walkMinutes)
-        ? `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1 shrink-0">徒歩約${stop.walkMinutes}分（${stop.distanceMeters}m）</span>`
+        ? `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1 shrink-0">${esc(t('徒歩約{min}分（{m}m）', { min: stop.walkMinutes, m: stop.distanceMeters }))}</span>`
         : '');
     const chips = (stop.routes || []).length > 0
       ? `<div class="flex flex-wrap gap-1.5 mt-2">${stop.routes.map(routeChipButton).join('')}</div>`
-      : '<p class="text-[11px] font-bold text-gray-400 mt-2">この付近を通る路線情報がありません。</p>';
+      : `<p class="text-[11px] font-bold text-gray-400 mt-2">${esc(t('この付近を通る路線情報がありません。'))}</p>`;
     return `
       <div class="border-2 ${stop.isPrimary ? 'border-emerald-300' : 'border-gray-200'} rounded-xl p-3">
         <div class="flex items-start justify-between gap-2">
           <a href="/busstop/${encodeURIComponent(stop.stopKey)}" data-spa class="min-w-0">
-            <span class="block font-bold text-gray-900 underline decoration-dotted underline-offset-2 hover:text-emerald-700 truncate">${esc(stop.stopName)}</span>
+            <span class="block font-bold text-gray-900 underline decoration-dotted underline-offset-2 hover:text-emerald-700 truncate">${nameHtml(stop.stopName, 'stop')}</span>
             ${reading ? `<span class="block text-[11px] text-gray-400 truncate">${esc(reading)}</span>` : ''}
           </a>
           ${distanceBadge}
@@ -550,7 +560,7 @@
     const routesSection = (result.routes || []).length > 0
       ? `
         <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-100 p-4 mb-4">
-          <p class="text-xs font-bold text-gray-500 mb-2">この周辺を通る路線（タップでリアルタイム時刻表）</p>
+          <p class="text-xs font-bold text-gray-500 mb-2">${esc(t('この周辺を通る路線（タップでリアルタイム時刻表）'))}</p>
           <div class="space-y-2">${result.routes.map(routeRowButton).join('')}</div>
         </div>`
       : '';
@@ -559,23 +569,26 @@
       ? `
         <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-100 p-4">
           <div class="flex items-center justify-between mb-2">
-            <p class="text-xs font-bold text-gray-500">周辺のバス停（半径${Math.round(result.radiusMeters)}m）</p>
-            <span class="text-[10px] font-bold text-gray-400">バス停名タップでバス停ページへ</span>
+            <p class="text-xs font-bold text-gray-500">${esc(t('周辺のバス停（半径{m}m）', { m: Math.round(result.radiusMeters) }))}</p>
+            <span class="text-[10px] font-bold text-gray-400">${esc(t('バス停名タップでバス停ページへ'))}</span>
           </div>
           <div class="space-y-2">${stops.map(nearbyStopCardHtml).join('')}</div>
         </div>`
       : `
         <div class="bg-yellow-50 border-2 border-yellow-300 rounded-2xl p-4">
-          <p class="text-sm font-bold text-yellow-900">この付近（半径${Math.round(result.radiusMeters)}m）にバス停が見つかりませんでした。</p>
+          <p class="text-sm font-bold text-yellow-900">${esc(t('この付近（半径{m}m）にバス停が見つかりませんでした。', { m: Math.round(result.radiusMeters) }))}</p>
         </div>`;
 
+    const originHtml = result.spot
+      ? I18n.spotNameHtml(result.spot)
+      : (result.origin ? nameHtml(result.origin.name, 'stop') : esc(result.query));
     const header = `
       <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-100 p-4 mb-4">
-        <p class="text-sm font-bold text-gray-900">${esc(result.origin ? result.origin.name : result.query)}</p>
+        <p class="text-sm font-bold text-gray-900">${originHtml}</p>
         <p class="text-xs font-bold text-gray-500 mt-1">
-          ${result.spot ? '観光スポット' : 'バス停'}を中心に、付近のバス停と路線を表示しています。
+          ${esc(result.spot ? t('観光スポットを中心に、付近のバス停と路線を表示しています。') : t('バス停を中心に、付近のバス停と路線を表示しています。'))}
           ${result.resolvedFrom === 'fuzzy-spot' || result.resolvedFrom === 'fuzzy-stop'
-            ? '<br>入力した文字列に近いものを選んでいます。候補から選ぶとより正確になります。' : ''}
+            ? `<br>${esc(t('入力した文字列に近いものを選んでいます。候補から選ぶとより正確になります。'))}` : ''}
         </p>
       </div>`;
 
@@ -585,7 +598,7 @@
       ${routesSection}
       ${stopsSection}
       <p class="text-[11px] text-gray-500 font-bold mt-4 px-1">
-        時刻・路線はGTFSデータに基づく目安です。実際のダイヤは事業者にご確認ください。
+        ${esc(t('時刻・路線はGTFSデータに基づく目安です。実際のダイヤは事業者にご確認ください。'))}
       </p>
     `;
   }
@@ -595,23 +608,23 @@
     const stopButtons = (suggestions.stops || []).map((stop) => `
       <button type="button" data-role="ss-use-stop" data-key="${esc(stop.stopKey)}"
               class="w-full text-left bg-white border-2 border-yellow-200 rounded-lg px-3 py-2 font-bold text-sm hover:bg-yellow-50">
-        ${esc(stop.stopName)}
+        ${nameHtml(stop.stopName, 'stop')}
       </button>`).join('');
     const spotButtons = (suggestions.spots || []).map((spot) => `
       <button type="button" data-role="ss-use-spot" data-id="${esc(spot.spotId)}"
               class="w-full text-left bg-white border-2 border-yellow-200 rounded-lg px-3 py-2 font-bold text-sm hover:bg-yellow-50">
-        ${esc(spot.name)}
+        ${I18n.spotNameHtml(spot)}
       </button>`).join('');
 
     return `
       <div class="bg-yellow-50 border-2 border-yellow-300 rounded-2xl p-5">
         <p class="text-sm font-bold text-yellow-900">
-          ${result.reason === 'spot-not-found' || result.reason === 'stop-not-found'
-            ? '指定のスポットが見つかりませんでした。'
-            : `「${esc(result.query)}」に一致するスポット・バス停が見つかりませんでした。`}
+          ${esc(result.reason === 'spot-not-found' || result.reason === 'stop-not-found'
+            ? t('指定のスポットが見つかりませんでした。')
+            : t('「{query}」に一致するスポット・バス停が見つかりませんでした。', { query: result.query }))}
         </p>
         ${stopButtons || spotButtons ? `
-          <p class="text-xs font-bold text-yellow-900 mt-3 mb-2">もしかして</p>
+          <p class="text-xs font-bold text-yellow-900 mt-3 mb-2">${esc(t('もしかして'))}</p>
           <div class="space-y-2">${spotButtons}${stopButtons}</div>` : ''}
       </div>`;
   }
@@ -649,13 +662,13 @@
 
     root().innerHTML = `
       <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-bold text-emerald-900">タグ検索</h2>
-        <button type="button" data-role="ss-back-name" class="text-sm font-bold text-emerald-700">名称検索へ</button>
+        <h2 class="text-xl font-bold text-emerald-900">${esc(t('タグ検索'))}</h2>
+        <button type="button" data-role="ss-back-name" class="text-sm font-bold text-emerald-700">${esc(t('名称検索へ'))}</button>
       </div>
       <div class="bg-white rounded-2xl shadow-sm border-2 border-emerald-200 p-5">
-        <p class="text-sm font-bold text-gray-700">タグでスポットを絞り込む</p>
-        <p class="text-[11px] text-gray-500 font-bold mt-1">タグを選ぶと下に結果が出ます。複数選ぶと「すべてに当てはまる」スポットに絞られます。</p>
-        <input id="ss-tag-filter" type="search" autocomplete="off" placeholder="タグを絞り込む"
+        <p class="text-sm font-bold text-gray-700">${esc(t('タグでスポットを絞り込む'))}</p>
+        <p class="text-[11px] text-gray-500 font-bold mt-1">${esc(t('タグを選ぶと下に結果が出ます。複数選ぶと「すべてに当てはまる」スポットに絞られます。'))}</p>
+        <input id="ss-tag-filter" type="search" autocomplete="off" placeholder="${esc(t('タグを絞り込む'))}"
                class="mt-3 w-full px-3 py-2 border-2 border-gray-200 rounded-xl focus:border-emerald-500 focus:outline-none font-bold text-sm">
         <div id="ss-tag-chips" class="mt-3 flex flex-wrap gap-2"></div>
         <div id="ss-tag-selected" class="mt-3"></div>
@@ -692,20 +705,20 @@
     async function toggleTag(name) {
       const has = selectedTags.includes(name);
       if (has) {
-        if (name === '近い') tagSearchLocation = null;
-        setTags(selectedTags.filter((t) => t !== name));
+        if (name === NEAR_TAG) tagSearchLocation = null;
+        setTags(selectedTags.filter((tag) => tag !== name));
         return;
       }
-      if (name === '近い') {
+      if (name === NEAR_TAG) {
         // 「近い」は現在地が必要。許可されなければ選択しない。
-        const chip = document.querySelector('[data-role="ss-tag-chip"][data-tag="近い"]');
-        if (chip) chip.textContent = '近い（現在地を取得中…）';
+        const chip = document.querySelector(`[data-role="ss-tag-chip"][data-tag="${NEAR_TAG}"]`);
+        if (chip) chip.textContent = t('近い（現在地を取得中…）');
         const loc = typeof window.getUserLocation === 'function' ? await window.getUserLocation() : null;
         if (seq !== renderSeq) return; // 待っている間に画面が変わっていたら何もしない
         if (!loc) {
           renderTagChips(filterInput.value.trim());
           const box = document.getElementById('ss-tag-selected');
-          box.innerHTML = '<p class="text-xs font-bold text-red-600">現在地を取得できませんでした。端末の位置情報を許可してから「近い」を選んでください。</p>';
+          box.innerHTML = `<p class="text-xs font-bold text-red-600">${esc(t('現在地を取得できませんでした。端末の位置情報を許可してから「近い」を選んでください。'))}</p>`;
           return;
         }
         tagSearchLocation = loc;
@@ -717,21 +730,21 @@
       const box = document.getElementById('ss-tag-chips');
       if (!box) return;
       if (!tagListCache) {
-        box.innerHTML = '<p class="text-xs font-bold text-gray-400">タグ一覧を取得できませんでした。</p>';
+        box.innerHTML = `<p class="text-xs font-bold text-gray-400">${esc(t('タグ一覧を取得できませんでした。'))}</p>`;
         return;
       }
       const nq = (filterText || '').toLowerCase();
-      const near = tagListCache.nearTag || { name: '近い' };
+      const near = tagListCache.nearTag || { name: NEAR_TAG };
       const dbTags = (tagListCache.tags || []);
       const items = [];
-      if (!nq || near.name.toLowerCase().includes(nq)) {
+      if (!nq || near.name.toLowerCase().includes(nq) || tagLabel(near.name).toLowerCase().includes(nq)) {
         items.push({ name: near.name, special: true });
       }
-      for (const t of dbTags) {
-        if (!nq || t.name.toLowerCase().includes(nq)) items.push({ name: t.name, spotCount: t.spotCount });
+      for (const tag of dbTags) {
+        if (!nq || tag.name.toLowerCase().includes(nq)) items.push({ name: tag.name, spotCount: tag.spotCount });
       }
       if (items.length === 0) {
-        box.innerHTML = '<p class="text-xs font-bold text-gray-400">一致するタグがありません。</p>';
+        box.innerHTML = `<p class="text-xs font-bold text-gray-400">${esc(t('一致するタグがありません。'))}</p>`;
         return;
       }
       box.innerHTML = items.map((item) => {
@@ -742,7 +755,7 @@
           : (on ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-gray-200 text-gray-700 hover:border-emerald-400');
         const count = !item.special && Number.isFinite(item.spotCount) ? `<span class="opacity-60 ml-0.5">${item.spotCount}</span>` : '';
         return `<button type="button" data-role="ss-tag-chip" data-tag="${esc(item.name)}" aria-pressed="${on}"
-                   class="${base} ${cls}">${item.special ? '📍 ' : ''}${esc(item.name)}${count}</button>`;
+                   class="${base} ${cls}">${item.special ? '📍 ' : ''}${esc(tagLabel(item.name))}${count}</button>`;
       }).join('');
       box.querySelectorAll('[data-role="ss-tag-chip"]').forEach((btn) => {
         btn.addEventListener('click', () => toggleTag(btn.dataset.tag));
@@ -753,13 +766,13 @@
       const box = document.getElementById('ss-tag-selected');
       if (!box) return;
       if (currentTags().length === 0) {
-        box.innerHTML = '<p class="text-[11px] font-bold text-gray-400">タグを1つ以上選んでください。</p>';
+        box.innerHTML = `<p class="text-[11px] font-bold text-gray-400">${esc(t('タグを1つ以上選んでください。'))}</p>`;
         return;
       }
       box.innerHTML = `
         <div class="flex items-center justify-between gap-2">
-          <p class="text-[11px] font-bold text-gray-500 truncate">選択中：${currentTags().map((t) => `#${esc(t)}`).join(' ')}</p>
-          <button type="button" data-role="ss-tag-clear" class="text-[11px] font-bold text-emerald-700 shrink-0">すべて解除</button>
+          <p class="text-[11px] font-bold text-gray-500 truncate">${esc(t('選択中：{name}', { name: currentTags().map((tag) => `#${tagLabel(tag)}`).join(' ') }))}</p>
+          <button type="button" data-role="ss-tag-clear" class="text-[11px] font-bold text-emerald-700 shrink-0">${esc(t('すべて解除'))}</button>
         </div>`;
       box.querySelector('[data-role="ss-tag-clear"]').addEventListener('click', () => { tagSearchLocation = null; setTags([]); });
     }
@@ -768,7 +781,7 @@
     renderTagSelected();
     if (selectedTags.length > 0) {
       // 直リンク・リロードで「近い」入りのURLが来たら現在地を取り直す
-      if (selectedTags.includes('近い') && !tagSearchLocation && typeof window.getUserLocation === 'function') {
+      if (selectedTags.includes(NEAR_TAG) && !tagSearchLocation && typeof window.getUserLocation === 'function') {
         tagSearchLocation = await window.getUserLocation();
         if (seq !== renderSeq) return;
       }
@@ -786,12 +799,12 @@
 
     container.innerHTML = `
       <div class="bg-emerald-50 border-2 border-emerald-200 rounded-2xl p-4">
-        <p class="text-sm font-bold text-emerald-900">絞り込んでいます...</p>
+        <p class="text-sm font-bold text-emerald-900">${esc(t('絞り込んでいます...'))}</p>
       </div>`;
 
     const params = new URLSearchParams();
     params.set('tags', tags.join(','));
-    if (tags.includes('近い') && tagSearchLocation) {
+    if (tags.includes(NEAR_TAG) && tagSearchLocation) {
       params.set('lat', tagSearchLocation.lat);
       params.set('lon', tagSearchLocation.lng);
     }
@@ -803,7 +816,7 @@
       if (seq !== tagSearchSeq) return;
       container.innerHTML = `
         <div class="bg-red-50 border-2 border-red-300 rounded-2xl p-4">
-          <p class="text-sm font-bold text-red-900">タグ検索に失敗しました：${esc(err.message)}</p>
+          <p class="text-sm font-bold text-red-900">${esc(t('タグ検索に失敗しました：{message}', { message: t(err.message) }))}</p>
         </div>`;
       return;
     }
@@ -812,7 +825,7 @@
     if (!result.found && result.reason === 'no-location') {
       container.innerHTML = `
         <div class="bg-yellow-50 border-2 border-yellow-300 rounded-2xl p-4">
-          <p class="text-sm font-bold text-yellow-900">「近い」で絞り込むには現在地が必要です。端末の位置情報を許可してください。</p>
+          <p class="text-sm font-bold text-yellow-900">${esc(t('「近い」で絞り込むには現在地が必要です。端末の位置情報を許可してください。'))}</p>
         </div>`;
       return;
     }
@@ -821,19 +834,19 @@
     if (spots.length === 0) {
       container.innerHTML = `
         <div class="bg-yellow-50 border-2 border-yellow-300 rounded-2xl p-4">
-          <p class="text-sm font-bold text-yellow-900">選んだタグ（${tags.map((t) => `#${esc(t)}`).join(' ')}）にすべて当てはまるスポットはありませんでした。</p>
+          <p class="text-sm font-bold text-yellow-900">${esc(t('選んだタグ（{tags}）にすべて当てはまるスポットはありませんでした。', { tags: tags.map((tag) => `#${tagLabel(tag)}`).join(' ') }))}</p>
         </div>`;
       return;
     }
 
     const countLabel = result.truncated
-      ? `条件に合うスポット ${result.total}件のうち${spots.length}件を表示`
-      : `条件に合うスポット ${spots.length}件`;
+      ? t('条件に合うスポット {total}件のうち{n}件を表示', { total: result.total, n: spots.length })
+      : t('条件に合うスポット {n}件', { n: spots.length });
     container.innerHTML = `
       <div class="bg-white rounded-2xl shadow-sm border-2 border-gray-100 p-4">
         <p class="text-xs font-bold text-gray-500 mb-2">
-          ${countLabel}${result.near ? `（現在地から半径${Math.round(result.radiusMeters)}m）` : ''}
-          <span class="block text-[10px] font-bold text-gray-400 mt-0.5">カードをタップするとそのスポットのページ（付近のバス停・路線）へ移動します${result.truncated ? '。件数が多いときはタグを追加で絞り込んでください' : ''}</span>
+          ${esc(countLabel)}${result.near ? esc(t('（現在地から半径{m}m）', { m: Math.round(result.radiusMeters) })) : ''}
+          <span class="block text-[10px] font-bold text-gray-400 mt-0.5">${esc(t('カードをタップするとそのスポットのページ（付近のバス停・路線）へ移動します'))}${result.truncated ? esc(t('。件数が多いときはタグを追加で絞り込んでください')) : ''}</span>
         </p>
         <div class="space-y-2">${spots.map(tagResultCardHtml).join('')}</div>
       </div>`;
@@ -848,10 +861,10 @@
     const photo = Array.isArray(spot.photoUrls) && spot.photoUrls[0] ? spot.photoUrls[0] : '';
     const reading = [spot.kana, spot.romaji].filter(Boolean).join(' / ');
     const distance = Number.isFinite(spot.walkMinutes)
-      ? `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1 shrink-0">徒歩約${spot.walkMinutes}分（${spot.distanceMeters}m）</span>`
+      ? `<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1 shrink-0">${esc(t('徒歩約{min}分（{m}m）', { min: spot.walkMinutes, m: spot.distanceMeters }))}</span>`
       : '';
     const tagChips = Array.isArray(spot.tags) && spot.tags.length
-      ? `<span class="flex flex-wrap gap-1 mt-1.5">${spot.tags.slice(0, 6).map((t) => `<span class="text-[10px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">#${esc(t)}</span>`).join('')}</span>`
+      ? `<span class="flex flex-wrap gap-1 mt-1.5">${spot.tags.slice(0, 6).map((tag) => `<span class="text-[10px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">#${esc(tagLabel(tag))}</span>`).join('')}</span>`
       : '';
     return `
       <button type="button" data-role="ss-tag-spot" data-id="${esc(spot.spotId)}"
@@ -859,11 +872,11 @@
         ${photo ? `<img src="${esc(photo)}" alt="" class="w-14 h-14 rounded-lg object-cover shrink-0">` : ''}
         <span class="min-w-0 flex-1">
           <span class="flex items-start justify-between gap-2">
-            <span class="font-bold text-gray-900 truncate">${esc(spot.name)}</span>
+            <span class="font-bold text-gray-900 truncate">${I18n.spotNameHtml(spot)}</span>
             ${distance}
           </span>
           ${reading ? `<span class="block text-[11px] text-gray-400 truncate">${esc(reading)}</span>` : ''}
-          ${spot.hours ? `<span class="block text-[11px] text-gray-500 mt-0.5 truncate">営業時間：${esc(spot.hours)}</span>` : ''}
+          ${I18n.spotField(spot, 'hours') ? `<span class="block text-[11px] text-gray-500 mt-0.5 truncate">${esc(t('営業時間：{value}', { value: I18n.spotField(spot, 'hours') }))}</span>` : ''}
           ${tagChips}
         </span>
         <svg class="w-4 h-4 text-gray-300 shrink-0 self-center" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"></path></svg>

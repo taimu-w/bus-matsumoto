@@ -4,7 +4,7 @@
 
 | テーブル | 役割 |
 |---|---|
-| `routes` | 路線マスタ（`feed_id`でどのGTFSフィード由来かを追跡） |
+| `routes` | 路線マスタ（`feed_id`でどのGTFSフィード由来かを追跡）。`description`はGTFS`route_desc`（リアルタイム時刻表の路線ページに表示。無ければ空） |
 | `feeds` | **フィードの稼働状態**（`last_fetched_at` / `last_status` / `last_error`）と、**前回DBへ取り込んだGTFS ZIPの指紋**（`content_hash`＝ZIP本体のSHA-256、`last_etag` / `last_modified`＝条件付きGET用）。指紋が前回と一致すれば展開も`seed()`も行わない（内容不変でのマスタ全書き換えを避ける）。**指紋の3列は`seed()`が成功した後にだけ書く**（`gtfsFeedManager.commitFeedFingerprint()`）。ダウンロード直後に書くと、`seed()`が失敗した回の指紋が残って以降ずっと「内容不変」と判定され、DBが古いまま固定される。構成（`feed_type` / `url` / `enabled` 等）は`config/feeds.js`が正で、行は`seed.js`がそこからUPSERTする |
 | `route_external_ids` | 外部ID（位置情報CSVの系統ID）⇔GTFS route_idの対応。1行＝1つの`(external_id, route_id)`で**多対多**（1路線に複数の外部ID、1外部IDに複数の路線）。一意性は部分索引`ux_route_external_ids_pair`（`(external_id, route_id)` WHERE `route_id IS NOT NULL`）と`ux_route_external_ids_unmapped`（`(external_id)` WHERE `route_id IS NULL`）。路線名によるあいまい解決はせず、`route_id`（qualified route id）を直接持つ。管理画面「外部IDマッピング」から編集可能。`route_id`が`NULL`の行は「対応するGTFS路線がまだ無い」ことを表し、`note`に理由を残す（同じ外部IDの対応行とは同居させない）。`services/routeExternalIdMapping.js`がTTLキャッシュする（詳細は[feed-config.md](feed-config.md)） |
 | `route_direction_rules` | 位置情報CSVの「方向列の値」⇔GTFS `direction_id`の対応（`route_id`が主キー、qualified route id）。管理画面「方向マッピング」から編集可能。`mode='ignore'`（方向で絞り込まない）／`mode='map'`（`value_map`でCSV値→`direction_id`変換、表に無い値は`fallback`へ）。**行が無い路線は既定で`ignore`（テーブルが空＝全路線ignore、初期投入なし）**。`services/directionRules.js`がTTLキャッシュ（同期アクセサ）、純ロジックは`config/directionMapping.js`（詳細は[feed-config.md](feed-config.md)） |
