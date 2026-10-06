@@ -15,6 +15,11 @@
 //      同じ物理バス停を2回通るとき、1回目（手前のseq_order）がまだ到着済になっていない
 //      うちは2回目以降の同名行を付近入り候補から外す（computeSameNameOrderGate）。
 //      「2回目のバス停通過時刻が1回目の通過時刻になる」誤りを防ぐ。①②③はそのまま維持する。
+//   ⑤ 同名バス停の再訪ゲート：④で1回目が到着済になった後も、1回目の通過時に記録された
+//      GPS点は未消費のまま（GPS_FRESHNESS_MIN）残り続けるため、そのGPS点で2回目へ付近入り・
+//      ベクトル判定してしまうことがある。間に別のバス停を挟む2回目以降の同名行は、
+//      「1回目を離れた」ことが確認できたGPS点より後の点だけで判定する
+//      （computeSameNameRevisitStartIndex）。付近入り・ベクトル判定の両方に適用する。
 //
 // ③で使うETAは、trip_arrival_predictionsに保存されている値をpass()の開始時点で
 // 読み取ったものを使う。パイプラインは 6:pass() → 7:delayCalc() → 8:computeAndStoreAllArrivals()
@@ -124,7 +129,8 @@ async function getActiveAssignments(client) {
 async function getStopMaster(client, assignmentId) {
   const res = await client.query(
     `SELECT p.stop_id, p.seq_order, p.status, p.scheduled_time, s.name, s.lat, s.lon, s.notice,
-            p.nearby_min_distance_meters, p.nearby_min_distance_gps_time, p.nearby_min_distance_gps_time_ts
+            p.nearby_min_distance_meters, p.nearby_min_distance_gps_time, p.nearby_min_distance_gps_time_ts,
+            p.actual_time, p.interpolated
      FROM trip_stop_progress p
      JOIN stops s ON s.id = p.stop_id
      WHERE p.assignment_id = $1
@@ -217,6 +223,104 @@ function computeSameNameOrderGate(stopMaster) {
 }
 
 /**
+ * 実際に観測された「そのバス停に居た時刻」（分）。付近は最接近の観測時刻、到着済は実績時刻。
+ * 線形補間で埋めた到着済は推定値なので使わない（NaN）。
+ */
+function observedMinutesAtStop(stop) {
+  if (stop.status === '付近') return timeStrToMinutes(stop.nearby_min_distance_gps_time);
+  if (stop.status === '到着済' && stop.interpolated !== true) return timeStrToMinutes(stop.actual_time);
+  return NaN;
+}
+
+/**
+ * 【循環線対策⑤（同名バス停の再訪ゲート）— 純粋関数】
+ * ④（computeSameNameOrderGate）は1回目が到着済になった時点でゲートを開けるが、1回目の
+ * 通過時に記録されたGPS点は trip_gps_matches に消費されず GPS_FRESHNESS_MIN の間残り続ける
+ * （付近入りに使った1点以外は消費しない仕様）。1回目と2回目の標柱は120m圏内に収まるほど
+ * 近いため、その古いGPS点で
+ *   ・2回目の行へ付近入りする（ETA制約③が効かない短いループ・ETA未計算時）
+ *   ・間のバス停が到着済になって2回目が「次の未到着」になった瞬間、1回目を挟んで通過した
+ *     GPSペアが2回目の標柱も挟んでいるとしてベクトル判定で到着確定する
+ * と、2回目に1回目の通過時刻が入る（2回目のバス停通過時刻が1回目の通過時刻になる）。
+ *
+ * そこで、間に別のバス停を挟む2回目以降の同名行については、「1回目を離れた」ことが
+ * 確認できたGPS点より後の点だけを判定に使わせる。確認の根拠は次の順に採用する。
+ *   (a) 1回目と2回目の間のバス停に実際の観測（付近の最接近時刻／到着済の実績時刻。
+ *       線形補間は除く）がある → その最も早い時刻より後の点
+ *   (b) (a)が無く1回目が到着済 → 1回目の実績時刻より後で、1回目・2回目どちらの
+ *       判定半径からも外れた最初の点の、次の点以降
+ *   どちらも無ければ、このバッチでは2回目の判定に使える点は無い（次回以降に持ち越す）。
+ * 時刻の比較は分単位（gps_time / actual_time の精度）で、同じ分は「後」とみなさない。
+ *
+ * 同名が無い行・同名の1回目・間にバス停を挟まない連続した同名行（同じ場所で続けて停車）・
+ * 到着済の行は対象外（＝現行の挙動のまま）。
+ *
+ * @param {Array} stopMaster getStopMaster() の行（seq_order・name・status・lat/lon・actual_time・
+ *   interpolated・nearby_min_distance_gps_time）
+ * @param {Array} gpsRows gps_time_ts 昇順のGPS点
+ * @param {number} radiusMeters STOP_RADIUS_METERS
+ * @returns {Map<number, number>} 対象行の seq_order → gpsRows のうち判定に使ってよい最初の
+ *   インデックス（gpsRows.length なら今回は1点も使わない）
+ */
+function computeSameNameRevisitStartIndex(stopMaster, gpsRows, radiusMeters) {
+  const startIdxBySeq = new Map();
+  const rows = gpsRows || [];
+  const rowMinutes = rows.map((g) => timeStrToMinutes(g.gps_time));
+  const bySeq = [...stopMaster].sort((a, b) => a.seq_order - b.seq_order);
+
+  for (let k = 0; k < bySeq.length; k++) {
+    const target = bySeq[k];
+    if (target.status === '到着済') continue;
+
+    let prevIdx = -1;
+    for (let i = k - 1; i >= 0; i--) {
+      if (bySeq[i].name === target.name) {
+        prevIdx = i;
+        break;
+      }
+    }
+    if (prevIdx === -1 || k - prevIdx < 2) continue;
+    const prev = bySeq[prevIdx];
+
+    // (a) 間のバス停で実際に観測された最も早い時刻
+    let leftMin = NaN;
+    for (let i = prevIdx + 1; i < k; i++) {
+      const m = observedMinutesAtStop(bySeq[i]);
+      if (Number.isNaN(m)) continue;
+      if (Number.isNaN(leftMin) || diffMinutesSigned(m, leftMin) < 0) leftMin = m;
+    }
+
+    let startIdx = rows.length;
+    if (!Number.isNaN(leftMin)) {
+      for (let j = 0; j < rows.length; j++) {
+        if (!Number.isNaN(rowMinutes[j]) && diffMinutesSigned(rowMinutes[j], leftMin) > 0) {
+          startIdx = j;
+          break;
+        }
+      }
+    } else if (prev.status === '到着済') {
+      // (b) 1回目の実績時刻より後に、1回目・2回目どちらの判定半径からも外れた点
+      const prevMin = timeStrToMinutes(prev.actual_time);
+      if (!Number.isNaN(prevMin)) {
+        for (let j = 0; j < rows.length; j++) {
+          if (Number.isNaN(rowMinutes[j]) || diffMinutesSigned(rowMinutes[j], prevMin) <= 0) continue;
+          const g = rows[j];
+          if (
+            haversineDistanceMeters(g.lat, g.lon, prev.lat, prev.lon) > radiusMeters &&
+            haversineDistanceMeters(g.lat, g.lon, target.lat, target.lon) > radiusMeters
+          ) {
+            startIdx = j + 1;
+            break;
+          }
+        }
+      }
+    }
+    startIdxBySeq.set(target.seq_order, startIdx);
+  }
+  return startIdxBySeq;
+}
+
+/**
  * 【付近入り(entry)】判定アルゴリズム本体（①②③）は従来のpassStep1And3から変更していない。
  * 変わったのは判定結果の意味づけだけ：「到着済に確定」ではなく「付近状態に入る（最初の
  * 近接観測）」を表す候補を返す。到着済・付近いずれかの状態のバス停は、既に確定済みか
@@ -252,9 +356,13 @@ function passStepEntry(assignment, stopMaster, gpsRows, radiusMeters, etaByStopI
   // その先の同名の行（2回目以降の通過）を付近入り候補から外す（詳細は computeSameNameOrderGate）。
   const sameNameOrderGate = computeSameNameOrderGate(stopMaster);
 
+  // 【循環線対策⑤（同名バス停の再訪ゲート）】2回目以降の同名行は、1回目を離れたことが
+  // 確認できたGPS点より後の点でしか付近入りさせない（詳細は computeSameNameRevisitStartIndex）。
+  const sameNameRevisitStartIdx = computeSameNameRevisitStartIndex(stopMaster, gpsRows, radiusMeters);
+
   const tentativeMatches = [];
 
-  for (const gps of gpsRows) {
+  for (const [gpsIdx, gps] of gpsRows.entries()) {
     const gpsMin = timeStrToMinutes(gps.gps_time);
     const minSinceStart = !Number.isNaN(startMin) && !Number.isNaN(gpsMin) ? gpsMin - startMin : NaN;
 
@@ -273,6 +381,10 @@ function passStepEntry(assignment, stopMaster, gpsRows, radiusMeters, etaByStopI
 
       // 【循環線対策④（同名バス停の通過順序）】1回目がまだ到着済でない同名の2回目以降は取らない
       if (sameNameOrderGate.has(stop.seq_order)) continue;
+
+      // 【循環線対策⑤（同名バス停の再訪ゲート）】1回目の通過時に残ったGPS点では2回目を取らない
+      const revisitStartIdx = sameNameRevisitStartIdx.get(stop.seq_order);
+      if (revisitStartIdx !== undefined && gpsIdx < revisitStartIdx) continue;
 
       // 【距離制約】STOP_RADIUS_METERS以内のバス停だけを候補とする
       const dist = haversineDistanceMeters(gps.lat, gps.lon, stop.lat, stop.lon);
@@ -863,7 +975,12 @@ async function processAssignmentPass(client, assignment, { radiusMeters, marginM
     .map((c) => c.seqOrder);
   const vectorTargetStop = findNextUnarrivedStop(stopMaster, confirmedSeqThisBatch);
   if (vectorTargetStop && !confirmedThisBatch.has(vectorTargetStop.stop_id)) {
-    const vectorMatch = findVectorConfirmation(gpsRes.rows, vectorTargetStop);
+    // 【循環線対策⑤（同名バス停の再訪ゲート）】対象が2回目以降の同名行なら、1回目を離れたことが
+    // 確認できたGPS点より後の点だけで判定する（1回目を挟んで通過したペアで確定させないため）。
+    const revisitStartIdx = computeSameNameRevisitStartIndex(stopMaster, gpsRes.rows, radiusMeters)
+      .get(vectorTargetStop.seq_order);
+    const vectorGpsRows = revisitStartIdx === undefined ? gpsRes.rows : gpsRes.rows.slice(revisitStartIdx);
+    const vectorMatch = findVectorConfirmation(vectorGpsRows, vectorTargetStop);
     if (vectorMatch) {
       // 到着判定の根拠（arrival_evidence用）。ログに出しているのと同じ値を残す
       // （前後GPS点の座標・時刻／P1-P2距離／各点とバス停の距離／線分とバス停の距離／内積／線分内位置t）。
@@ -997,6 +1114,7 @@ module.exports = {
   shouldConfirmDeparture,
   passStepEntry,
   computeSameNameOrderGate,
+  computeSameNameRevisitStartIndex,
   passStepConfirm,
   buildNearbyTrackingState,
   findNextUnarrivedStop,

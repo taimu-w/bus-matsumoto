@@ -4,6 +4,7 @@ const {
   shouldConfirmDeparture,
   passStepEntry,
   computeSameNameOrderGate,
+  computeSameNameRevisitStartIndex,
   passStepConfirm,
   buildNearbyTrackingState,
   findNextUnarrivedStop,
@@ -325,7 +326,11 @@ test('passStepEntry: 往路の新井橋が未到着なら、GPSが復路側に�
 });
 
 test('passStepEntry: 往路の新井橋が到着済になれば、復路側の新井橋へ通常どおり付近入りできる', () => {
-  const stopMaster = loopStopMaster({ 14: { status: '到着済', actual_time: '6:13' } });
+  // 間のバス停（藤井）を通過済み＝往路の新井橋を離れたことが確認できている状態（循環線対策⑤）
+  const stopMaster = loopStopMaster({
+    14: { status: '到着済', actual_time: '6:13' },
+    15: { status: '到着済', actual_time: '6:15' }
+  });
   const gpsRows = [
     { id: 1, gps_time: '6:20', gps_time_ts: '2026-08-25T06:20:00+09:00', lat: 36.24315, lon: 137.99945 }
   ];
@@ -333,6 +338,113 @@ test('passStepEntry: 往路の新井橋が到着済になれば、復路側の�
   assert.equal(matches.length, 1);
   assert.equal(matches[0].seqOrder, 19);
   assert.equal(matches[0].stopId, ARAIBASHI_IN.stop_id);
+});
+
+// --- 循環線対策⑤（同名バス停の再訪ゲート）のテスト ---
+// 往路の新井橋を通過したときのGPS点（未消費のまま GPS_FRESHNESS_MIN 残る）で、
+// 復路の新井橋へ付近入り・ベクトル判定してしまい「2回目の通過時刻が1回目の通過時刻になる」のを防ぐ。
+// 実座標どおり、新井口(西) → 往路の新井橋 → 藤井(東) と走ったときの3点。
+const FIRST_PASS_ROWS = [
+  { id: 1, gps_time: '6:12', gps_time_ts: '2026-08-25T06:12:20+09:00', lat: 36.2423542, lon: 137.9984058 }, // 往路側137m・復路側128m
+  { id: 2, gps_time: '6:13', gps_time_ts: '2026-08-25T06:13:10+09:00', lat: 36.2427682, lon: 138.0000908 }, // 往路側21m・復路側80m
+  { id: 3, gps_time: '6:14', gps_time_ts: '2026-08-25T06:14:10+09:00', lat: 36.2430674, lon: 138.0026626 }  // 往路側254m・復路側295m
+];
+// 藤井(東)から戻ってきて復路の新井橋を通り、新井口(西)へ抜ける3点。
+const RETURN_ROWS = [
+  { id: 4, gps_time: '6:19', gps_time_ts: '2026-08-25T06:19:10+09:00', lat: 36.2432241, lon: 138.0009238 }, // 復路側139m
+  { id: 5, gps_time: '6:20', gps_time_ts: '2026-08-25T06:20:10+09:00', lat: 36.2430441, lon: 137.9990552 }, // 復路側34m
+  { id: 6, gps_time: '6:21', gps_time_ts: '2026-08-25T06:21:10+09:00', lat: 36.2422746, lon: 137.9974462 }  // 復路側201m
+];
+
+test('computeSameNameRevisitStartIndex: 同名が無い通常路線・連続する同名・到着済の行は対象外（現行挙動を変えない）', () => {
+  const normal = [
+    { seq_order: 0, name: 'A', status: '到着済', actual_time: '6:00' },
+    { seq_order: 1, name: 'B', status: '' },
+    { seq_order: 2, name: 'C', status: '' }
+  ];
+  assert.equal(computeSameNameRevisitStartIndex(normal, FIRST_PASS_ROWS, 120).size, 0);
+
+  // 間にバス停を挟まない同名（同じ場所で続けて停車）は従来どおり
+  const consecutive = [
+    { seq_order: 0, name: 'A', status: '到着済', actual_time: '6:00' },
+    { seq_order: 1, name: 'A', status: '' },
+    { seq_order: 2, name: 'B', status: '' }
+  ];
+  assert.equal(computeSameNameRevisitStartIndex(consecutive, FIRST_PASS_ROWS, 120).size, 0);
+
+  // 2回目が既に到着済なら対象外
+  const done = loopStopMaster({ 14: { status: '到着済', actual_time: '6:13' }, 19: { status: '到着済', actual_time: '6:20' } });
+  assert.equal(computeSameNameRevisitStartIndex(done, FIRST_PASS_ROWS, 120).has(19), false);
+});
+
+test('computeSameNameRevisitStartIndex: 1回目を離れた確認が取れないうちは、2回目の判定に使える点は無い', () => {
+  // 往路の新井橋は到着済だが、藤井は未到着で、GPSもまだ新井橋の圏内（1回目の通過中）
+  const stopMaster = loopStopMaster({ 14: { status: '到着済', actual_time: '6:13' } });
+  const rows = FIRST_PASS_ROWS.slice(0, 2);
+  assert.equal(computeSameNameRevisitStartIndex(stopMaster, rows, 120).get(19), rows.length);
+});
+
+test('computeSameNameRevisitStartIndex: 間のバス停の観測があれば、その時刻より後の点から使える（同じ分は含めない）', () => {
+  const rows = [...FIRST_PASS_ROWS, ...RETURN_ROWS];
+  const arrived = loopStopMaster({
+    14: { status: '到着済', actual_time: '6:13' },
+    15: { status: '到着済', actual_time: '6:15' }
+  });
+  assert.equal(computeSameNameRevisitStartIndex(arrived, rows, 120).get(19), 3); // 6:19の点から
+
+  const nearby = loopStopMaster({
+    14: { status: '到着済', actual_time: '6:13' },
+    15: { status: '付近', nearby_min_distance_gps_time: '6:19' }
+  });
+  assert.equal(computeSameNameRevisitStartIndex(nearby, rows, 120).get(19), 4); // 6:19は同じ分なので6:20の点から
+
+  // 線形補間で埋めた到着済は推定値なので根拠にしない（→ (b) GPSが両方の半径を出た点で判定）
+  const interpolated = loopStopMaster({
+    14: { status: '到着済', actual_time: '6:13' },
+    15: { status: '到着済', actual_time: '6:13', interpolated: true }
+  });
+  assert.equal(computeSameNameRevisitStartIndex(interpolated, rows, 120).get(19), 3); // 6:14の点の次から
+});
+
+test('computeSameNameRevisitStartIndex: 間のバス停を取りこぼしても、1回目・2回目どちらの半径も出た点の次から使える', () => {
+  const stopMaster = loopStopMaster({ 14: { status: '到着済', actual_time: '6:13' } });
+  const rows = [...FIRST_PASS_ROWS, ...RETURN_ROWS];
+  assert.equal(computeSameNameRevisitStartIndex(stopMaster, rows, 120).get(19), 3);
+});
+
+test('passStepEntry: 往路の新井橋の通過時に残ったGPS点では、復路の新井橋へ付近入りしない', () => {
+  const stopMaster = loopStopMaster({ 14: { status: '到着済', actual_time: '6:13' } });
+  const matches = passStepEntry({ start_time: '6:00' }, stopMaster, FIRST_PASS_ROWS, 120, null);
+  assert.equal(matches.filter((m) => m.seqOrder === 19).length, 0);
+});
+
+test('passStepEntry: 復路で戻ってきたGPS点では、復路の新井橋へ実際の通過時刻で付近入りする', () => {
+  const stopMaster = loopStopMaster({ 14: { status: '到着済', actual_time: '6:13' } });
+  const matches = passStepEntry({ start_time: '6:00' }, stopMaster, [...FIRST_PASS_ROWS, ...RETURN_ROWS], 120, null);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].seqOrder, 19);
+  assert.equal(matches[0].gpsTime, '6:20');
+});
+
+test('ベクトル判定: 往路の新井橋を挟んだGPSペアでは、復路の新井橋を到着確定しない', () => {
+  // 藤井まで到着済 → 次の未到着は復路の新井橋（seq19）。往路通過時の点はゲートで外れる。
+  const stopMaster = loopStopMaster({
+    14: { status: '到着済', actual_time: '6:13' },
+    15: { status: '到着済', actual_time: '6:15' }
+  });
+  const target = findNextUnarrivedStop(stopMaster);
+  assert.equal(target.seq_order, 19);
+  // ゲート無しだと往路通過時のペア（6:12→6:13）で確定してしまう配置であること
+  assert.ok(findVectorConfirmation(FIRST_PASS_ROWS, target));
+
+  const startIdx = computeSameNameRevisitStartIndex(stopMaster, FIRST_PASS_ROWS, 120).get(target.seq_order);
+  assert.equal(findVectorConfirmation(FIRST_PASS_ROWS.slice(startIdx), target), null);
+
+  const rows = [...FIRST_PASS_ROWS, ...RETURN_ROWS];
+  const startIdx2 = computeSameNameRevisitStartIndex(stopMaster, rows, 120).get(target.seq_order);
+  const result = findVectorConfirmation(rows.slice(startIdx2), target);
+  assert.ok(result);
+  assert.equal(result.actualTime, '6:19'); // 復路で戻ってきたときのペア（6:19→6:20）で確定
 });
 
 test('passStepEntry: 同名バス停が無い通常配置では従来どおり最近傍へ付近入りする（回帰防止）', () => {

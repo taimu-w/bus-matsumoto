@@ -1669,7 +1669,7 @@ compose の healthcheck 単体ではコンテナの自動再起動までは行�
 - 便クローズの二重実行対策（行ロック・`UNIQUE (daily_trip_id, assignment_id)`）
 - `updateSegmentStats` の二重集計対策（`FOR UPDATE SKIP LOCKED`・原子的UPSERT）
 - GTFS reseed パス（`seed()` の冪等性、trip_index ずれ）
-- 実GPSトレースに対する `pass()` の通過判定（循環線対策①②③④、ベクトル判定）
+- 実GPSトレースに対する `pass()` の通過判定（循環線対策①②③④⑤、ベクトル判定）
 - 割り当て → 再割り当て → クローズ の一連のライフサイクル
 
 これらは「うっかり再発させやすい実際のバグへの回避策」（CLAUDE.md 冒頭）そのものなのに、
