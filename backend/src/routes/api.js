@@ -1688,6 +1688,24 @@ router.get('/timetable', async (req, res) => {
       [routeId, serviceDate]
     );
 
+    // 最後に担当車両だった割り当てが「終点まで走り切って終了」（GPS途絶時の終点到着救済を含む
+    // ＝finishService.SUCCESS_END_REASONS）した便。リアルタイム時刻表は、時刻表上まだ走行中の
+    // 時間帯でも、この便を時刻表どおりの表示（リアルタイム非対応）に回さない。
+    // GPS途絶で打ち切られた便はここに入らないため、時刻表どおりの表示が出る。
+    const lastAssignedRes = await pool.query(
+      `SELECT DISTINCT ON (a.daily_trip_id) a.daily_trip_id, a.state, a.end_reason
+       FROM trip_vehicle_assignments a
+       JOIN daily_trips d ON d.id = a.daily_trip_id
+       WHERE d.route_id = $1 AND d.service_date = $2 AND a.role = 'assigned'
+       ORDER BY a.daily_trip_id, a.became_assigned_at DESC NULLS LAST, a.id DESC`,
+      [routeId, serviceDate]
+    );
+    const completedTripIds = new Set(
+      lastAssignedRes.rows
+        .filter((r) => r.state === 'ended' && SUCCESS_END_REASONS.has(r.end_reason))
+        .map((r) => r.daily_trip_id)
+    );
+
     const byTrip = new Map();
     for (const [index, t] of trips.rows.entries()) {
       byTrip.set(t.id, {
@@ -1696,6 +1714,7 @@ router.get('/timetable', async (req, res) => {
         directionId: t.direction_id,
         headsign: t.headsign || null,
         startTime: t.start_time,
+        realtimeCompleted: completedTripIds.has(t.id),
         // 「リアルタイム非対応」便から便詳細ページ（時刻表表示）へ遷移するためのGTFS識別子
         feedId: t.feed_id || null,
         gtfsRouteId: t.feed_id ? unqualifyRouteId(routeId, t.feed_id) : null,

@@ -728,6 +728,8 @@ function createBusCard(bus) {
  * 「今走っているはず」の便（時刻表上、始発〜終点の間に現在時刻が含まれる）のうち、
  * /api/buses に対応する割り当てが無い（GPS未検知・GPS途絶による便打ち切り等で
  * リアルタイム追跡できていない）便を、時刻表どおりの参考情報として表示する。
+ * 終点まで走り切って終了した便（GPS途絶時の終点到着救済を含む。/api/timetable の
+ * realtimeCompleted）は、時刻表上まだ走行中の時間帯でも運行を終えているので出さない。
  * リアルタイム運行情報にある「〇〇に到着済」相当の表示は「〇〇付近」にとどめ、
  * 遅延・定刻表示は行わない（時刻表由来の推測に過ぎないため）。 */
 function parseScheduleMinutes(timeStr) {
@@ -760,6 +762,7 @@ function computeUnsupportedTrips(timetable, buses) {
 
   return (timetable || []).filter((trip) => {
     if (trackedTripIds.has(trip.tripId)) return false;
+    if (trip.realtimeCompleted) return false;
     const stops = (trip.stops || []).filter((s) => s.scheduledTime);
     if (stops.length === 0) return false;
     const sorted = stops.slice().sort((a, b) => a.seqOrder - b.seqOrder);

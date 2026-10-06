@@ -14,7 +14,17 @@
 
 運行終了は条件①③④のみで判定します（「終了エリア到達」＝直近GPSが終点から一定距離以内、という判定は循環線・往復線の途中で誤発火するため持ちません）。
 
-条件④で担当割り当てを打ち切ると（`end_reason = 'GPS更新停止'`。救済判定で終点到着が確認できた場合は`SUCCESS_END_REASONS`扱いになりこれには入らない）、管理画面「異常アラート」に`gpsLostTrip`（GPS途絶で便打ち切り）が当日中は出続けます。車両単位の`staleGps`が`status='inactive'`になった時点で消える（＝実質1〜2分しか出ない）のに対し、`gpsLostTrip`は打ち切られた割り当て（`daily_trips`と同じく`DAILY_TRIP_RETENTION_DAYS`＝既定7日残る）をアンカーにするため、GPSが復旧した後でも「いつ・どこで途絶し、何分後にどこで復旧したか」「時刻表のどこまで進んでいたか」を地図で検証できます（`GET /api/admin/gps-outage/:assignmentId`。走行経路は`GPS_LOG_RETENTION_HOURS`＝既定48時間を過ぎると空になります）。
+条件④で担当割り当てを打ち切ると（`end_reason = 'GPS更新停止'`。救済判定で終点到着が確認できた場合は`SUCCESS_END_REASONS`扱いになりこれには入らない）、次の`reassignOrphanTrips()`が始発時刻時点の候補車両を担当へ昇格させ、便を続けます（[vehicle-assignment.md](vehicle-assignment.md)）。昇格できる候補が居なければ便をクローズします（便の終了）。利用者画面では次のように扱います。
+
+| 担当車両の終わり方 | リアルタイム時刻表・バスマップ（リアルタイム表示） | リアルタイム時刻表の時刻表どおりの表示（「リアルタイム非対応」カード・基本表示の時刻表推定便） |
+|---|---|---|
+| GPS途絶（`GPS更新停止`）→ 候補を昇格 | 昇格した車両で出し続ける | 出さない（担当が空になってから昇格するまでの最大1ポーリング周期だけは出る） |
+| GPS途絶（`GPS更新停止`）→ 候補なしで便を終了 | 出さない | 時刻表上の始発〜終点の時間帯に出す |
+| 終点到着（`最終バス停到着済`）・GPS途絶時の終点到着救済 | 出さない | 出さない（`/api/timetable`の`realtimeCompleted = true`） |
+
+時刻表どおりの表示はフロント（`app.js`の`computeUnsupportedTrips()`）が「`/api/buses`に対応する担当が無く、時刻表上いま走行中の便」から組み立てます。`realtimeCompleted`は最後に担当だった割り当てが`SUCCESS_END_REASONS`で終了しているかで、これを見ないと終点に定刻より早く着いた便が、定刻の終点時刻まで「リアルタイム非対応」で出続けます。
+
+GPS途絶で打ち切った場合は、管理画面「異常アラート」に`gpsLostTrip`（GPS途絶で便打ち切り）が当日中は出続けます。車両単位の`staleGps`が`status='inactive'`になった時点で消える（＝実質1〜2分しか出ない）のに対し、`gpsLostTrip`は打ち切られた割り当て（`daily_trips`と同じく`DAILY_TRIP_RETENTION_DAYS`＝既定7日残る）をアンカーにするため、GPSが復旧した後でも「いつ・どこで途絶し、何分後にどこで復旧したか」「時刻表のどこまで進んでいたか」を地図で検証できます（`GET /api/admin/gps-outage/:assignmentId`。走行経路は`GPS_LOG_RETENTION_HOURS`＝既定48時間を過ぎると空になります）。
 
 **2段階到着判定（[pass-detection.md](pass-detection.md)）では、終点は`付近`のまま条件①が成立しないまま止まり続けることがあります。** 終点は到着後にバスがそのまま停車し続けることが多く、`DEPARTURE_MARGIN_METERS`分だけ離れる（＝到着確定のトリガー）が起きないためです。この場合は条件④（GPS途絶）が成立した際に、`endAssignment()`が`state='ended'`にする直前に`付近`のまま残っている終点を記録済みの最小距離の観測時刻で強制的に`到着済`へ昇格させます（`interpolated=FALSE`）。終点が`付近`まで来ていればその観測値を優先して昇格させます（`''`のままなら直近の生GPS時刻へフォールバックし`interpolated=TRUE`）。
 

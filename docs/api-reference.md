@@ -24,7 +24,7 @@
 | GET | `/api/i18n/names?lang=en` | 多言語表示用の名称辞書（[i18n.md](i18n.md)）。`{ lang, stops, routes, headsigns, agencies }`で、各辞書は`{ 日本語名: [表示名, source] }`（`source`は`gtfs`＝translations.txtの訳／`romaji`＝ローマ字表記・かなからの変換）。訳もかなも無い名前は載らない。`lang=ja`（または省略）は空の辞書。`lang`が言語タグの形式でなければ400。`Cache-Control: max-age=600` |
 | GET | `/api/stops` | 指定路線（`routeId`必須）のバス停マスタ。方向・通過順に並び、標柱の`gtfs_stop_id`を含む（路線図マップで1路線選択時のバス停表示・乗り場別ページへの遷移に使用） |
 | GET | `/api/stops/search` | バス停名の部分一致検索（全路線対応） |
-| GET | `/api/timetable` | 本日運行対象の便の時刻表（`daily_trips`ベース。frequencies由来の仮想便も含む） |
+| GET | `/api/timetable` | 本日運行対象の便の時刻表（`daily_trips`ベース。frequencies由来の仮想便も含む）。各便の`realtimeCompleted`は、最後に担当だった割り当てが終点到着（GPS途絶時の終点到着救済を含む`SUCCESS_END_REASONS`）で終了していれば`true`。リアルタイム時刻表はこの便を時刻表どおりの表示（「リアルタイム非対応」）に回さない。GPS途絶で終了した便は`false` |
 | GET | `/api/buses` | **担当車両が割り当てられている当日便のリアルタイム運行状況＋到着予測**（`trip_arrival_predictions`から読み出すだけ。計算はパイプライン側でプリコンピュート済み → [eta-prediction-algorithm.md](eta-prediction-algorithm.md)）。候補車両は公開しない。各バスの`vehicleProfile`は管理画面「車両詳細情報（公開）」の登録内容（未登録なら`null`、[vehicle-profiles.md](vehicle-profiles.md)）。管理画面「リアルタイム休止」中の路線は`{ buses: [], realtimeSuspended: true, suspensionReason }`を返す（[realtime-suspension.md](realtime-suspension.md)） |
 | GET | `/api/buses-for-map` | バスマップ用の走行中バス位置（担当車両のみ・到着予測なしの軽量版）。`routeId`は任意（qualified route id）で、省略時（および`routeId=all`）は全路線を返す。利用者向けバスマップの「路線で絞り込み」セレクトで路線を選んだときだけ付く。リアルタイム休止中の路線のバスは除外し（認証済みの管理画面リクエストは除外しない）、`suspendedRouteIds`（休止中のqualified route id一覧）を常に添える。各バスにバスアイコン用の`vehicleProfile`と、アイコンを進行方向へ向けるための`heading`（方位角。真北=0・時計回り。アイコン未登録・算出不可なら`null`）を載せる |
 | GET | `/api/service-status` | アルピコ交通の運行状況（1時間ごとにスクレイピングしてキャッシュ済み） |
