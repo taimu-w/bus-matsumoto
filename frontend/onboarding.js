@@ -27,8 +27,8 @@
 
   const SLIDES = [
     {
-      badge: 'はじめての方へ',
-      title: 'バスタイムへようこそ',
+      badge: '使い方',
+      title: 'バスタイム',
       body: '松本市内の路線バスが「いま どこ？」「あと 何分？」がひと目でわかるサイトです。よく使う機能をかんたんに紹介します。',
       svg: SVG_BUS, wrap: 'bg-blue-50', fg: 'text-blue-700'
     },
