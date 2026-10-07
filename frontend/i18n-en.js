@@ -532,7 +532,6 @@
 
     /* ---------- チュートリアル（onboarding.js） ---------- */
     '使い方': 'Welcome',
-    'バスタイム': 'Welcome to BusTime',
     '松本市内の路線バスが「いま どこ？」「あと 何分？」がひと目でわかるサイトです。よく使う機能をかんたんに紹介します。':
       'See at a glance where Matsumoto\'s buses are now and how many minutes until they arrive. Here is a quick tour of the main features.',
     '走っているバスの位置と遅れ': 'Where buses are and how late',
